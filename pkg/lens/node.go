@@ -187,9 +187,10 @@ func buildNode(name string, rv reflect.Value, depth int) *Node {
 			if child == nil {
 				continue
 			}
-			// Amount formatting depends on the field name, not just the
-			// type, so it is applied here rather than in the type registry.
-			if note, ok := enrichAmountField(f.Name, rv.Field(i)); ok {
+			// Field-name formatting (amounts, TTLs, etc.) depends on the field
+			// name, not just the type, so it is applied here rather than in
+			// the type registry.
+			if note, ok := enrichField(f.Name, rv.Field(i)); ok {
 				child.Note = note
 			}
 			n.Children = append(n.Children, child)

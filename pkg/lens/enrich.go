@@ -23,23 +23,20 @@ import (
 // picks it up at once. See docs/architecture.md.
 type Enricher func(rv reflect.Value) (display string, raw any, ok bool)
 
-// enricherFor maps a concrete XDR type to its Enricher. It is populated once
-// at init and read-only thereafter, so it needs no synchronisation.
-var enricherFor map[reflect.Type]Enricher
-
-func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}):        enrichAccountID,
-		reflect.TypeOf(xdr.MuxedAccount{}):     enrichMuxedAccount,
-		reflect.TypeOf(xdr.Asset{}):            enrichAsset,
-		reflect.TypeOf(xdr.ChangeTrustAsset{}): enrichChangeTrustAsset,
-		reflect.TypeOf(xdr.TrustLineAsset{}):   enrichTrustLineAsset,
-		reflect.TypeOf(xdr.TimePoint(0)):       enrichTimePoint,
-		reflect.TypeOf(xdr.Duration(0)):        enrichDuration,
-		reflect.TypeOf(xdr.Hash{}):             enrichHash,
-		reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
-		reflect.TypeOf(xdr.Signature{}):        enrichSignature,
-	}
+// enricherFor maps a concrete XDR type to its Enricher. It is initialized
+// at package load time so feature files can register enrichers in their
+// own init() functions without init-order issues.
+var enricherFor = map[reflect.Type]Enricher{
+	reflect.TypeOf(xdr.AccountId{}):        enrichAccountID,
+	reflect.TypeOf(xdr.MuxedAccount{}):     enrichMuxedAccount,
+	reflect.TypeOf(xdr.Asset{}):            enrichAsset,
+	reflect.TypeOf(xdr.ChangeTrustAsset{}): enrichChangeTrustAsset,
+	reflect.TypeOf(xdr.TrustLineAsset{}):   enrichTrustLineAsset,
+	reflect.TypeOf(xdr.TimePoint(0)):       enrichTimePoint,
+	reflect.TypeOf(xdr.Duration(0)):        enrichDuration,
+	reflect.TypeOf(xdr.Hash{}):             enrichHash,
+	reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
+	reflect.TypeOf(xdr.Signature{}):        enrichSignature,
 }
 
 // enrich looks up and applies the Enricher registered for rv's type.
@@ -152,6 +149,7 @@ func enrichDuration(rv reflect.Value) (string, any, bool) {
 // Int64 type, so the field name is the only available signal. Anything not
 // listed here is left as a plain integer, which is the safe default: showing
 // a sequence number as "12345.0000000" would be worse than showing it raw.
+// Additional fields may be registered by feature files during init.
 var amountFields = map[string]bool{
 	"Amount":           true,
 	"StartingBalance":  true,
@@ -168,6 +166,17 @@ var amountFields = map[string]bool{
 	"Balance":          true,
 	"FeeCharged":       true,
 	"ClaimableBalance": true,
+	// ConfigSettingEntry fee/rent fields (all stroop-denominated Int64)
+	"FeeRatePerInstructionsIncrement": true,
+	"FeeDiskReadLedgerEntry":          true,
+	"FeeWriteLedgerEntry":             true,
+	"FeeDiskRead1Kb":                  true,
+	"RentFee1KbSorobanStateSizeLow":   true,
+	"RentFee1KbSorobanStateSizeHigh":  true,
+	"FeeHistorical1Kb":                true,
+	"FeeContractEvents1Kb":            true,
+	"FeeTxSize1Kb":                    true,
+	"FeeWrite1Kb":                     true,
 }
 
 // enrichAmountField applies stroop formatting when a field is known to carry
@@ -182,6 +191,25 @@ func enrichAmountField(fieldName string, rv reflect.Value) (string, bool) {
 		return "", false
 	}
 	return amount.String(v) + " (stroops: " + strconv.FormatInt(int64(v), 10) + ")", true
+}
+
+// fieldNotes maps a field name to a function that produces an additional
+// human-friendly note for that field. Unlike amountFields, these renderers
+// receive the full reflected value and can handle any type. Feature files
+// register their notes during init.
+var fieldNotes = map[string]func(reflect.Value) (string, bool){}
+
+// enrichField applies all field-name-based notes: stroop amounts (via
+// enrichAmountField) and any additional notes registered in fieldNotes.
+// It is called by the walker after the type-based enricher.
+func enrichField(fieldName string, rv reflect.Value) (string, bool) {
+	if note, ok := enrichAmountField(fieldName, rv); ok {
+		return note, true
+	}
+	if fn, ok := fieldNotes[fieldName]; ok {
+		return fn(rv)
+	}
+	return "", false
 }
 
 // isEnumType reports whether t is a generated XDR enum. Enums carry a

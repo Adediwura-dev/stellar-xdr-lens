@@ -213,6 +213,53 @@ Two rules, both enforced by tests:
   codes across the 28 protocol enums by reflection and fails if any lacks an
   entry. When a new protocol version adds a code, that test tells you its name.
 
+## Ledger upgrades and protocol votes
+
+Ledger upgrade votes (carried in `StellarValue.upgrades` and `LedgerHeader.ledgerUpgrade`
+as `UpgradeType` opaque bytes) are decoded by an enricher registered for
+`xdr.UpgradeType`. The enricher attempts to `SafeUnmarshal` the bytes as
+`xdr.LedgerUpgrade`. On success, the hex bytes remain the machine `Value` and a
+one-line human summary becomes the `Note` (e.g. `protocol version 21`,
+`base fee 100 stroops (0.0000100 XLM)`). Unknown or malformed votes decline,
+falling back to the generic hex rendering.
+
+Protocol configuration entries (`ConfigSettingEntry`) are decoded by registering
+the union type at priority 5 (same as other ledger-entry payloads). The union's
+21 arms — scalar limits, compute/ledger-cost/historical/events/bandwidth
+settings, cost-param arrays, state-archival TTLs, eviction iterator, parallel
+compute, SCP timing, and the protocol-23 freeze-bypass arms — all render
+structurally.
+
+Two enrichers add human-friendly notes:
+
+1. **Fee/rent fields** — ten `Int64` fields across the ledger-cost, compute,
+   historical-data, events, bandwidth, and ledger-cost-ext arms are registered
+   in `amountFields` so they render as XLM amounts with the raw stroops in
+   parentheses (e.g. `FeeDiskReadLedgerEntry: 1563  0.0001563 (stroops: 1563)`).
+   Negative values (e.g. `RentFee1KbSorobanStateSizeLow: -17000`) are handled
+   correctly.
+
+2. **TTL/duration fields** — four `Uint32` ledger-count fields in
+   `StateArchivalSettings` (`MaxEntryTtl`, `MinTemporaryTtl`,
+   `MinPersistentTtl`, `LiveSorobanStateSizeWindowSamplePeriod`) are registered
+   in the new `fieldNotes` map. They render an approximate wall-clock duration
+   at the protocol's default 5s target close time (e.g. `3110400  ≈180.0 days
+   (at 5s per ledger)`).
+
+The freeze-bypass arms (`FrozenLedgerKeys`, `FrozenLedgerKeysDelta`,
+`FreezeBypassTxs`, `FreezeBypassTxsDelta`) carry `EncodedLedgerKey` — an
+`opaque <>` that the protocol guarantees is a valid `LedgerKey`. An enricher for
+`EncodedLedgerKey` decodes it with `SafeUnmarshal` and produces a one-line
+summary identifying the key type and its identifying value (account ID, trustline
+asset, offer ID, data name, contract ID, etc.). The raw hex remains the machine
+value; the summary is the note.
+
+Cost-model arrays (`ContractCostParams`) render structurally: each entry shows
+`ConstTerm` and `LinearTerm` (the coefficients of the `const + linear×n` cost
+formula). The array index corresponds to the `ContractCostType` enum ordinal;
+mapping indices to names is intentionally not done because the enum grows with
+protocol versions and a positional mapping could mislead on older/newer networks.
+
 ## Explain, and why it reads the Node tree
 
 `explainOperationResult` needs the type-specific result code buried in an
