@@ -121,6 +121,24 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
+`lens decode --type OfferEntry` decodes a DEX order book offer (a ledger entry
+or a standalone `OfferEntry` blob) into a readable summary, with prices rendered
+as `n/d` fractions:
+
+```console
+$ lens decode --type OfferEntry "$OFFER"
+OfferEntry
+├─ SellerId: GAISEM2EKVTHPCEZVK54ZXPO74ABCIRTIRKWM54ITGVLXTG5537QAQZ5
+├─ OfferId: 42
+├─ Selling: USDC:GAQSEIZEEUTCOKBJFIVSYLJOF4YDCMRTGQ2TMNZYHE5DWPB5HY7UAIOK
+├─ Buying: native
+├─ Amount: 70000000  7.0000000 (stroops: 70000000)
+├─ Price: 7/3 (= 2.3333333)
+├─ Flags: 1
+└─ Ext
+   └─ V: 0
+```
+
 ### `lens diff` — what changed?
 
 ```console

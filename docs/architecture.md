@@ -161,6 +161,20 @@ returning a misleading string.
 The registry is populated once in `init` and read-only afterwards, so it needs
 no locking.
 
+### Offer entries and price fractions
+
+`pkg/lens/offer_entry.go` teaches the tool about DEX order book offers:
+
+- `xdr.Price` renders as an `n/d` fraction with its decimal value, e.g.
+  `Price: 7/3 (= 2.3333333)`. A zero denominator is malformed, so the enricher
+  declines and the generic walker renders the raw numerator and denominator
+  instead of dividing by zero.
+- `xdr.OfferEntry` is already registered (priority 5) so `lens decode --type
+  OfferEntry` decodes a ledger offer and renders its seller as a strkey
+  address, its assets in `CODE:ISSUER` form (`native` for XLM), its amount in
+  stroops, its price as a fraction, and its flags. An offer embedded in a
+  `LedgerEntry` decodes the same way at `Data.Offer`.
+
 ### Field-name enrichment
 
 Some renderings depend on the field name rather than the type. XDR models

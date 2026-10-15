@@ -77,6 +77,11 @@ func TestDecodeCommand(t *testing.T) {
 			args:        []string{"decode", "--candidates", "AAAAAA=="},
 			wantContain: []string{"Memo", "Asset", "types matched"},
 		},
+		{
+			name:        "offer entry ledger type",
+			args:        []string{"decode", "--type", "OfferEntry", fixture(t, "offer_entry")},
+			wantContain: []string{"OfferEntry", "OfferId", "7/3 (= 2.3333333)", "GAISEM2EKVTHPCEZVK54ZXPO74ABCIRTIRKWM54ITGVLXTG5537QAQZ5"},
+		},
 	}
 
 	for _, tc := range tests {

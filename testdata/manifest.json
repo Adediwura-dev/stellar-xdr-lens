@@ -38,6 +38,50 @@
       "fee_bump": true,
       "envelope_file": "tx_soroban.env.txt",
       "result_file": "tx_soroban.res.txt"
+    },
+    "offer_entry": {
+      "tx_hash": null,
+      "description": "synthetic DEX offer entry: sell 7.0000000 USDC:GAQSE…UAIOK for native XLM at 7/3 (= 2.3333333), offer id 42, passive flag",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "offer_entry.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
+    },
+    "price": {
+      "tx_hash": null,
+      "description": "synthetic price fraction 7/3 (= 2.3333333)",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "price.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
+    },
+    "price_zero": {
+      "tx_hash": null,
+      "description": "synthetic malformed price 1/0 (zero denominator) used to exercise the degrading enricher path",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "price_zero.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
+    },
+    "ledger_entry_offer": {
+      "tx_hash": null,
+      "description": "synthetic ledger entry of type Offer carrying offer id 42, used to verify offers decode inside LedgerEntry.Data",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "ledger_entry_offer.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
     }
   }
 }
