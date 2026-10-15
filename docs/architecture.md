@@ -28,12 +28,17 @@ and lets the differ work without knowing what it is comparing.
 cmd/lens/              main; wires os.Args to internal/cli and maps errors to exit codes
 internal/cli/          cobra commands — deliberately thin
   root.go              command tree, global flags
-  decode.go            decode + types commands
+  decode.go            decode + types commands (--hex, --multi, --yaml, --wasm)
+  encode.go            encode command for YAML/JSON specs
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
   input.go             argument / --file / stdin resolution
 pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
+  hex_input.go         hexadecimal decoding, validation, and conversions
+  multi_stream.go      concatenated newline-separated stream decoder
+  wasm_disasm.go       embedded WebAssembly disassembler and signature inspector
+  yaml_encode.go       reversible YAML-to-XDR and XDR-to-YAML serialization
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
   explain.go           Summary, Outcome, per-operation descriptions
@@ -249,3 +254,40 @@ The suite deliberately targets properties that would break the tool if violated:
   (`TestExplainPairAttributesFailureToOperation`);
 - JSON output is deterministic and omits nulls;
 - every result code has a real explanation.
+
+## Hexadecimal Input Support
+
+[`hex_input.go`](../pkg/lens/hex_input.go) provides first-class support for raw hexadecimal inputs alongside base64.
+It supports:
+- Stripping optional `0x`/`0X` prefixes and whitespace.
+- Strict even-length validation and character validation returning `ErrInvalidHex` and `ErrOddLengthHex`.
+- Direct decoding through `DecodeHex`, `DecodeHexAs`, and `DetectHex`.
+- High-performance conversions between hex, raw binary bytes, and base64.
+- CLI integration via `lens decode --hex <hex_string>` and automatic fallback.
+
+## Concatenated Multi-Stream Decoding
+
+[`multi_stream.go`](../pkg/lens/multi_stream.go) handles batch decoding of newline-separated XDR streams from files or standard input pipelines:
+- Processes multi-record streams line-by-line without buffering the entire dataset.
+- Skips empty lines and comment lines (prefixed with `#` or `//`).
+- Supports mixed streams with both base64 and hexadecimal payloads.
+- Supports stopping on the first corrupt record or collecting non-fatal decode errors (`WithMultiStreamStopOnError`).
+- Formats outputs as multi-record trees, JSON arrays, NDJSON (`--compact`), or multi-document YAML (`---`).
+
+## Embedded WebAssembly Bytecode Disassembler
+
+[`wasm_disasm.go`](../pkg/lens/wasm_disasm.go) provides offline inspection and disassembly of Soroban smart contract bytecode:
+- Decodes WASM binary headers, type signatures, imports, function declarations, exports, and custom sections (`contractspecv0`, etc.).
+- Resolves function export indices and matches them to complete function signatures `(params) -> (results)`.
+- Disassembles function bodies into readable WebAssembly bytecode instructions (`local.get`, `i32.add`, `call`, etc.).
+- Extracts embedded WASM bytecode directly from `ContractCodeEntry` or `InvokeHostFunctionOp` (such as `UploadContractWasm`) inside transaction envelopes.
+- CLI integration via `lens decode --wasm`.
+
+## Reversible YAML / JSON Serialization
+
+[`yaml_encode.go`](../pkg/lens/yaml_encode.go) provides clean, human-readable YAML configuration support for encoding and decoding:
+- Converts between YAML and deterministic JSON, cleanly handling arbitrary data types and maps.
+- Decodes YAML documents directly into base64 or hexadecimal XDR (`YAMLToXDR`).
+- Reversibly formats decoded XDR values or Node trees into clean, indented YAML (`ValueToYAML`, `XDRToYAML`).
+- CLI integration via `lens encode` command for compiling YAML specifications into XDR, and `lens decode --yaml` for emitting YAML trees.
+

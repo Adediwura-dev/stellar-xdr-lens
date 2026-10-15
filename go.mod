@@ -5,6 +5,7 @@ go 1.25
 require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stellar/go-stellar-sdk v0.7.3
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
