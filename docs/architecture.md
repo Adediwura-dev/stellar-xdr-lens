@@ -38,6 +38,10 @@ pkg/lens/              the library; this is the reusable surface
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
+  reason_lookup.go     O(1) short code lookup table (ReasonByCode)
+  protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
+  op_isolator.go       Multi-operation failure isolator (pre-op vs execution pinpointing)
+  trap_reasons.go      Soroban trapped host function diagnostic reason decoder
   diff.go              structural path diff
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
@@ -229,6 +233,77 @@ The rest of `explain.go` uses the concrete SDK types, because
 `Preconditions`, `IsFeeBump`) that already normalise across v0, v1 and fee-bump
 envelopes. Using them is both clearer and more correct than re-deriving that
 logic from the tree.
+
+## Reason lookup table (ReasonByCode)
+
+Downstream consumers (such as `focus` and automated diagnostic linters) frequently
+require O(1) random-access lookups for short canonical result codes without
+performing linear scans or importing raw XDR definitions.
+
+[`reason_lookup.go`](../pkg/lens/reason_lookup.go) provides:
+
+- `lens.ReasonByCode(short string) (Reason, bool)`: thread-safe, case-insensitive
+  O(1) resolution of canonical short codes (e.g. `payment_underfunded`, `tx_bad_seq`).
+- `lens.AllReasons() []Reason`: sorted slice of all registered reasons for enumeration.
+- `lens.ReasonLookupTable() map[string]Reason`: snapshot copy of the full lookup map.
+
+The lookup table is precomputed at initialization and automatically updated
+whenever protocol extension packages register additional result codes.
+
+## Protocol 21+ Error Codes and Explanations
+
+Stellar Protocol 21 and 22 introduce state archival, TTL management, key freezing,
+and expanded Soroban host error semantics. [`protocol21_reasons.go`](../pkg/lens/protocol21_reasons.go)
+provides plain-English diagnostic explanations and actionable remediation hints for:
+
+- **State Archival & Key Freezing**: `tx_frozen_key_accessed` (CAP-0056) when an
+  operation attempts to access an expired, frozen ledger entry.
+- **Soroban State and Fee Codes**: `invoke_host_function_entry_archived`,
+  `invoke_host_function_insufficient_refundable_fee`,
+  `extend_footprint_ttl_insufficient_refundable_fee`, and
+  `restore_footprint_insufficient_refundable_fee`.
+- **Soroban Host Errors**: Full decoders for `xdr.ScError`, mapping error types
+  (`ScErrorTypeSceStorage`, `ScErrorTypeSceBudget`, `ScErrorTypeSceWasmVm`, etc.)
+  and error codes (`ScErrorCodeScecIndexBounds`, `ScErrorCodeScecExceededLimit`, etc.)
+  into descriptive developer-facing errors.
+
+## Multi-Operation Transaction Failure Isolator
+
+Stellar transactions execute atomically. When a transaction contains multiple
+operations, developers need to isolate:
+
+1. **Pre-operation Check Failures**: Transaction-level failures (e.g. `tx_bad_seq`,
+   `tx_bad_auth`, `tx_too_early`, `tx_insufficient_balance`) reject the transaction
+   during header and precondition validation before any operation runs.
+2. **Operation Execution Failures**: The transaction passed pre-operation checks and
+   was applied up to the failing operation index.
+
+[`op_isolator.go`](../pkg/lens/op_isolator.go) inspects envelopes and results to pinpoint:
+
+- The exact zero-based operation index where execution halted (`FailingOpIndex`).
+- The operation type name (`FailingOpType`, e.g. `payment`, `manage_buy_offer`).
+- Whether the failure was a `pre_operation` check failure or an `operation` execution failure.
+- A comprehensive multi-line `DiagnosticReport()` for debugging.
+
+The CLI exposes this via `lens explain --isolate`.
+
+## Soroban Trapped Host Function Diagnostic Decoder
+
+When a Soroban contract call traps, the transaction result code is simply
+`invoke_host_function_trapped` without internal error details. The actionable panic
+string or host abort reason is stored in `DiagnosticEvent` payloads within transaction
+metadata (`TransactionMeta.V3.SorobanMeta.DiagnosticEvents`).
+
+[`trap_reasons.go`](../pkg/lens/trap_reasons.go) correlates trapped invocations with
+diagnostic events to extract:
+
+- **Panic Messages**: Human-readable strings from `log` and `panic` topics/data.
+- **Host & Contract Errors**: Decoded `ScError` values including custom contract error codes.
+- **Contract & Function Identity**: Identifies the contract ID (rendered as strkey `C...`)
+  and function name in the failing execution frame.
+- **Diagnostic Trace**: Chronological trace of diagnostic events leading to the abort.
+
+The CLI exposes this via `lens explain --meta <path-or-base64>`.
 
 ## Testing approach
 
