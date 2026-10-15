@@ -555,3 +555,35 @@ func mapKeys(m map[string]any) []string {
 	sort.Strings(out)
 	return out
 }
+
+func TestDecodeStreamAndCanonical(t *testing.T) {
+	t.Parallel()
+
+	rawFixture := fixture(t, "tx_success.env")
+
+	// 1. Decode with --canonical flag
+	stdout, stderr, err := run(t, "", "decode", "--canonical", rawFixture)
+	if err != nil {
+		t.Fatalf("expected --canonical to succeed on real fixture: %v, stderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "TransactionEnvelope") {
+		t.Errorf("stdout missing TransactionEnvelope: %s", stdout)
+	}
+
+	// 2. Decode with --canonical failure
+	badCanonical := rawFixture + "===" // corrupt padding
+	_, _, err = run(t, "", "decode", "--canonical", badCanonical)
+	if err == nil {
+		t.Errorf("expected error on non-canonical input")
+	}
+
+	// 3. Decode with --stream base64 lines
+	streamInput := rawFixture + "\n" + rawFixture + "\n"
+	stdoutStream, stderrStream, err := run(t, streamInput, "decode", "--stream", "--json", "-")
+	if err != nil {
+		t.Fatalf("expected --stream to succeed: %v, stderr: %s", err, stderrStream)
+	}
+	if strings.Count(stdoutStream, "TransactionEnvelope") < 2 {
+		t.Errorf("expected at least 2 occurrences in stream output, got: %s", stdoutStream)
+	}
+}
