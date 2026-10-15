@@ -121,6 +121,35 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
+### Ledger upgrade votes
+
+Protocol upgrades travel as opaque bytes: `StellarValue.upgrades` carries
+encoded `LedgerUpgrade` votes so consensus nodes can forward ones they do not
+understand. `lens` decodes them where they appear:
+
+```console
+$ lens decode --type StellarValue --file votes.xdr
+StellarValue
+├─ TxSetHash: [26 202 157 122 123 201 199 246 109 239 44 246 156 233 24 163 241 22 124 52 125 219 2 144 174 151 255 29 205 25 24 144]  1aca9d7a7bc9c7f66def2cf69ce918a3f1167c347ddb0290ae97ff1dcd191890
+├─ CloseTime: 1790000000  2026-09-21T14:13:20Z
+├─ Upgrades  [3]
+│  ├─ [0]: 0000000100000015  protocol version 21
+│  ├─ [1]: 0000000400989680  base reserve 10000000 stroops (1.0000000 XLM)
+│  └─ [2]: deadbeef
+└─ Ext
+   └─ V: StellarValueTypeStellarValueBasic
+```
+
+An upgrade unknown to this build keeps its hex form — the same blob a core node
+would forward — and a lone vote decodes directly with `--type LedgerUpgrade`:
+
+```console
+$ lens decode --type LedgerUpgrade "$VOTE"
+LedgerUpgrade
+├─ Type: LedgerUpgradeTypeLedgerUpgradeBaseReserve
+└─ NewBaseReserve: 10000000  1.0000000 (stroops: 10000000)
+```
+
 ### `lens diff` — what changed?
 
 ```console

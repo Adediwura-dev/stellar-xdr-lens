@@ -70,6 +70,9 @@ var registry = []xdrType{
 	{"LedgerKey", func() any { return new(xdr.LedgerKey) }, 75},
 	{"LedgerHeader", func() any { return new(xdr.LedgerHeader) }, 50},
 	{"LedgerHeaderHistoryEntry", func() any { return new(xdr.LedgerHeaderHistoryEntry) }, 45},
+	// ScpValue carries the upgrades a validator voted for; upgrade votes are
+	// otherwise unreachable because the protocol keeps them as opaque bytes.
+	{"StellarValue", func() any { return new(xdr.StellarValue) }, 44},
 
 	// Soroban types.
 	{"ScVal", func() any { return new(xdr.ScVal) }, 40},
@@ -84,6 +87,9 @@ var registry = []xdrType{
 	{"Operation", func() any { return new(xdr.Operation) }, 20},
 	{"OperationResult", func() any { return new(xdr.OperationResult) }, 19},
 	{"Memo", func() any { return new(xdr.Memo) }, 10},
+	// Ledger upgrades are eight bytes in the common arms and rank above Price,
+	// which decodes any pair of int32s and would otherwise win the tie.
+	{"LedgerUpgrade", func() any { return new(xdr.LedgerUpgrade) }, 9},
 	{"Asset", func() any { return new(xdr.Asset) }, 9},
 	{"Price", func() any { return new(xdr.Price) }, 8},
 	{"SignerKey", func() any { return new(xdr.SignerKey) }, 7},

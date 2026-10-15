@@ -68,6 +68,20 @@ func TestDecodeCommand(t *testing.T) {
 			wantContain: []string{"TransactionResult", "TransactionResultCode"},
 		},
 		{
+			name:        "ledger upgrade vote",
+			args:        []string{"decode", "--type", "LedgerUpgrade", fixture(t, "ledger_upgrade_base_reserve")},
+			wantContain: []string{"LedgerUpgradeTypeLedgerUpgradeBaseReserve", "1.0000000 (stroops: 10000000)"},
+		},
+		{
+			name: "stellar value upgrade votes",
+			args: []string{"decode", "--type", "StellarValue", fixture(t, "stellar_value_votes")},
+			wantContain: []string{
+				"protocol version 21",
+				"base reserve 10000000 stroops (1.0000000 XLM)",
+				"deadbeef",
+			},
+		},
+		{
 			name:        "depth limit",
 			args:        []string{"decode", "--depth", "2", fixture(t, "tx_success.env")},
 			wantContain: []string{"hidden"},

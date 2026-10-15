@@ -147,9 +147,10 @@ func enrichDuration(rv reflect.Value) (string, any, bool) {
 	return (time.Duration(d) * time.Second).String(), uint64(d), true
 }
 
-// amountFields are the field names whose xdr.Int64 payload is a stroop
-// amount. XDR models amounts, sequence numbers and offer ids with the same
-// Int64 type, so the field name is the only available signal. Anything not
+// amountFields are the field names whose payload is a stroop amount. XDR
+// models amounts, sequence numbers and offer ids with the same integer types,
+// so the field name is the only available signal. Ledger upgrades carry
+// stroop-denominated protocol parameters as Uint32 union arms. Anything not
 // listed here is left as a plain integer, which is the safe default: showing
 // a sequence number as "12345.0000000" would be worse than showing it raw.
 var amountFields = map[string]bool{
@@ -168,6 +169,8 @@ var amountFields = map[string]bool{
 	"Balance":          true,
 	"FeeCharged":       true,
 	"ClaimableBalance": true,
+	"NewBaseFee":       true,
+	"NewBaseReserve":   true,
 }
 
 // enrichAmountField applies stroop formatting when a field is known to carry
@@ -177,11 +180,23 @@ func enrichAmountField(fieldName string, rv reflect.Value) (string, bool) {
 	if !amountFields[fieldName] {
 		return "", false
 	}
-	v, ok := rv.Interface().(xdr.Int64)
-	if !ok {
+	// Union arms arrive as pointers; unwrap before inspecting the value.
+	for rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return "", false
+		}
+		rv = rv.Elem()
+	}
+	var stroops int64
+	switch v := rv.Interface().(type) {
+	case xdr.Int64:
+		stroops = int64(v)
+	case xdr.Uint32:
+		stroops = int64(v)
+	default:
 		return "", false
 	}
-	return amount.String(v) + " (stroops: " + strconv.FormatInt(int64(v), 10) + ")", true
+	return amount.String(xdr.Int64(stroops)) + " (stroops: " + strconv.FormatInt(stroops, 10) + ")", true
 }
 
 // isEnumType reports whether t is a generated XDR enum. Enums carry a

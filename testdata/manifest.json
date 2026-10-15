@@ -38,6 +38,26 @@
       "fee_bump": true,
       "envelope_file": "tx_soroban.env.txt",
       "result_file": "tx_soroban.res.txt"
+    },
+    "ledger_upgrade_version": {
+      "synthetic": true,
+      "description": "ledger upgrade vote: protocol version 21",
+      "file": "ledger_upgrade_version.txt"
+    },
+    "ledger_upgrade_base_fee": {
+      "synthetic": true,
+      "description": "ledger upgrade vote: base fee 1000 stroops",
+      "file": "ledger_upgrade_base_fee.txt"
+    },
+    "ledger_upgrade_base_reserve": {
+      "synthetic": true,
+      "description": "ledger upgrade vote: base reserve 10000000 stroops",
+      "file": "ledger_upgrade_base_reserve.txt"
+    },
+    "stellar_value_votes": {
+      "synthetic": true,
+      "description": "SCP StellarValue carrying a protocol version vote, a base reserve vote, and one upgrade unknown to this build",
+      "file": "stellar_value_votes.txt"
     }
   }
 }

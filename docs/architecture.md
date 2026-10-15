@@ -36,6 +36,7 @@ pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
+  upgrades.go          ledger upgrade votes → decoded LedgerUpgrade
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   diff.go              structural path diff
@@ -164,11 +165,57 @@ no locking.
 ### Field-name enrichment
 
 Some renderings depend on the field name rather than the type. XDR models
-amounts, sequence numbers and offer ids all as `Int64`, so the only signal that
-a value is an amount is the field it sits in. `amountFields` in `enrich.go`
-lists the known amount fields; anything not listed stays a plain integer,
-because rendering a sequence number as `12345.0000000` would be worse than
-showing it raw.
+amounts, sequence numbers and offer ids with the same integer types, so the
+only signal that a value is an amount is the field it sits in. `amountFields`
+in `enrich.go` lists the known amount fields — both plain `Int64` fields and
+the `Uint32` union arms of a `LedgerUpgrade`, which arrive pointer-wrapped.
+Anything not listed stays a plain integer, because rendering a sequence number
+as `12345.0000000` would be worse than showing it raw.
+
+## Ledger upgrades and protocol votes
+
+Validators vote for ledger upgrades — protocol version bumps, base fee changes,
+base reserve changes — and the protocol carries those votes as opaque bytes:
+`StellarValue.upgrades` is "a vector of encoded `LedgerUpgrade` so that nodes
+can drop unknown steps during consensus". A decoder therefore has to try
+harder than usual. `enrichUpgradeType` in
+[`upgrades.go`](../pkg/lens/upgrades.go) unmarshals each `UpgradeType` as an
+`xdr.LedgerUpgrade` and requires the input to be consumed exactly; a vote that
+does not fit — including an upgrade newer than this build — declines and keeps
+its generic hex rendering.
+
+```
+$ lens decode --type StellarValue "$(cat testdata/stellar_value_votes.txt)"
+StellarValue
+├─ TxSetHash: [26 202 157 122 123 201 199 246 109 239 44 246 156 233 24 163 241 22 124 52 125 219 2 144 174 151 255 29 205 25 24 144]  1aca9d7a7bc9c7f66def2cf69ce918a3f1167c347ddb0290ae97ff1dcd191890
+├─ CloseTime: 1790000000  2026-09-21T14:13:20Z
+├─ Upgrades  [3]
+│  ├─ [0]: 0000000100000015  protocol version 21
+│  ├─ [1]: 0000000400989680  base reserve 10000000 stroops (1.0000000 XLM)
+│  └─ [2]: deadbeef
+└─ Ext
+   └─ V: StellarValueTypeStellarValueBasic
+```
+
+The hex payload stays the machine value and the decoded vote becomes the note,
+so `--json` output remains byte-exact while the tree names the vote.
+
+`LedgerUpgrade` is registered as a type in its own right, so a single vote can
+be decoded directly — which matters because the common arms are only eight
+bytes:
+
+```
+$ lens decode --type LedgerUpgrade "$(cat testdata/ledger_upgrade_base_reserve.txt)"
+LedgerUpgrade
+├─ Type: LedgerUpgradeTypeLedgerUpgradeBaseReserve
+└─ NewBaseReserve: 10000000  1.0000000 (stroops: 10000000)
+```
+
+That eight-byte shape hides one inherent ambiguity worth stating: the wire
+encoding of the base reserve arm is byte-identical to an `ScVal` i32, and any
+eight bytes are also a valid `Price`. Detection ranks `ScVal` first for such
+payloads; `--type LedgerUpgrade` pins the interpretation. Votes nested in a
+`StellarValue` or `LedgerHeader` are unambiguous.
 
 ## Adding a formatter
 
