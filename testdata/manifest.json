@@ -1,7 +1,7 @@
 {
-  "source": "Stellar Mainnet (Horizon: https://horizon.stellar.org)",
-  "captured": "2026-08-03",
-  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content.",
+  "source": "Stellar Mainnet (Soroban RPC: https://soroban-rpc.mainnet.stellar.gateway.fm)",
+  "captured": "2026-10-15",
+  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content. ConfigSettingEntry fixtures captured via getLedgerEntries RPC at ledger 64961092.",
   "fixtures": {
     "tx_failed": {
       "tx_hash": "a6e87c3d8e2ca78e026bf165cf8c3c6423f62c6133c54217804940c32b13e1fe",
@@ -38,6 +38,120 @@
       "fee_bump": true,
       "envelope_file": "tx_soroban.env.txt",
       "result_file": "tx_soroban.res.txt"
+    },
+    "config_setting_0": {
+      "description": "ConfigSettingEntry: ContractMaxSizeBytes (131072 bytes)",
+      "ledger": 57941156,
+      "config_setting_id": "ConfigSettingContractMaxSizeBytes",
+      "file": "config_setting_0.txt"
+    },
+    "config_setting_1": {
+      "description": "ConfigSettingEntry: ContractComputeV0",
+      "ledger": 60993066,
+      "config_setting_id": "ConfigSettingContractComputeV0",
+      "file": "config_setting_1.txt"
+    },
+    "config_setting_2": {
+      "description": "ConfigSettingEntry: ContractLedgerCostV0",
+      "ledger": 60993066,
+      "config_setting_id": "ConfigSettingContractLedgerCostV0",
+      "file": "config_setting_2.txt"
+    },
+    "config_setting_3": {
+      "description": "ConfigSettingEntry: ContractHistoricalDataV0",
+      "ledger": 60993066,
+      "config_setting_id": "ConfigSettingContractHistoricalDataV0",
+      "file": "config_setting_3.txt"
+    },
+    "config_setting_4": {
+      "description": "ConfigSettingEntry: ContractEventsV0",
+      "ledger": 60993066,
+      "config_setting_id": "ConfigSettingContractEventsV0",
+      "file": "config_setting_4.txt"
+    },
+    "config_setting_5": {
+      "description": "ConfigSettingEntry: ContractBandwidthV0",
+      "ledger": 60993066,
+      "config_setting_id": "ConfigSettingContractBandwidthV0",
+      "file": "config_setting_5.txt"
+    },
+    "config_setting_6": {
+      "description": "ConfigSettingEntry: ContractCostParamsCpuInstructions (86 entries)",
+      "ledger": 62447231,
+      "config_setting_id": "ConfigSettingContractCostParamsCpuInstructions",
+      "file": "config_setting_6.txt"
+    },
+    "config_setting_7": {
+      "description": "ConfigSettingEntry: ContractCostParamsMemoryBytes (86 entries)",
+      "ledger": 62447231,
+      "config_setting_id": "ConfigSettingContractCostParamsMemoryBytes",
+      "file": "config_setting_7.txt"
+    },
+    "config_setting_8": {
+      "description": "ConfigSettingEntry: ContractDataKeySizeBytes (250 bytes)",
+      "ledger": 57941156,
+      "config_setting_id": "ConfigSettingContractDataKeySizeBytes",
+      "file": "config_setting_8.txt"
+    },
+    "config_setting_9": {
+      "description": "ConfigSettingEntry: ContractDataEntrySizeBytes (65536 bytes)",
+      "ledger": 57941156,
+      "config_setting_id": "ConfigSettingContractDataEntrySizeBytes",
+      "file": "config_setting_9.txt"
+    },
+    "config_setting_10": {
+      "description": "ConfigSettingEntry: StateArchivalSettings (TTLs: 180d/1d/120d)",
+      "ledger": 59516381,
+      "config_setting_id": "ConfigSettingStateArchival",
+      "file": "config_setting_10.txt"
+    },
+    "config_setting_11": {
+      "description": "ConfigSettingEntry: ContractExecutionLanes (max 2000 tx/ledger)",
+      "ledger": 60993066,
+      "config_setting_id": "ConfigSettingContractExecutionLanes",
+      "file": "config_setting_11.txt"
+    },
+    "config_setting_12": {
+      "description": "ConfigSettingEntry: LiveSorobanStateSizeWindow (30 samples)",
+      "ledger": 64961088,
+      "config_setting_id": "ConfigSettingLiveSorobanStateSizeWindow",
+      "file": "config_setting_12.txt"
+    },
+    "config_setting_13": {
+      "description": "ConfigSettingEntry: EvictionIterator",
+      "ledger": 64961092,
+      "config_setting_id": "ConfigSettingEvictionIterator",
+      "file": "config_setting_13.txt"
+    },
+    "config_setting_14": {
+      "description": "ConfigSettingEntry: ContractParallelComputeV0",
+      "ledger": 60993066,
+      "config_setting_id": "ConfigSettingContractParallelComputeV0",
+      "file": "config_setting_14.txt"
+    },
+    "config_setting_15": {
+      "description": "ConfigSettingEntry: ContractLedgerCostExtV0",
+      "ledger": 61484996,
+      "config_setting_id": "ConfigSettingContractLedgerCostExtV0",
+      "file": "config_setting_15.txt"
+    },
+    "config_setting_16": {
+      "description": "ConfigSettingEntry: ScpTiming (5000ms target close time)",
+      "ledger": 58762517,
+      "config_setting_id": "ConfigSettingScpTiming",
+      "file": "config_setting_16.txt"
+    },
+    "config_setting_17": {
+      "description": "ConfigSettingEntry: FrozenLedgerKeys (3 account keys)",
+      "ledger": 63073409,
+      "config_setting_id": "ConfigSettingFrozenLedgerKeys",
+      "file": "config_setting_17.txt"
+    },
+    "config_setting_19": {
+      "description": "ConfigSettingEntry: FreezeBypassTxs (empty)",
+      "ledger": 62447231,
+      "config_setting_id": "ConfigSettingFreezeBypassTxs",
+      "file": "config_setting_19.txt"
     }
   }
 }
