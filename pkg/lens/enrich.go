@@ -19,27 +19,28 @@ import (
 //
 // Enrichers are the primary extension point of this package. To teach the
 // tool to render a new XDR type nicely, write an Enricher and register it in
-// defaultEnrichers — nothing else needs to change, and every output format
-// picks it up at once. See docs/architecture.md.
+// enricherFor — nothing else needs to change, and every output format picks
+// it up at once. See docs/architecture.md.
 type Enricher func(rv reflect.Value) (display string, raw any, ok bool)
 
 // enricherFor maps a concrete XDR type to its Enricher. It is populated once
-// at init and read-only thereafter, so it needs no synchronisation.
-var enricherFor map[reflect.Type]Enricher
-
-func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}):        enrichAccountID,
-		reflect.TypeOf(xdr.MuxedAccount{}):     enrichMuxedAccount,
-		reflect.TypeOf(xdr.Asset{}):            enrichAsset,
-		reflect.TypeOf(xdr.ChangeTrustAsset{}): enrichChangeTrustAsset,
-		reflect.TypeOf(xdr.TrustLineAsset{}):   enrichTrustLineAsset,
-		reflect.TypeOf(xdr.TimePoint(0)):       enrichTimePoint,
-		reflect.TypeOf(xdr.Duration(0)):        enrichDuration,
-		reflect.TypeOf(xdr.Hash{}):             enrichHash,
-		reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
-		reflect.TypeOf(xdr.Signature{}):        enrichSignature,
-	}
+// during package initialization and read-only thereafter, so it needs no
+// synchronisation.
+//
+// The map is built as a declaration-time literal so that every entry exists
+// before any init function runs, regardless of file order; files that add
+// their own enrichers (see contract_data.go) rely on that guarantee.
+var enricherFor = map[reflect.Type]Enricher{
+	reflect.TypeOf(xdr.AccountId{}):        enrichAccountID,
+	reflect.TypeOf(xdr.MuxedAccount{}):     enrichMuxedAccount,
+	reflect.TypeOf(xdr.Asset{}):            enrichAsset,
+	reflect.TypeOf(xdr.ChangeTrustAsset{}): enrichChangeTrustAsset,
+	reflect.TypeOf(xdr.TrustLineAsset{}):   enrichTrustLineAsset,
+	reflect.TypeOf(xdr.TimePoint(0)):       enrichTimePoint,
+	reflect.TypeOf(xdr.Duration(0)):        enrichDuration,
+	reflect.TypeOf(xdr.Hash{}):             enrichHash,
+	reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
+	reflect.TypeOf(xdr.Signature{}):        enrichSignature,
 }
 
 // enrich looks up and applies the Enricher registered for rv's type.

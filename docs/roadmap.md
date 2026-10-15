@@ -9,13 +9,13 @@ Working and tested:
 - `decode` with automatic type detection, tree and stable JSON output
 - `explain` for envelopes, results, and the two paired together
 - `diff` with path-level structural comparison
-- 25 registered XDR types; all 208 protocol result codes explained
+- 33 registered XDR types; all 208 protocol result codes explained
 - Input from arguments, files or stdin; exit codes suitable for CI
 - No network access anywhere in the library or tests
 
 Known limits, stated plainly:
 
-- **25 types, not ~400.** The registry covers what developers actually paste
+- **33 types, not ~400.** The registry covers what developers actually paste
   into a terminal. Anything else needs a one-line addition.
 - **Soroban values render structurally.** `ScVal` decodes and displays, but
   without a contract spec `lens` cannot name a struct's fields or an enum's

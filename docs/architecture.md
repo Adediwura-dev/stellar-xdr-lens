@@ -19,7 +19,7 @@ base64 ──► detect ──► xdr decode ──► Node tree ──► enric
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 25 registered types at once,
+That is what lets a new output format work for all 33 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## Package layout
@@ -36,6 +36,7 @@ pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
+  contract_data.go     contract data rendering (addresses, durability, storage keys)
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   diff.go              structural path diff
@@ -134,17 +135,25 @@ one `lens decode` shows by default.
 
 ## Adding an enricher
 
-Enrichers turn an XDR value into something a human recognises. They live in
-[`enrich.go`](../pkg/lens/enrich.go) and are registered by concrete type:
+Enrichers turn an XDR value into something a human recognises. They live next
+to the decoder they serve — [`enrich.go`](../pkg/lens/enrich.go) for the core
+types, [`contract_data.go`](../pkg/lens/contract_data.go) for contract data —
+and are registered by concrete type:
 
 ```go
-func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}): enrichAccountID,
-		// add yours here
-	}
+var enricherFor = map[reflect.Type]Enricher{
+	reflect.TypeOf(xdr.AccountId{}): enrichAccountID,
+	// add yours here
 }
+```
 
+A new decoder file registers its own enrichers from an `init` function, e.g.
+`enricherFor[reflect.TypeOf(xdr.ScAddress{})] = enrichScAddress`. The map is a
+declaration-time literal so every core entry exists before any `init` runs,
+regardless of file order, and it is read-only after package initialization —
+so it needs no locking.
+
+```go
 func enrichMyType(rv reflect.Value) (display string, raw any, ok bool) {
 	v, valid := rv.Interface().(xdr.MyType)
 	if !valid {
@@ -158,8 +167,50 @@ Return `ok=false` to fall back to the generic rendering — do this for union ar
 you cannot sensibly render, such as liquidity-pool-share assets, rather than
 returning a misleading string.
 
-The registry is populated once in `init` and read-only afterwards, so it needs
-no locking.
+### Contract data and storage levels
+
+`pkg/lens/contract_data.go` decodes Soroban contract data and makes the three
+storage levels distinguishable in the output:
+
+- `xdr.ContractDataDurability` renders as `persistent` or `temporary` — the
+  durability recorded on the wire — instead of the
+  `ContractDataDurabilityPersistent` constant name.
+- `xdr.ScAddress` renders as its strkey form (`C...` for a contract, `G...` for
+  an account, and the matching forms for muxed accounts, liquidity pools and
+  claimable balances) instead of a discriminant plus a raw 32-byte hash.
+- The special `ScVal` ledger keys render by name: the contract instance key
+  becomes `instance storage key`, and the nonce key becomes `nonce key: 5`,
+  keeping the nonce that callers need. Every other `ScVal` keeps the structural
+  rendering that stays machine-readable without a contract spec.
+
+Instance storage is recorded with persistent durability and can only be
+recognised by its key, so the named instance key is what separates it from an
+ordinary persistent entry:
+
+| Storage level | What the output shows |
+|---|---|
+| instance | `Key: instance storage key` (durability is `persistent` on the wire) |
+| persistent | `Durability: persistent` with an ordinary `ScVal` key |
+| temporary | `Durability: temporary` |
+
+```console
+$ lens decode --type ContractDataEntry --depth 3 "$INSTANCE"
+ContractDataEntry
+├─ Ext
+│  └─ V: 0
+├─ Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3
+├─ Key: instance storage key
+├─ Durability: persistent
+└─ Val
+   ├─ Type: ScValTypeScvContractInstance
+   └─ Instance
+      └─ Executable
+         ... 1 more level(s) hidden
+```
+
+`ContractDataEntry` is registered (priority 5), so `lens decode --type
+ContractDataEntry` decodes a standalone blob, and an entry embedded in a
+`LedgerEntry` decodes the same way at `Data.ContractData`.
 
 ### Field-name enrichment
 
