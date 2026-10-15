@@ -9,12 +9,20 @@ where to make the three changes contributors most often want to make:
 
 ## The pipeline
 
-Everything flows one way:
+Decoding and explaining flows one way:
 
 ```
 base64 ──► detect ──► xdr decode ──► Node tree ──► enrich ──► Formatter ──► output
               │            │             │                        │
         registry      stellar SDK    neutral IR            tree │ json │ text │ diff
+```
+
+Encoding simplified JSON into XDR flows deterministically:
+
+```
+JSON spec ──► schema validate (strict) ──► type coerce ──► xdr build ──► base64 XDR
+                      │                         │               │
+                 validate.go                coerce.go      tx_builder.go / scval_encode.go
 ```
 
 The important property is that **only one stage knows about XDR**. Once a value
@@ -31,6 +39,7 @@ internal/cli/          cobra commands — deliberately thin
   decode.go            decode + types commands
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
+  encode.go            encode command for JSON -> base64 XDR
   input.go             argument / --file / stdin resolution
 pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
@@ -39,6 +48,10 @@ pkg/lens/              the library; this is the reusable surface
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   diff.go              structural path diff
+  validate.go          strict schema validation for JSON templates
+  coerce.go            permissive type coercion & number parsing (stringified numbers, hex, assets)
+  scval_encode.go      ScVal constructor from intuitive JSON literals
+  tx_builder.go        TransactionEnvelope builder from JSON spec
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
     tree.go            colourised tree
@@ -249,3 +262,32 @@ The suite deliberately targets properties that would break the tool if violated:
   (`TestExplainPairAttributesFailureToOperation`);
 - JSON output is deterministic and omits nulls;
 - every result code has a real explanation.
+
+## JSON to XDR Encoding Architecture
+
+The JSON-to-XDR subsystem (`pkg/lens/validate.go`, `pkg/lens/coerce.go`, `pkg/lens/scval_encode.go`, `pkg/lens/tx_builder.go`) enables offline authoring and synthesis of Stellar transactions and Soroban contract values from human-ergonomic JSON specifications.
+
+### Strict Schema Validation (`validate.go`)
+- Zero-dependency schema validation engine reporting all violations across the entire JSON tree.
+- Uses `errors.Is` and `errors.As` compatible `ValidationError` containing explicit JSON path traces (e.g. `operations[0].amount`).
+- In strict mode, unknown properties are flagged to catch silent configuration typos.
+
+### Permissive Type Coercion (`coerce.go`)
+- **Numbers**: Coerces integers, floats, stringified numbers (`"10000000"`), and hex-formatted numbers (`"0x05f5e100"`). Underscores in strings are stripped cleanly.
+- **Amounts**: Coerces decimal XLM amounts (e.g. `"10.5"` XLM to `105000000` stroops) or raw integer stroops.
+- **Addresses & Keys**: Handles standard Ed25519 public keys (`G...`), Muxed Accounts (`M...` or `{address, id}` objects), and Soroban contract addresses (`C...`).
+- **Assets**: Parses canonical string representations (`"native"`, `"XLM"`, `"USDC:GBRP..."`) as well as asset objects.
+- **Prices**: Parses `"n/d"` fraction strings, floats, integers, or `{n, d}` numerator/denominator maps.
+
+### Soroban ScVal Constructor (`scval_encode.go`)
+Ergonomic constructor creating `xdr.ScVal` values from intuitive JSON literals:
+- Primitives: booleans, integers (`i32`, `u32`), strings (`string` or `symbol`), and null (`void`).
+- Tagged objects: typed wrappers such as `{"i64": 100}`, `{"u128": "340282366920938463463374607431768211455"}`, `{"contract_id": "C..."}`, `{"symbol": "transfer"}`.
+- Maps & Vectors: arrays map to `xdr.ScVec`, maps to `xdr.ScMap` with automatic sorting of keys.
+
+### Transaction Envelope Builder (`tx_builder.go`)
+Constructs standard Stellar `xdr.TransactionEnvelope` (V1, V0, or FeeBump):
+- Resolves classic operations (`payment`, `create_account`, `change_trust`, `manage_data`, `manage_buy_offer`, `manage_sell_offer`, etc.) and Soroban operations (`invoke_host_function`, `extend_footprint_ttl`, `restore_footprint`).
+- Translates preconditions (time bounds, ledger bounds, sequence bounds, extra signers) into `PreconditionsV2`.
+- Strict offline guarantee: zero network calls in any builder or encoding path.
+

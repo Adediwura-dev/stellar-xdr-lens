@@ -143,6 +143,33 @@ TransactionResult
 
 Use `--exit-code` to exit non-zero when the values differ, like `diff(1)`.
 
+### `lens encode` — build XDR from JSON
+
+Encode simplified JSON specifications into base64-encoded XDR completely offline:
+
+```console
+# Encode a transaction envelope from a JSON template
+$ lens encode --tx '{
+  "source_account": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
+  "fee": "100",
+  "sequence": "1",
+  "operations": [
+    {
+      "type": "payment",
+      "destination": "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW",
+      "amount": "10000000"
+    }
+  ]
+}'
+
+# Encode Soroban ScVal literals directly
+$ lens encode --scval '{"symbol": "transfer"}'
+$ lens encode --scval '{"vec": [1, 2, 3]}'
+
+# Enforce strict schema validation (rejects unknown properties or invalid fields)
+$ lens encode --strict --file tx_template.json
+```
+
 ### Piping and scripting
 
 `lens` reads from an argument, a `--file`, or stdin, so it composes:
