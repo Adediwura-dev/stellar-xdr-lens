@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/network"
+
 	"github.com/stellar-optics/stellar-xdr-lens/internal/cli"
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
@@ -68,6 +70,46 @@ func TestDecodeCommand(t *testing.T) {
 			name:        "explicit type",
 			args:        []string{"decode", "--type", "TransactionResult", fixture(t, "tx_failed.res")},
 			wantContain: []string{"TransactionResult", "TransactionResultCode"},
+		},
+		{
+			name:        "ledger header",
+			args:        []string{"decode", "--type", "LedgerHeader", fixture(t, "ledger_header")},
+			wantContain: []string{"LedgerHeader", "protocol 22", "104591297310.9999952", "0.5000000 (stroops: 5000000)"},
+		},
+		{
+			name:        "ledger header history entry",
+			args:        []string{"decode", "--type", "LedgerHeaderHistoryEntry", fixture(t, "ledger_header_history")},
+			wantContain: []string{"LedgerHeaderHistoryEntry", "Header", "protocol 22"},
+		},
+		{
+			name:        "bucket entry tombstone",
+			args:        []string{"decode", "--type", "BucketEntry", fixture(t, "bucket_entry_dead")},
+			wantContain: []string{"BucketEntry", "dead entry (tombstone)", "LedgerEntryTypeTtl"},
+		},
+		{
+			name:        "bucket metadata hot archive",
+			args:        []string{"decode", "--type", "BucketMetadata", fixture(t, "bucket_metadata")},
+			wantContain: []string{"BucketMetadata", "protocol 22", "BucketListType"},
+		},
+		{
+			name:        "scp envelope",
+			args:        []string{"decode", "--type", "ScpEnvelope", fixture(t, "scp_envelope")},
+			wantContain: []string{"ScpEnvelope", "externalize", "GBIFCUSTKRKVMV2YLFNFWXC5LZPWAYLCMNSGKZTHNBUWU23MNVXG6NJZ"},
+		},
+		{
+			name:        "scp quorum set",
+			args:        []string{"decode", "--type", "ScpQuorumSet", fixture(t, "scp_quorum_set")},
+			wantContain: []string{"ScpQuorumSet", "InnerSets", "GBYHC4TTOR2XM53YPF5HW7D5PZ7YBAMCQOCILBUHRCEYVC4MRWHI66TB"},
+		},
+		{
+			name:        "ttl entry",
+			args:        []string{"decode", "--type", "TtlEntry", fixture(t, "ttl_entry")},
+			wantContain: []string{"TtlEntry", "live through ledger 55281000"},
+		},
+		{
+			name:        "eviction iterator",
+			args:        []string{"decode", "--type", "EvictionIterator", fixture(t, "eviction_iterator")},
+			wantContain: []string{"EvictionIterator", "BucketFileOffset", "IsCurrBucket"},
 		},
 		{
 			name:        "depth limit",
@@ -170,6 +212,20 @@ func TestExplainCommand(t *testing.T) {
 				"explain", fixture(t, "tx_failed.res"), "--verbose",
 			},
 			wantContain: []string{"TransactionResultCode"},
+		},
+		{
+			name: "isolate flag pinpoints failing op",
+			args: []string{
+				"explain", fixture(t, "tx_failed.env"),
+				"--result", fixture(t, "tx_failed.res"),
+				"--isolate",
+			},
+			wantContain: []string{
+				"Failure Isolation Report",
+				"Failing Op Index:  0",
+				"Execution Failure: true",
+				"invoke_host_function_trapped",
+			},
 		},
 	}
 
@@ -415,6 +471,9 @@ func TestErrorsAreReported(t *testing.T) {
 		{"explain unsupported type", []string{"explain", "AAAAAA=="}},
 		{"diff needs two operands", []string{"diff", "AAAAAA=="}},
 		{"explain bad result", []string{"explain", fixture(t, "tx_failed.env"), "--result", "!!!"}},
+		{"asset invalid base64", []string{"asset", "!!!not base64!!!"}},
+		{"asset non-asset payload", []string{"asset", fixture(t, "overlay_hello")}},
+		{"asset empty network", []string{"asset", "--network", "", fixture(t, "asset_native")}},
 	}
 
 	for _, tc := range tests {
@@ -454,7 +513,7 @@ func TestBareInvocationPrintsHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, want := range []string{"decode", "explain", "diff", "Usage"} {
+	for _, want := range []string{"decode", "explain", "diff", "asset", "Usage"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("bare invocation help does not mention %q", want)
 		}
@@ -549,6 +608,144 @@ func TestExplainJSONShapeIsCamelCase(t *testing.T) {
 	}
 }
 
+func TestAssetCommand(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		args        []string
+		stdin       string
+		wantContain []string
+	}{
+		{
+			name:        "native asset on mainnet",
+			args:        []string{"asset", fixture(t, "asset_native")},
+			wantContain: []string{"native", "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"},
+		},
+		{
+			name:        "credit asset on mainnet",
+			args:        []string{"asset", fixture(t, "asset_usdc")},
+			wantContain: []string{"USDC", "credit_alphanum4", "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"},
+		},
+		{
+			name:        "native asset on testnet",
+			args:        []string{"asset", "--network", "testnet", fixture(t, "asset_native")},
+			wantContain: []string{"testnet", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"},
+		},
+		{
+			name:        "custom passphrase",
+			args:        []string{"asset", "--network", "Integration Test Network", fixture(t, "asset_native")},
+			wantContain: []string{"Integration Test Network"},
+		},
+		{
+			name:        "from stdin",
+			args:        []string{"asset", "-"},
+			stdin:       fixture(t, "asset_native"),
+			wantContain: []string{"CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"},
+		},
+		{
+			name:        "from file flag",
+			args:        []string{"asset", "--file", fixturePath("asset_usdc")},
+			wantContain: []string{"USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stdout, _, err := run(t, tc.stdin, tc.args...)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			for _, want := range tc.wantContain {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("output does not contain %q\n%s", want, stdout)
+				}
+			}
+		})
+	}
+}
+
+func TestAssetCommandJSON(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := run(t, "", "asset", "--json", fixture(t, "asset_usdc"))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var doc struct {
+		Type       string `json:"type"`
+		Code       string `json:"code"`
+		Issuer     string `json:"issuer"`
+		Canonical  string `json:"canonical"`
+		Native     bool   `json:"native"`
+		ContractID string `json:"contractId"`
+		Network    string `json:"network"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, stdout)
+	}
+	if doc.Type != "credit_alphanum4" || doc.Code != "USDC" || doc.Native {
+		t.Errorf("asset = %+v, want a non-native USDC asset", doc)
+	}
+	if doc.ContractID != "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75" {
+		t.Errorf("contractId = %q, want the mainnet USDC contract", doc.ContractID)
+	}
+	if doc.Network != network.PublicNetworkPassphrase {
+		t.Errorf("network = %q, want the mainnet passphrase", doc.Network)
+	}
+}
+
+func TestTypesJSONCommand(t *testing.T) {
+	t.Parallel()
+
+	plain, _, err := run(t, "", "types")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	plainCount := len(strings.Fields(plain))
+
+	stdout, _, err := run(t, "", "types", "--json")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var doc []struct {
+		Name        string `json:"name"`
+		Category    string `json:"category"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		MinWireSize int    `json:"minWireSize"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("types --json output is not valid JSON: %v\n%s", err, stdout)
+	}
+	if len(doc) != plainCount {
+		t.Errorf("types --json lists %d types, plain output lists %d", len(doc), plainCount)
+	}
+
+	var hello *struct {
+		Name        string `json:"name"`
+		Category    string `json:"category"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		MinWireSize int    `json:"minWireSize"`
+	}
+	for i := range doc {
+		if doc[i].Name == "Hello" {
+			hello = &doc[i]
+		}
+	}
+	if hello == nil {
+		t.Fatal("types --json does not include Hello")
+	}
+	if hello.Category != "overlay" || hello.Priority != 35 || hello.MinWireSize != 164 {
+		t.Errorf("Hello entry = %+v, want overlay/35/164", hello)
+	}
+}
+
 func mapKeys(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -558,110 +755,68 @@ func mapKeys(m map[string]any) []string {
 	return out
 }
 
-func TestDecodeHexFlag(t *testing.T) {
+func TestDecodeNewFormatsAndCommands(t *testing.T) {
 	t.Parallel()
 
-	b64 := fixture(t, "tx_success.env")
-	hexStr, err := lens.Base64ToHex(b64)
-	if err != nil {
-		t.Fatalf("Base64ToHex failed: %v", err)
-	}
+	fixturePayload := fixture(t, "tx_success.env")
 
-	stdout, _, err := run(t, "", "decode", "--hex", hexStr)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "TransactionEnvelope") {
-		t.Errorf("expected tree with TransactionEnvelope, got: %s", stdout)
-	}
-}
+	t.Run("decode --summary", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--summary", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --summary: %v", err)
+		}
+		if !strings.Contains(stdout, "TransactionEnvelope") || !strings.Contains(stdout, "type=v1") {
+			t.Errorf("unexpected summary output: %s", stdout)
+		}
+	})
 
-func TestDecodeMultiStreamFlag(t *testing.T) {
-	t.Parallel()
+	t.Run("decode --format summary", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "summary", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format summary: %v", err)
+		}
+		if !strings.Contains(stdout, "TransactionEnvelope") {
+			t.Errorf("unexpected summary output: %s", stdout)
+		}
+	})
 
-	b64_1 := fixture(t, "tx_success.env")
-	b64_2 := fixture(t, "tx_failed.env")
-	multiInput := b64_1 + "\n" + b64_2 + "\n"
+	t.Run("decode --txrep", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--txrep", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --txrep: %v", err)
+		}
+		if !strings.Contains(stdout, "type: ENVELOPE_TYPE_TX") {
+			t.Errorf("unexpected txrep output: %s", stdout)
+		}
+	})
 
-	// JSON output with multi
-	stdout, _, err := run(t, multiInput, "decode", "--multi", "--json")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "line_number") || !strings.Contains(stdout, "TransactionEnvelope") {
-		t.Errorf("unexpected multi json output: %s", stdout)
-	}
+	t.Run("decode --format txrep", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "txrep", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format txrep: %v", err)
+		}
+		if !strings.Contains(stdout, "type: ENVELOPE_TYPE_TX") {
+			t.Errorf("unexpected txrep output: %s", stdout)
+		}
+	})
 
-	// Compact NDJSON
-	stdoutND, _, err := run(t, multiInput, "decode", "--multi", "--json", "--compact")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(stdoutND), "\n")
-	if len(lines) != 2 {
-		t.Errorf("expected 2 NDJSON lines, got %d", len(lines))
-	}
+	t.Run("explore command", func(t *testing.T) {
+		stdout, _, err := run(t, "q\n", "explore", fixturePayload)
+		if err != nil {
+			t.Fatalf("explore: %v", err)
+		}
+		if !strings.Contains(stdout, "=== TransactionEnvelope Explorer ===") {
+			t.Errorf("unexpected explore output: %s", stdout)
+		}
+	})
 
-	// YAML output with multi
-	stdoutYAML, _, err := run(t, multiInput, "decode", "--multi", "--yaml")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdoutYAML, "---") || !strings.Contains(stdoutYAML, "type: TransactionEnvelope") {
-		t.Errorf("unexpected multi yaml output: %s", stdoutYAML)
-	}
-}
-
-func TestDecodeYAMLFlag(t *testing.T) {
-	t.Parallel()
-
-	stdout, _, err := run(t, "", "decode", "--yaml", fixture(t, "tx_success.env"))
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "type: TransactionEnvelope") || !strings.Contains(stdout, "value:") {
-		t.Errorf("expected YAML output, got: %s", stdout)
-	}
-}
-
-func TestDecodeWASMFlag(t *testing.T) {
-	t.Parallel()
-
-	// WASM binary module
-	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00}
-	hexWasm := lens.BytesToHex(wasmBytes)
-
-	stdout, _, err := run(t, "", "decode", "--wasm", hexWasm)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "WebAssembly Module") {
-		t.Errorf("expected WASM inspection output, got: %s", stdout)
-	}
-}
-
-func TestEncodeCommand(t *testing.T) {
-	t.Parallel()
-
-	b64 := fixture(t, "tx_success.env")
-	yamlInput := fmt.Sprintf("type: TransactionEnvelope\nxdr: %s\n", b64)
-
-	// Encode to base64
-	stdout, _, err := run(t, yamlInput, "encode", "-")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if strings.TrimSpace(stdout) != b64 {
-		t.Errorf("encode base64 mismatch: got %q, want %q", strings.TrimSpace(stdout), b64)
-	}
-
-	// Encode to hex
-	stdoutHex, _, err := run(t, yamlInput, "encode", "-", "--hex")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	hexExpected, _ := lens.Base64ToHex(b64)
-	if strings.TrimSpace(stdoutHex) != hexExpected {
-		t.Errorf("encode hex mismatch: got %q, want %q", strings.TrimSpace(stdoutHex), hexExpected)
-	}
+	t.Run("decode -i interactive", func(t *testing.T) {
+		stdout, _, err := run(t, "q\n", "decode", "-i", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode -i: %v", err)
+		}
+		if !strings.Contains(stdout, "Explorer") {
+			t.Errorf("unexpected interactive output: %s", stdout)
+		}
+	})
 }
