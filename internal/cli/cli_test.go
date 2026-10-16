@@ -211,6 +211,20 @@ func TestExplainCommand(t *testing.T) {
 			},
 			wantContain: []string{"TransactionResultCode"},
 		},
+		{
+			name: "isolate flag pinpoints failing op",
+			args: []string{
+				"explain", fixture(t, "tx_failed.env"),
+				"--result", fixture(t, "tx_failed.res"),
+				"--isolate",
+			},
+			wantContain: []string{
+				"Failure Isolation Report",
+				"Failing Op Index:  0",
+				"Execution Failure: true",
+				"invoke_host_function_trapped",
+			},
+		},
 	}
 
 	for _, tc := range tests {
