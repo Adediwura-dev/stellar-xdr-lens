@@ -40,16 +40,130 @@
       "result_file": "tx_soroban.res.txt"
     }
   },
-  "constructed": {
-    "note": "Horizon does not serve these types as standalone XDR, so the fixtures are built with the SDK encoder. Regenerate with: go run ./cmd/gen-fixtures",
-    "entries": {
-      "liquidity_pool_entry": "constant product pool, native/USDC, 0.30% fee",
-      "claimable_balance_entry": "three claimants: absolute-time, unconditional and OR predicates",
-      "claimable_balance_entry_simple": "one claimant, relative-time predicate, native asset",
-      "trustline_entry_simple": "authorized USDC trust line, no extension",
-      "trustline_entry_v1": "USDC trust line with the V1 liabilities extension",
-      "trustline_entry_v2": "pool-share trust line with the V2 liquidity pool extension",
-      "diagnostic_event": "successful contract call event with topics and map data"
+  "synthetic_fixtures": {
+    "generated": "2026-10-16",
+    "note": "Synthetic payloads built with xdr.MarshalBase64 for XDR types that never appear as standalone Horizon payloads (issues #6-#9). Not captured from the network: fields are deterministic test vectors with filled hashes and fixed sequence numbers. hot_archive_bucket_entry is byte-identical to the corresponding BucketEntry arm on the wire, so decode it with an explicit --type.",
+    "fixtures": {
+      "ledger_header": {
+        "type": "LedgerHeader",
+        "description": "Ledger 55278432; exercises stroop notes for TotalCoins/FeePool/BaseFee/BaseReserve and the protocol-version note."
+      },
+      "ledger_header_history": {
+        "type": "LedgerHeaderHistoryEntry",
+        "description": "History entry wrapping the same header; exercises hash notes on Hash and Header."
+      },
+      "bucket_entry_live": {
+        "type": "BucketEntry",
+        "description": "LIVEENTRY wrapping an account ledger entry with a stroop balance."
+      },
+      "bucket_entry_dead": {
+        "type": "BucketEntry",
+        "description": "DEADENTRY tombstone for a TTL ledger key."
+      },
+      "bucket_entry_meta": {
+        "type": "BucketEntry",
+        "description": "METAENTRY at protocol 22 with the live bucket list type."
+      },
+      "bucket_metadata": {
+        "type": "BucketMetadata",
+        "description": "Standalone bucket metadata; on the wire this collides with ScVal encodings, so detection may report both."
+      },
+      "hot_archive_bucket_entry": {
+        "type": "HotArchiveBucketEntry",
+        "description": "ARCHIVED arm of the hot archive bucket; byte-identical to BucketEntry on the wire — decode with an explicit --type."
+      },
+      "scp_envelope": {
+        "type": "ScpEnvelope",
+        "description": "EXTERNALIZE envelope for slot 55278000 from validator GBIFCUSTKRKVMV2YLFNFWXC5LZPWAYLCMNSGKZTHNBUWU23MNVXG6NJZ."
+      },
+      "scp_statement": {
+        "type": "ScpStatement",
+        "description": "Bare EXTERNALIZE statement without the envelope signature."
+      },
+      "scp_quorum_set": {
+        "type": "ScpQuorumSet",
+        "description": "Threshold 2 of 3 validators plus a nested 1-of-1 inner set."
+      },
+      "ttl_entry": {
+        "type": "TtlEntry",
+        "description": "TTL entry live through ledger 55281000."
+      },
+      "ledger_key_ttl": {
+        "type": "LedgerKeyTtl",
+        "description": "TTL variant of LedgerKey, the state-archival deletion key."
+      },
+      "ledger_entry_ttl": {
+        "type": "LedgerEntry",
+        "description": "TTL ledger entry wrapping a TtlEntry payload."
+      },
+      "eviction_iterator": {
+        "type": "EvictionIterator",
+        "description": "Eviction iterator at bucket list level 6."
+      },
+      "overlay_hello": {
+        "type": "Hello",
+        "description": "Overlay hello from a Core 22.0.0 peer on the mainnet network id, listening on 11625 (issue #21)."
+      },
+      "overlay_auth": {
+        "type": "Auth",
+        "description": "Overlay auth reply with the require-auth flag set; only four bytes, so decode with an explicit --type."
+      },
+      "overlay_dont_have": {
+        "type": "DontHave",
+        "description": "DontHave for a tx_set request; short and aliased by LedgerKey/TtlEntry, so decode with an explicit --type."
+      },
+      "overlay_peer_address": {
+        "type": "PeerAddress",
+        "description": "IPv4 peer address 192.0.2.1:11625 with no failures."
+      },
+      "overlay_peer_address_v6": {
+        "type": "PeerAddress",
+        "description": "IPv6 peer address [2001:db8::1]:11625 with two failed connections."
+      },
+      "overlay_auth_cert": {
+        "type": "AuthCert",
+        "description": "Standalone peer authentication certificate with a fixed curve25519 key and 64-byte signature."
+      },
+      "overlay_error": {
+        "type": "Error",
+        "description": "Overlay error with code err_conf and a message."
+      },
+      "overlay_stellar_message": {
+        "type": "StellarMessage",
+        "description": "StellarMessage wrapping the hello fixture, the way a peer receives it."
+      },
+      "overlay_peers": {
+        "type": "StellarMessage",
+        "description": "Peers message carrying the IPv4 and IPv6 peer address fixtures as a list."
+      },
+      "tx_history_entry_v0": {
+        "type": "TransactionHistoryEntry",
+        "description": "History entry for ledger 55278432 with a legacy v0 transaction set holding one v0 payment (issue #22)."
+      },
+      "tx_history_entry_v1": {
+        "type": "TransactionHistoryEntry",
+        "description": "History entry for ledger 55278433 whose extension carries a generalized transaction set."
+      },
+      "tx_history_result_entry": {
+        "type": "TransactionHistoryResultEntry",
+        "description": "Result entry for ledger 55278432 with one successful payment result."
+      },
+      "generalized_tx_set": {
+        "type": "GeneralizedTransactionSet",
+        "description": "Generalized v1 set with a classic component phase and a parallel execution phase."
+      },
+      "ledger_close_meta_batch": {
+        "type": "LedgerCloseMetaBatch",
+        "description": "Empty batch bounds for ledger 55278432; carries no per-ledger meta."
+      },
+      "asset_native": {
+        "type": "Asset",
+        "description": "The native asset, four zero bytes; exercises the mainnet and testnet SAC contract ids (issue #24)."
+      },
+      "asset_usdc": {
+        "type": "Asset",
+        "description": "USDC issued by GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN; its mainnet SAC id is CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75."
+      }
     }
   }
 }
