@@ -204,7 +204,7 @@ StellarMessage
 `lens` reads from an argument, a `--file`, or stdin, so it composes:
 
 ```sh
-# Explain a live transaction straight from Horizon
+# If you already have a Horizon response, pipe its XDR field into lens
 curl -s "https://horizon.stellar.org/transactions/$HASH" \
   | jq -r '.envelope_xdr' \
   | lens explain
@@ -215,6 +215,10 @@ lens decode --json "$XDR" | jq -r '.value.V1.Tx.Fee'
 # Gate a deployment on the transaction having succeeded
 lens explain "$ENV" --result "$RES" --fail-on-error || exit 1
 ```
+
+`lens` itself only processes the XDR supplied to it and makes no network calls.
+The optional `curl` pipeline above is a caller-managed input step; use `--file`
+or standard input when working entirely with local data.
 
 The `--json` output has a documented, stable shape:
 
@@ -316,6 +320,12 @@ _ = value
 The CLI keeps its human-readable error messages on stderr and returns a
 non-zero exit status on failure. Error sentinels and kinds are library APIs;
 existing command flags and output formats are unchanged.
+
+Runnable Go examples for decoding, explaining, diffing, asset derivation, and
+other public library workflows are included in
+[`pkg/lens/examples_test.go`](pkg/lens/examples_test.go). They run offline
+against the repository fixtures; see
+[`docs/architecture.md`](docs/architecture.md#runnable-go-examples).
 
 ## A note on type detection
 

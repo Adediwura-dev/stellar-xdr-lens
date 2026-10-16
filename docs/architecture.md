@@ -97,6 +97,24 @@ Existing exported sentinels such as `ErrNoMatch`, `ErrUnknownType`,
 `ErrNotAsset`, and the WASM/spec errors remain available. Error classification
 is entirely local and does not add network access to library operations.
 
+## Runnable Go examples
+
+[`pkg/lens/examples_test.go`](../pkg/lens/examples_test.go) contains executable
+`godoc` examples for the main public workflows: decoding and detecting XDR,
+structural diffs, transaction explanations, asset contract-id derivation,
+reason lookup, registry introspection, contract-spec parsing, and error
+classification. The examples use the checked-in fixtures in `testdata/` and
+deterministic local values; they make no network calls.
+
+Run them together with the library tests from the repository root:
+
+```sh
+go test -v -race ./pkg/...
+```
+
+Examples are ordinary Go examples, so they are also shown on
+[pkg.go.dev](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens).
+
 ## The Node tree
 
 `Node` is a small, format-independent tree:
@@ -499,4 +517,3 @@ Soroban smart contracts encode arguments, return types, storage entries, and eve
   - UDT Unions (`ScSpecUdtUnionV0`): Labels case names and associated values.
   - Function Invocations (`ScSpecFunctionV0`): Resolves function names and parameter lists in `InvokeHostFunctionOp`.
 - Usable via `--spec <spec.xdr|contract.wasm>` in `lens decode`.
-
