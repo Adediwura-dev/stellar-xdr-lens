@@ -327,6 +327,22 @@ other public library workflows are included in
 against the repository fixtures; see
 [`docs/architecture.md`](docs/architecture.md#runnable-go-examples).
 
+### Decoder performance benchmarks
+
+The Go CLI does not add a benchmark flag; decoding benchmarks are run against
+the library's checked-in XDR fixtures. From the repository root:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'Benchmark(DecodeCanonicalFixtures|DetectCanonicalFixtures|DecodeByProtocolVersion)$' -benchmem
+```
+
+The output includes nanoseconds per operation and allocation statistics.
+Benchmarks run fully offline. Protocol-version cases vary the `LedgerVersion`
+field of the canonical Protocol 22 header fixture (Protocols 20–23), so those
+results compare version values with an otherwise identical XDR structure.
+See [docs/architecture.md](docs/architecture.md#testing-approach) for fixture
+selection and benchmark details.
+
 ## A note on type detection
 
 `lens decode` detects the XDR type by trying each known type and keeping the ones
