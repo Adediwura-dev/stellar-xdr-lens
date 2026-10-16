@@ -14,27 +14,42 @@ import (
 
 func newDecodeCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
 	var (
-		asJSON     bool
-		typeName   string
-		maxDepth   int
-		showTypes  bool
-		annotate   bool
-		listCands  bool
-		compactOut bool
+		asJSON      bool
+		asSummary   bool
+		asTxRep     bool
+		interactive bool
+		specPath    string
+		formatName  string
+		network     string
+		typeName    string
+		maxDepth    int
+		showTypes   bool
+		annotate    bool
+		listCands   bool
+		compactOut  bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "decode [base64]",
-		Short: "Decode XDR and print it as a tree or as JSON",
+		Short: "Decode XDR and print it as a tree, JSON, summary, or txrep",
 		Long: `Decode base64-encoded XDR.
 
 The XDR type is detected automatically by trying each known type and keeping
 the ones that decode cleanly. Detection is reliable for transaction-sized
 payloads, but short values are genuinely ambiguous — an empty Memo and a
 native Asset are both "AAAAAA==" — so use --type when you need certainty and
---candidates to see what else matched.`,
+--candidates to see what else matched.
+
+Use --summary for single-line output suited for grep and shell pipelines.
+Use --txrep for SEP-0011 human-readable representation of transaction envelopes.
+Use --spec to supply a contract WASM or spec file for decoded Soroban contract fields.
+Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 		Example: `  lens decode "$XDR"
   lens decode --json "$XDR" | jq '.value.V1.Tx.Fee'
+  lens decode --summary "$XDR"
+  lens decode --txrep "$XDR"
+  lens decode --spec contract.wasm "$XDR"
+  lens decode --interactive "$XDR"
   lens decode --type TransactionResult "$XDR"
   lens decode --candidates "AAAAAA=="
   echo "$XDR" | lens decode --depth 3`,
@@ -54,7 +69,35 @@ native Asset are both "AAAAAA==" — so use --type when you need certainty and
 				return err
 			}
 
-			if asJSON {
+			if specPath != "" {
+				spec, err := lens.LoadContractSpecFile(specPath)
+				if err != nil {
+					return fmt.Errorf("loading contract spec: %w", err)
+				}
+				spec.ApplyToValue(value)
+			}
+
+			if interactive {
+				tui := NewTUITree(value, stdin, stdout, format.PaletteFor(stdout, g.color))
+				return tui.Run()
+			}
+
+			if asSummary || formatName == "summary" {
+				f := format.NewCompactFormatter(
+					format.WithCompactPalette(format.PaletteFor(stdout, g.color)),
+				)
+				return f.Format(stdout, value)
+			}
+
+			if asTxRep || formatName == "txrep" {
+				f := format.NewTxRepFormatter(
+					format.WithTxRepPalette(format.PaletteFor(stdout, g.color)),
+					format.WithTxRepNetwork(network),
+				)
+				return f.Format(stdout, value)
+			}
+
+			if asJSON || formatName == "json" {
 				indent := "  "
 				if compactOut {
 					indent = ""
@@ -77,14 +120,68 @@ native Asset are both "AAAAAA==" — so use --type when you need certainty and
 
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit stable JSON instead of a tree")
 	cmd.Flags().BoolVar(&compactOut, "compact", false, "with --json, emit a single line")
-	cmd.Flags().BoolVar(&annotate, "annotate", false,
-		`with --json, include enriched renderings as {"value":..., "display":...}`)
+	cmd.Flags().BoolVar(&asSummary, "summary", false, "emit a terse single-line summary suitable for grep and pipelines")
+	cmd.Flags().BoolVar(&asTxRep, "txrep", false, "emit SEP-0011 TxRep format for transaction envelopes")
+	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "explore the decoded tree interactively")
+	cmd.Flags().StringVar(&specPath, "spec", "", "path to contract WASM or ScSpecEntry file for spec-aware decoding")
+	cmd.Flags().StringVar(&formatName, "format", "", `output format: "tree", "json", "summary", or "txrep"`)
+	cmd.Flags().StringVar(&network, "network", "", "network passphrase for txrep formatting")
 	cmd.Flags().StringVarP(&typeName, "type", "t", "",
 		"decode as this XDR type instead of detecting it (see `lens types`)")
 	cmd.Flags().IntVar(&maxDepth, "depth", 0, "limit tree depth (0 means unlimited)")
 	cmd.Flags().BoolVar(&showTypes, "show-types", false, "annotate tree nodes with their XDR type")
 	cmd.Flags().BoolVar(&listCands, "candidates", false,
 		"list every XDR type the input decodes as, best first")
+
+	return cmd
+}
+
+func newExploreCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
+	var (
+		typeName string
+		specPath string
+	)
+
+	cmd := &cobra.Command{
+		Use:     "explore [base64]",
+		Aliases: []string{"tui"},
+		Short:   "Interactively explore an XDR structure as an expandable tree",
+		Long: `Interactively explore an XDR structure in an expandable terminal tree viewer.
+
+Use arrow keys or j/k to navigate, Enter or Space to toggle node expansion,
+'e' to expand all, 'c' to collapse all, and 'q' to quit.`,
+		Example: `  lens explore "$XDR"
+  lens tui --file tx.env.txt
+  lens explore --spec contract.wasm "$XDR"`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			payload, err := resolveInput(firstArg(args), g.file, stdin)
+			if err != nil {
+				return err
+			}
+
+			value, err := decodeValue(payload, typeName)
+			if err != nil {
+				return err
+			}
+
+			if specPath != "" {
+				spec, err := lens.LoadContractSpecFile(specPath)
+				if err != nil {
+					return fmt.Errorf("loading contract spec: %w", err)
+				}
+				spec.ApplyToValue(value)
+			}
+
+			tui := NewTUITree(value, stdin, stdout, format.PaletteFor(stdout, g.color))
+			return tui.Run()
+		},
+	}
+
+	cmd.Flags().StringVarP(&typeName, "type", "t", "",
+		"decode as this XDR type instead of detecting it")
+	cmd.Flags().StringVar(&specPath, "spec", "",
+		"path to contract WASM or ScSpecEntry file for spec-aware decoding")
 
 	return cmd
 }
