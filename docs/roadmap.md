@@ -9,13 +9,15 @@ Working and tested:
 - `decode` with automatic type detection, tree and stable JSON output
 - `explain` for envelopes, results, and the two paired together
 - `diff` with path-level structural comparison
-- 25 registered XDR types; all 208 protocol result codes explained
+- 36 registered XDR types; all 208 protocol result codes explained
+- Ledger entries (liquidity pools, claimable balances, trust lines) and
+  `DiagnosticEvent` decoding with domain-aware rendering
 - Input from arguments, files or stdin; exit codes suitable for CI
 - No network access anywhere in the library or tests
 
 Known limits, stated plainly:
 
-- **25 types, not ~400.** The registry covers what developers actually paste
+- **36 types, not ~400.** The registry covers what developers actually paste
   into a terminal. Anything else needs a one-line addition.
 - **Soroban values render structurally.** `ScVal` decodes and displays, but
   without a contract spec `lens` cannot name a struct's fields or an enum's
@@ -29,16 +31,9 @@ Known limits, stated plainly:
 
 ### Broaden type coverage
 
-Work through the remaining commonly-encountered types — ledger entries, bucket
-entries, SCP messages, the archival types. Each is a registry line plus a test.
-Good first contributions.
-
-### Soroban diagnostic events
-
-When a contract traps, the actionable detail is in the diagnostic events, not
-the result code. `lens` currently tells you the call trapped and points you at
-simulation; decoding and rendering `DiagnosticEvent` payloads directly would
-close that loop. This is the single highest-value addition.
+Work through the remaining commonly-encountered types — bucket entries, SCP
+messages, the archival types. Each is a registry line plus a test. Good first
+contributions.
 
 ### `lens encode`
 

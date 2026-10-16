@@ -121,6 +121,40 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
+Ledger entries and Soroban events get the same treatment. Claim predicates fold
+into boolean expressions, pool parameters collapse to the pair and fee, trust
+line flags are spelled out, and contract ids become `C…` strkeys:
+
+```console
+$ lens decode --depth 4 --file claimable_balance_entry.xdr
+ClaimableBalanceEntry
+├─ BalanceId: BAAEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQQSBM
+├─ Claimants  [3]
+│  ├─ [0]
+│  │  ├─ Type: ClaimantTypeClaimantTypeV0
+│  │  └─ V0
+│  │     ├─ Destination: GAPB7YMUQ6MPQ23PTFDNBZP7HGGTZPI2DT5JJURUOIXNPLGHW2O3WYXZ
+│  │     └─ Predicate: before 2025-01-01T00:00:00Z
+│  ├─ [1]
+│  │  ├─ Type: ClaimantTypeClaimantTypeV0
+│  │  └─ V0
+│  │     ├─ Destination: GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6
+│  │     └─ Predicate: unconditional
+│  └─ [2]
+│     ├─ Type: ClaimantTypeClaimantTypeV0
+│     └─ V0
+│        ├─ Destination: GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW
+│        └─ Predicate: (before 2026-01-01T00:00:00Z or unconditional)
+├─ Asset: USDC:GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW
+├─ Amount: 10000000000  1000.0000000 (stroops: 10000000000)
+└─ Ext
+   ├─ V: 1
+   └─ V1
+      ├─ Ext
+      │  └─ V: 0
+      └─ Flags: 0
+```
+
 ### `lens diff` — what changed?
 
 ```console
@@ -263,7 +297,7 @@ Pass `--type` when you need certainty.
 **Early but real.** v0.1 does what this README says, with tests over real captured
 mainnet XDR. The library API may still shift before v1.0 — it is not yet frozen.
 
-- Supports 25 XDR types out of the ~400 in the protocol, chosen to cover what
+- Supports 36 XDR types out of the ~400 in the protocol, chosen to cover what
   developers actually paste into a terminal. Adding more is a one-line change;
   see [docs/architecture.md](docs/architecture.md).
 - All 208 protocol result codes are explained.

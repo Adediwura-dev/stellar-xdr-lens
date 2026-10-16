@@ -19,7 +19,7 @@ base64 ──► detect ──► xdr decode ──► Node tree ──► enric
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 25 registered types at once,
+That is what lets a new output format work for all 36 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## Package layout
@@ -36,6 +36,10 @@ pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
+  liquidity_pool.go    pool pair/fee rendering
+  claimable_balance.go claim predicate expression rendering, B... ids
+  trustline.go         trust line flag names
+  diagnostic_events.go contract id and Soroban address rendering
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   diff.go              structural path diff
@@ -45,7 +49,7 @@ pkg/lens/              the library; this is the reusable surface
     json.go            stable JSON
     text.go            explain summaries
     diff.go            diff rendering
-testdata/              real captured mainnet XDR + manifest.json recording provenance
+testdata/              captured mainnet XDR + constructed ledger-entry XDR, manifest.json records provenance
 ```
 
 `pkg/lens` is the public API and is what external projects import. `internal/cli`
@@ -134,15 +138,16 @@ one `lens decode` shows by default.
 
 ## Adding an enricher
 
-Enrichers turn an XDR value into something a human recognises. They live in
-[`enrich.go`](../pkg/lens/enrich.go) and are registered by concrete type:
+Enrichers turn an XDR value into something a human recognises. The base scalar
+types — accounts, assets, hashes — live in
+[`enrich.go`](../pkg/lens/enrich.go); rendering for a ledger entry family lives
+next to the rest of its domain logic in `liquidity_pool.go`,
+`claimable_balance.go`, `trustline.go` or `diagnostic_events.go`. Register by
+concrete type from the file's `init`:
 
 ```go
 func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}): enrichAccountID,
-		// add yours here
-	}
+	registerEnricher(reflect.TypeOf(xdr.MyType{}), enrichMyType)
 }
 
 func enrichMyType(rv reflect.Value) (display string, raw any, ok bool) {
@@ -158,8 +163,9 @@ Return `ok=false` to fall back to the generic rendering — do this for union ar
 you cannot sensibly render, such as liquidity-pool-share assets, rather than
 returning a misleading string.
 
-The registry is populated once in `init` and read-only afterwards, so it needs
-no locking.
+The registry is a package-level variable initialiser, so it is fully populated
+before any `init` runs; registration order across files cannot race and the map
+is read-only afterwards, so it needs no locking.
 
 ### Field-name enrichment
 
@@ -169,6 +175,13 @@ a value is an amount is the field it sits in. `amountFields` in `enrich.go`
 lists the known amount fields; anything not listed stays a plain integer,
 because rendering a sequence number as `12345.0000000` would be worse than
 showing it raw.
+
+Some renderings need both the containing type and the field name.
+`TrustLineEntry.Flags` and `OfferEntry.Flags` are both `xdr.Uint32` but only the
+former is a trust line flag set. `registerFieldNote` takes the parent type as
+well, so `trustline.go` can spell out `authorized | authorized_to_maintain_liabilities`
+without every other `Flags` field in the protocol being misread. A field note
+lands in `Node.Note`, leaving the raw integer as `Node.Value`.
 
 ## Adding a formatter
 
@@ -232,13 +245,18 @@ logic from the tree.
 
 ## Testing approach
 
-Fixtures in `testdata/` are **real captured mainnet transactions**, not
-synthetic ones, with `manifest.json` recording each transaction hash so a
-fixture can be traced back to the ledger. Tests never touch the network.
+Transaction fixtures in `testdata/` are **real captured mainnet transactions**,
+with `manifest.json` recording each transaction hash so a fixture can be traced
+back to the ledger. Tests never touch the network.
 
-Where a case cannot be captured — every classic operation type, memo variant and
-precondition shape — tests construct XDR with the SDK encoder and round-trip it
-through the real decode path, rather than reaching into internals.
+Where a case cannot be captured — every classic operation type, memo variant
+and precondition shape, and ledger entries such as `LiquidityPoolEntry`,
+`TrustLineEntry` and `DiagnosticEvent`, which Horizon does not serve as
+standalone XDR — the XDR is constructed with the SDK encoder and round-tripped
+through the real decode path rather than reaching into internals. The
+constructed fixtures are written by `cmd/gen-fixtures` (`go run
+./cmd/gen-fixtures`) and listed under `constructed` in `manifest.json`; tests
+that encode inline do not need a fixture at all.
 
 The suite deliberately targets properties that would break the tool if violated:
 
