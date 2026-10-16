@@ -50,25 +50,31 @@ func TestDiffDetectsScalarChange(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		left     any
-		right    any
-		wantPath string
-		wantOp   lens.ChangeOp
+		name           string
+		left           any
+		right          any
+		wantPath       string
+		wantOp         lens.ChangeOp
+		wantBeforeNote string
+		wantAfterNote  string
 	}{
 		{
-			name:     "price numerator",
-			left:     xdr.Price{N: 1, D: 2},
-			right:    xdr.Price{N: 3, D: 2},
-			wantPath: "N",
-			wantOp:   lens.ChangeModified,
+			name:           "price numerator",
+			left:           xdr.Price{N: 1, D: 2},
+			right:          xdr.Price{N: 3, D: 2},
+			wantPath:       "", // prices now render as a single fraction scalar
+			wantOp:         lens.ChangeModified,
+			wantBeforeNote: "1/2 (= 0.5000000)",
+			wantAfterNote:  "3/2 (= 1.5000000)",
 		},
 		{
-			name:     "price denominator",
-			left:     xdr.Price{N: 1, D: 2},
-			right:    xdr.Price{N: 1, D: 7},
-			wantPath: "D",
-			wantOp:   lens.ChangeModified,
+			name:           "price denominator",
+			left:           xdr.Price{N: 1, D: 2},
+			right:          xdr.Price{N: 1, D: 7},
+			wantPath:       "", // prices now render as a single fraction scalar
+			wantOp:         lens.ChangeModified,
+			wantBeforeNote: "1/2 (= 0.5000000)",
+			wantAfterNote:  "1/7 (= 0.1428571)",
 		},
 	}
 
@@ -90,6 +96,14 @@ func TestDiffDetectsScalarChange(t *testing.T) {
 			}
 			if c.Op != tc.wantOp {
 				t.Errorf("Op = %v, want %v", c.Op, tc.wantOp)
+			}
+			before, ok := c.Before.(string)
+			if !ok || before != tc.wantBeforeNote {
+				t.Errorf("Before = %v, want %q", c.Before, tc.wantBeforeNote)
+			}
+			after, ok := c.After.(string)
+			if !ok || after != tc.wantAfterNote {
+				t.Errorf("After = %v, want %q", c.After, tc.wantAfterNote)
 			}
 		})
 	}

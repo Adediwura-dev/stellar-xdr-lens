@@ -18,9 +18,9 @@ import (
 // ok=false leaves the value to the generic tree walker.
 //
 // Enrichers are the primary extension point of this package. To teach the
-// tool to render a new XDR type nicely, write an Enricher and register it in
-// enricherFor — nothing else needs to change, and every output format picks
-// it up at once. See docs/architecture.md.
+// tool to render a new XDR type nicely, write an Enricher and register it
+// with registerEnricher — nothing else needs to change, and every output
+// format picks it up at once. See docs/architecture.md.
 type Enricher func(rv reflect.Value) (display string, raw any, ok bool)
 
 // enricherFor maps a concrete XDR type to its Enricher. It is a
@@ -39,6 +39,10 @@ var enricherFor = map[reflect.Type]Enricher{
 	reflect.TypeOf(xdr.Hash{}):             enrichHash,
 	reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
 	reflect.TypeOf(xdr.Signature{}):        enrichSignature,
+}
+
+func registerEnricher(t reflect.Type, fn Enricher) {
+	enricherFor[t] = fn
 }
 
 // enrich looks up and applies the Enricher registered for rv's type.
@@ -168,6 +172,11 @@ var amountFields = map[string]bool{
 	"Balance":          true,
 	"FeeCharged":       true,
 	"ClaimableBalance": true,
+	"ReserveA":         true,
+	"ReserveB":         true,
+	"TotalPoolShares":  true,
+	"Buying":           true,
+	"Selling":          true,
 }
 
 // enrichAmountField applies stroop formatting when a field is known to carry
@@ -225,6 +234,36 @@ func enrichField(fieldName string, rv reflect.Value) (note string, ok bool) {
 			note, ok = "", false
 		}
 	}()
+	return fn(rv)
+}
+
+// fieldNoteFn renders an extra Note for a struct field. Returning ok=false
+// leaves the field untouched.
+type fieldNoteFn func(rv reflect.Value) (note string, ok bool)
+
+// fieldNotesByType maps a containing struct type to per-field note renderers. Like
+// amountFields it exists because XDR encodes semantically distinct concepts
+// with the same scalar type: TrustLineEntry.Flags and OfferEntry.Flags are
+// both xdr.Uint32 but only the former is a trust line flag set, so the
+// containing type is needed as well as the field name.
+var fieldNotesByType = map[reflect.Type]map[string]fieldNoteFn{}
+
+// registerFieldNote registers fn for one field of one struct type. Domain
+// files call it from init; see registerEnricher for why this is ordering-safe.
+func registerFieldNote(parent reflect.Type, field string, fn fieldNoteFn) {
+	if fieldNotesByType[parent] == nil {
+		fieldNotesByType[parent] = map[string]fieldNoteFn{}
+	}
+	fieldNotesByType[parent][field] = fn
+}
+
+// noteForField applies a registered field note, if any. A missing entry is
+// not an error: most fields have no note.
+func noteForField(parent reflect.Type, field string, rv reflect.Value) (string, bool) {
+	fn, found := fieldNotesByType[parent][field]
+	if !found {
+		return "", false
+	}
 	return fn(rv)
 }
 

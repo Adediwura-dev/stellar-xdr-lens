@@ -14,13 +14,23 @@ Everything flows one way:
 ```
 base64 ──► detect ──► xdr decode ──► Node tree ──► enrich ──► Formatter ──► output
               │            │             │                        │
-        registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep
+        registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep │ csv
 ```
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 54 registered types at once,
+That is what lets a new output format work for all 58 registered types at once,
 and lets the differ work without knowing what it is comparing.
+
+## End-to-end CLI coverage
+
+The `cmd/lens` package includes end-to-end subprocess tests that execute the
+built `lens` binary against the canonical `testdata/` fixtures. They cover the
+real command surface (`decode`, `explain`, and `diff`), use the same input
+resolution path as users do, and assert the observable CLI output. The suite is
+explicitly offline-first: it runs with the standard proxy variables cleared to
+ensure no network pathway is introduced by the command wrapper or default
+runtime environment.
 
 ## Package layout
 
@@ -35,6 +45,7 @@ internal/cli/          cobra commands — deliberately thin
   input.go             argument / --file / stdin resolution
   tui_tree.go          interactive terminal tree explorer (TUI)
 pkg/lens/              the library; this is the reusable surface
+  errors.go            stable error kinds and errors.Is-compatible sentinels
   decode.go            type registry, Detect, Decode, DecodeAs
   registry_index.go    introspection: RegistryIndex, categories, min sizes
   node.go              the neutral Node tree — the only file using reflection
@@ -43,6 +54,10 @@ pkg/lens/              the library; this is the reusable surface
   bucket_entry.go      bucket list, tombstone and hot archive terminology
   scp.go               consensus node identity and pledge names
   state_archival.go    TTL expiry and eviction rendering
+  account_extensions.go liabilities, sponsorship counters and sequence-ledger notes
+  data_entry.go        account data values: printable text vs hex
+  survey.go            time-sliced survey command names and encrypted bodies
+  contract_code.go     WASM section parsing: contract spec, env meta and meta
   overlay.go           peer addresses, certificate keys, overlay message names
   tx_history.go        ledger-sequence field notes for history sets and batches
   asset_types.go       asset details and Stellar Asset Contract id derivation
@@ -62,6 +77,7 @@ pkg/lens/              the library; this is the reusable surface
     diff.go            diff rendering
     summary.go         compact single-line summary (grep/pipeline friendly)
     txrep.go           SEP-0011 human-readable TxRep format
+    csv.go             flat CSV export for batch ledger envelopes
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -69,6 +85,46 @@ testdata/              real captured mainnet XDR + manifest.json recording prove
 cannot be imported by anyone else, which is deliberate: the CLI is an
 implementation detail, and keeping it internal means its shape is free to change
 without breaking anyone.
+
+## Library errors
+
+Errors from `pkg/lens` use exported sentinels for stable classification. Use
+`errors.Is` to match a specific condition, such as `lens.ErrInvalidBase64`, or
+`errors.As` to inspect the shared `lens.ErrorKind` value. Contextual wrapping
+preserves both forms of inspection:
+
+```go
+if errors.Is(err, lens.ErrInvalidBase64) {
+  // Reject or report the malformed payload.
+}
+
+var kind lens.ErrorKind
+if errors.As(err, &kind) {
+  log.Printf("lens error kind: %s", kind)
+}
+```
+
+Existing exported sentinels such as `ErrNoMatch`, `ErrUnknownType`,
+`ErrNotAsset`, and the WASM/spec errors remain available. Error classification
+is entirely local and does not add network access to library operations.
+
+## Runnable Go examples
+
+[`pkg/lens/examples_test.go`](../pkg/lens/examples_test.go) contains executable
+`godoc` examples for the main public workflows: decoding and detecting XDR,
+structural diffs, transaction explanations, asset contract-id derivation,
+reason lookup, registry introspection, contract-spec parsing, and error
+classification. The examples use the checked-in fixtures in `testdata/` and
+deterministic local values; they make no network calls.
+
+Run them together with the library tests from the repository root:
+
+```sh
+go test -v -race ./pkg/...
+```
+
+Examples are ordinary Go examples, so they are also shown on
+[pkg.go.dev](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens).
 
 ## The Node tree
 
@@ -200,6 +256,20 @@ returning a misleading string.
 The registry is populated once before any decoding happens and is read-only
 afterwards, so it needs no locking.
 
+### Offer entries and price fractions
+
+`pkg/lens/offer_entry.go` teaches the tool about DEX order book offers:
+
+- `xdr.Price` renders as an `n/d` fraction with its decimal value, e.g.
+  `Price: 7/3 (= 2.3333333)`. A zero denominator is malformed, so the enricher
+  declines and the generic walker renders the raw numerator and denominator
+  instead of dividing by zero.
+- `xdr.OfferEntry` is already registered (priority 5) so `lens decode --type
+  OfferEntry` decodes a ledger offer and renders its seller as a strkey
+  address, its assets in `CODE:ISSUER` form (`native` for XLM), its amount in
+  stroops, its price as a fraction, and its flags. An offer embedded in a
+  `LedgerEntry` decodes the same way at `Data.Offer`.
+
 ### Field-name enrichment
 
 Some renderings depend on the field name rather than the type. XDR models
@@ -219,6 +289,38 @@ func init() {
 	fieldNotes["SlotIndex"] = slotIndexNote
 }
 ```
+
+A note is only rendered on a scalar leaf. The tree and JSON formatters ignore
+`Node.Note` on struct and list nodes, so a note that should be visible has to
+sit on a child that renders as a scalar — `account_extensions.go` attaches the
+extension capability note to the union's discriminant child for exactly this
+reason.
+
+### Node hooks
+
+Some useful content is not an XDR field at all: a Soroban contract's interface
+lives in a WASM custom section inside the opaque `Code` byte array of a
+`ContractCodeEntry`. `nodeHooks` in [`node.go`](../pkg/lens/node.go) maps a
+concrete XDR type to a function that runs after the declared fields have been
+walked and may append derived children or annotate existing ones:
+
+```go
+func init() {
+	nodeHooks[reflect.TypeOf(xdr.ContractCodeEntry{})] = decorateContractCode
+}
+
+func decorateContractCode(n *Node, v any) {
+	entry := v.(xdr.ContractCodeEntry)
+	parsed, err := ParseContractCode(entry.Code)
+	// annotate the Code leaf and append Spec, EnvMeta and Meta children
+}
+```
+
+Hooks receive the concrete decoded value rather than a `reflect.Value`, so
+feature files stay free of reflection, and one that panics is treated as absent
+rather than being allowed to take the process down. Use a hook when the
+rendering depends on content buried inside a field; use the enricher registries
+when the type or field name is enough.
 
 ## Adding a formatter
 
@@ -382,7 +484,8 @@ to the ledger. Tests never touch the network.
 
 For types that never appear as standalone Horizon payloads — SCP envelopes,
 bucket entries, ledger headers, TTL entries, overlay messages, history-archive
-sets and classic assets — `manifest.json` also lists synthetic fixtures:
+sets, classic assets, account extensions, data entries, contract code entries
+and survey messages — `manifest.json` also lists synthetic fixtures:
 deterministic payloads built with `xdr.MarshalBase64` from fixed hashes and
 sequence numbers. Each one is declared as such in the manifest, so provenance
 is never in doubt. Asset fixtures double as known-answer tests: the native and
@@ -392,6 +495,22 @@ exactly.
 Where a case cannot be captured — every classic operation type, memo variant and
 precondition shape — tests construct XDR with the SDK encoder and round-trip it
 through the real decode path, rather than reaching into internals.
+
+Decoder benchmarks live in
+[`pkg/lens/benchmarks_test.go`](../pkg/lens/benchmarks_test.go) and use only
+checked-in `testdata/` fixtures. Run them from the repository root with:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'Benchmark(DecodeCanonicalFixtures|DetectCanonicalFixtures|DecodeByProtocolVersion)$' -benchmem
+```
+
+The fixture benchmarks report decode and type-detection latency, allocations,
+and input throughput for representative transactions, ledger data and overlay
+messages. The protocol-version benchmark starts with the canonical Protocol 22
+ledger-header fixture and re-encodes its `LedgerVersion` as Protocols 20–23.
+Those cases deliberately keep the header's XDR shape and all other fields
+constant: they compare decoder cost across the version values, not historical
+wire-schema changes. No benchmark or library decode path makes network calls.
 
 The suite deliberately targets properties that would break the tool if violated:
 
@@ -422,6 +541,43 @@ The suite deliberately targets properties that would break the tool if violated:
 - Formats signatures with key hints and base64 payloads (`tx.signatures[0].signature: ...`).
 - Generates valid TxRep output for debugging and multisig coordination offline.
 
+## Flat CSV export (`pkg/lens/format/csv.go`)
+
+`CSVFormatter` extracts the high-level fields of many transactions into one flat,
+machine-readable table, which is the shape a batch export — "who sent it, what it
+cost, what it did, and whether it succeeded" — needs.
+
+- The schema is fixed and exported: [`CSVColumns`](../pkg/lens/format/csv.go)
+  lists the sixteen columns in emit order, and the column constants and the
+  header row are pinned against it by `TestCSVColumnIndexesMatchSchema` and
+  `TestCSVColumnsAreStable`. Renaming or reordering a column is a breaking
+  change for scripts that address them positionally.
+- `FormatAll` and `FormatSummaries` are the batch entry points: one header,
+  then one row per value, so thousands of transactions concatenate under a
+  single header. `WithCSVHeader(false)` drops the header for appends.
+- Rows are fixed-width. A field that does not apply to a row — the fee bid of a
+  bare `TransactionResult`, the variant of a bucket entry — is emitted as an
+  empty field, never omitted, so every row parses with the same reader.
+- Transaction values go through `lens.Explain`, which is what turns the raw
+  tree into short result codes, short operation names and the outcome. The
+  paired form, `FormatSummary` / `FormatSummaries` on a `lens.Summary` from
+  `ExplainPair`, is the one that fills `success`, `result_code`,
+  `inner_result_code` and `failed_operations` from a single transaction.
+- Any other registered type still exports: `type` carries the XDR type name and
+  `detail` carries the tree flattened to `key=value` pairs. A transaction that
+  cannot be explained is an error instead, because a half-filled transaction row
+  would be a lie.
+- Output is written through `encoding/csv`, so a memo containing the delimiter,
+  a quote or a newline is quoted per RFC 4180 and round-trips through any
+  standard reader. Nothing but the value and the writer influences the bytes:
+  no network, no clock, no environment, which is what makes the export
+  deterministic in CI.
+- Rows are built before the writer is touched, so a failed batch leaves the
+  writer untouched rather than truncated mid-export.
+
+Reachable from the CLI as `lens decode --csv` (or `--format csv`); see the
+[README](../README.md#csv-export) for the column list.
+
 ## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
 
 `TUITree` provides a curses-like interactive navigation experience within standard ANSI terminals for exploring deeply nested XDR structures.
@@ -447,4 +603,3 @@ Soroban smart contracts encode arguments, return types, storage entries, and eve
   - UDT Unions (`ScSpecUdtUnionV0`): Labels case names and associated values.
   - Function Invocations (`ScSpecFunctionV0`): Resolves function names and parameter lists in `InvokeHostFunctionOp`.
 - Usable via `--spec <spec.xdr|contract.wasm>` in `lens decode`.
-
