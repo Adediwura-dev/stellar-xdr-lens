@@ -119,6 +119,11 @@ func TestDecodeCommand(t *testing.T) {
 			args:        []string{"decode", "--candidates", "AAAAAA=="},
 			wantContain: []string{"Memo", "Asset", "types matched"},
 		},
+		{
+			name:        "offer entry ledger type",
+			args:        []string{"decode", "--type", "OfferEntry", fixture(t, "offer_entry")},
+			wantContain: []string{"OfferEntry", "OfferId", "7/3 (= 2.3333333)", "GAISEM2EKVTHPCEZVK54ZXPO74ABCIRTIRKWM54ITGVLXTG5537QAQZ5"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -798,6 +803,34 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("decode --csv", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--csv", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --csv: %v", err)
+		}
+		lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("decode --csv should emit a header and one row, got %d lines: %s", len(lines), stdout)
+		}
+		if !strings.HasPrefix(lines[0], "type,variant,source,fee_bump_source,") ||
+			!strings.HasSuffix(lines[0], ",detail") {
+			t.Errorf("unexpected csv header: %s", lines[0])
+		}
+		if !strings.HasPrefix(lines[1], "TransactionEnvelope,v1,") {
+			t.Errorf("unexpected csv row: %s", lines[1])
+		}
+	})
+
+	t.Run("decode --format csv", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "csv", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format csv: %v", err)
+		}
+		if !strings.Contains(stdout, "TransactionEnvelope") {
+			t.Errorf("unexpected csv output: %s", stdout)
+		}
+	})
+
 	t.Run("explore command", func(t *testing.T) {
 		stdout, _, err := run(t, "q\n", "explore", fixturePayload)
 		if err != nil {
@@ -817,4 +850,36 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 			t.Errorf("unexpected interactive output: %s", stdout)
 		}
 	})
+}
+
+func TestDecodeStreamAndCanonical(t *testing.T) {
+	t.Parallel()
+
+	rawFixture := fixture(t, "tx_success.env")
+
+	// 1. Decode with --canonical flag
+	stdout, stderr, err := run(t, "", "decode", "--canonical", rawFixture)
+	if err != nil {
+		t.Fatalf("expected --canonical to succeed on real fixture: %v, stderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "TransactionEnvelope") {
+		t.Errorf("stdout missing TransactionEnvelope: %s", stdout)
+	}
+
+	// 2. Decode with --canonical failure
+	badCanonical := rawFixture + "===" // corrupt padding
+	_, _, err = run(t, "", "decode", "--canonical", badCanonical)
+	if err == nil {
+		t.Errorf("expected error on non-canonical input")
+	}
+
+	// 3. Decode with --stream base64 lines
+	streamInput := rawFixture + "\n" + rawFixture + "\n"
+	stdoutStream, stderrStream, err := run(t, streamInput, "decode", "--stream", "--json", "-")
+	if err != nil {
+		t.Fatalf("expected --stream to succeed: %v, stderr: %s", err, stderrStream)
+	}
+	if strings.Count(stdoutStream, "TransactionEnvelope") < 2 {
+		t.Errorf("expected at least 2 occurrences in stream output, got: %s", stdoutStream)
+	}
 }

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +20,7 @@ func newDecodeCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comm
 		asJSON      bool
 		asSummary   bool
 		asTxRep     bool
+		asCSV       bool
 		interactive bool
 		specPath    string
 		formatName  string
@@ -28,11 +31,13 @@ func newDecodeCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comm
 		annotate    bool
 		listCands   bool
 		compactOut  bool
+		stream      bool
+		canonical   bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "decode [base64]",
-		Short: "Decode XDR and print it as a tree, JSON, summary, or txrep",
+		Short: "Decode XDR and print it as a tree, JSON, summary, txrep, or CSV",
 		Long: `Decode base64-encoded XDR.
 
 The XDR type is detected automatically by trying each known type and keeping
@@ -43,12 +48,15 @@ native Asset are both "AAAAAA==" — so use --type when you need certainty and
 
 Use --summary for single-line output suited for grep and shell pipelines.
 Use --txrep for SEP-0011 human-readable representation of transaction envelopes.
+Use --csv for a flat, RFC 4180 row of the high-level transaction fields, which
+is what batch exports concatenate (see pkg/lens/format for the batch API).
 Use --spec to supply a contract WASM or spec file for decoded Soroban contract fields.
 Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 		Example: `  lens decode "$XDR"
   lens decode --json "$XDR" | jq '.value.V1.Tx.Fee'
   lens decode --summary "$XDR"
   lens decode --txrep "$XDR"
+  lens decode --csv "$XDR" >> envelopes.csv
   lens decode --spec contract.wasm "$XDR"
   lens decode --interactive "$XDR"
   lens decode --type TransactionResult "$XDR"
@@ -120,6 +128,10 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 				return f.Format(stdout, value)
 			}
 
+			if asCSV || formatName == "csv" {
+				return format.NewCSVFormatter().Format(stdout, value)
+			}
+
 			if asJSON || formatName == "json" {
 				indent := "  "
 				if compactOut {
@@ -145,9 +157,10 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 	cmd.Flags().BoolVar(&compactOut, "compact", false, "with --json, emit a single line")
 	cmd.Flags().BoolVar(&asSummary, "summary", false, "emit a terse single-line summary suitable for grep and pipelines")
 	cmd.Flags().BoolVar(&asTxRep, "txrep", false, "emit SEP-0011 TxRep format for transaction envelopes")
+	cmd.Flags().BoolVar(&asCSV, "csv", false, "emit a flat CSV row of the high-level transaction fields")
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "explore the decoded tree interactively")
 	cmd.Flags().StringVar(&specPath, "spec", "", "path to contract WASM or ScSpecEntry file for spec-aware decoding")
-	cmd.Flags().StringVar(&formatName, "format", "", `output format: "tree", "json", "summary", or "txrep"`)
+	cmd.Flags().StringVar(&formatName, "format", "", `output format: "tree", "json", "summary", "txrep", or "csv"`)
 	cmd.Flags().StringVar(&network, "network", "", "network passphrase for txrep formatting")
 	cmd.Flags().StringVarP(&typeName, "type", "t", "",
 		"decode as this XDR type instead of detecting it (see `lens types`)")
@@ -209,6 +222,75 @@ Use arrow keys or j/k to navigate, Enter or Space to toggle node expansion,
 		"path to contract WASM or ScSpecEntry file for spec-aware decoding")
 
 	return cmd
+}
+
+func runStream(stdout io.Writer, g *globalFlags, arg string, stdin io.Reader, typeName string, asJSON, compactOut, annotate bool, maxDepth int, showTypes, canonical bool) error {
+	var r io.Reader
+	if g.file != "" {
+		f, err := os.Open(g.file)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		r = f
+	} else if arg != "" && arg != stdinMarker {
+		r = strings.NewReader(arg)
+	} else {
+		r = stdin
+	}
+
+	parser := lens.NewStreamParser(r)
+	for {
+		raw, err := parser.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+
+		if canonical {
+			if typeName != "" {
+				if err := lens.ValidateTypeCanonicalXDR(raw, typeName); err != nil {
+					return fmt.Errorf("chunk [%d] canonical error: %w", parser.ChunkIndex()-1, err)
+				}
+			} else {
+				if err := lens.ValidateCanonicalXDR(raw); err != nil {
+					return fmt.Errorf("chunk [%d] canonical error: %w", parser.ChunkIndex()-1, err)
+				}
+			}
+		}
+
+		b64 := base64.StdEncoding.EncodeToString(raw)
+		val, err := decodeValue(b64, typeName)
+		if err != nil {
+			return fmt.Errorf("chunk [%d]: %w", parser.ChunkIndex()-1, err)
+		}
+
+		if asJSON {
+			indent := "  "
+			if compactOut {
+				indent = ""
+			}
+			f := format.NewJSONFormatter(
+				format.WithIndent(indent),
+				format.WithAnnotations(annotate),
+			)
+			if err := f.Format(stdout, val); err != nil {
+				return err
+			}
+			continue
+		}
+
+		f := format.NewTreeFormatter(
+			format.WithPalette(format.PaletteFor(stdout, g.color)),
+			format.WithMaxDepth(maxDepth),
+			format.WithTypeNames(showTypes),
+		)
+		if err := f.Format(stdout, val); err != nil {
+			return err
+		}
+	}
 }
 
 // decodeValue decodes a payload, honouring an explicit type when given.

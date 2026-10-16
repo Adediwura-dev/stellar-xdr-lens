@@ -105,7 +105,7 @@ func (d *DiffResult) Equal() bool { return len(d.Changes) == 0 }
 // often share most of their structure.
 func Diff(left, right *Value) (*DiffResult, error) {
 	if left == nil || right == nil {
-		return nil, fmt.Errorf("diff requires two decoded values")
+		return nil, fmt.Errorf("%w: diff requires two decoded values", ErrInvalidArgument)
 	}
 	res := &DiffResult{LeftType: left.Type, RightType: right.Type}
 	diffNodes(left.Node, right.Node, "", &res.Changes)
