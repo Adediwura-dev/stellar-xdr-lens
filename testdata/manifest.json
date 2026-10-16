@@ -1,7 +1,7 @@
 {
   "source": "Stellar Mainnet (Horizon: https://horizon.stellar.org)",
   "captured": "2026-08-03",
-  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content.",
+  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content. Constructed fixtures are listed separately under 'constructed'.",
   "fixtures": {
     "tx_failed": {
       "tx_hash": "a6e87c3d8e2ca78e026bf165cf8c3c6423f62c6133c54217804940c32b13e1fe",
