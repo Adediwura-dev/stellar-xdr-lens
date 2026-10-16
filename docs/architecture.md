@@ -79,6 +79,7 @@ pkg/lens/              the library; this is the reusable surface
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
+    theme.go           environment-selected light/dark ANSI palettes
     tree.go            colourised tree
     json.go            stable JSON
     text.go            explain summaries
@@ -86,6 +87,7 @@ pkg/lens/              the library; this is the reusable surface
     summary.go         compact single-line summary (grep/pipeline friendly)
     txrep.go           SEP-0011 human-readable TxRep format
     csv.go             flat CSV export for batch ledger envelopes
+    markdown.go        GitHub-flavored Markdown transaction reports
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -383,9 +385,17 @@ for every registered type immediately and needs no XDR knowledge. Follow the
 existing files' functional-options pattern (`WithPalette`, `WithIndent`) for
 configuration.
 
-Colour is handled centrally: call `format.PaletteFor(w, mode)`, which honours
-`--color`, the [`NO_COLOR`](https://no-color.org) convention, and whether the
-writer is a terminal. Never write escape sequences directly.
+Colour is handled centrally: the CLI uses `format.ThemeFromEnv` and
+`format.PaletteForTheme(w, mode, palette)`. `LENS_THEME=dark|light` selects a
+scheme (dark is the default), and per-role values such as
+`LENS_THEME_DARK_KEY=38;5;39` customize its ANSI SGR colours. Supported roles
+are `KEY`, `TYPE`, `STR`, `NUM`, `NOTE`, `DIM`, `ADD`, `REMOVE`, and `CHANGE`;
+set a role variable to an empty value to disable that colour. Values contain
+only semicolon-separated SGR integers from 0 to 255, without escape prefixes.
+The palette helper honours `--color`, the
+[`NO_COLOR`](https://no-color.org) convention, and whether the writer is a
+terminal. Invalid theme configuration is reported as an error. Never write
+escape sequences directly.
 
 ## Adding a result code explanation
 
@@ -707,6 +717,22 @@ cost, what it did, and whether it succeeded" — needs.
 
 Reachable from the CLI as `lens decode --csv` (or `--format csv`); see the
 [README](../README.md#csv-export) for the column list.
+
+## Markdown transaction reports (`pkg/lens/format/markdown.go`)
+
+`MarkdownFormatter` renders a `lens.Summary` as GitHub-flavored Markdown: a
+transaction details table followed by an operation table containing each
+operation's description, result, status, and hint. `Format` accepts a decoded
+transaction envelope or result; `FormatSummary` accepts a summary, including
+the paired summary from `lens.ExplainPair`.
+
+Table cells escape Markdown pipes and convert embedded line breaks to `<br>`,
+so memos, operation descriptions, and protocol hints do not break the table.
+The formatter only reads the summary and writes to the supplied writer; it
+makes no network calls and does not use the environment or clock.
+
+The CLI exposes paired transaction reports as `lens explain --markdown`; see
+the [README](../README.md#lens-explain--why-did-this-fail) for usage.
 
 ## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
 

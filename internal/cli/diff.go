@@ -62,8 +62,12 @@ mismatched hash.`,
 					return fmt.Errorf("encoding diff: %w", err)
 				}
 			default:
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
 				f := format.NewDiffFormatter(
-					format.WithDiffPalette(format.PaletteFor(stdout, g.color)),
+					format.WithDiffPalette(palette),
 				)
 				if err := f.Format(stdout, result); err != nil {
 					return err

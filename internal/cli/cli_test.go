@@ -176,6 +176,28 @@ func TestDecodeJSONIsPipeable(t *testing.T) {
 	}
 }
 
+func TestDecodeUsesEnvironmentTheme(t *testing.T) {
+	t.Setenv("LENS_THEME", "light")
+	t.Setenv("LENS_THEME_LIGHT_KEY", "38;5;39")
+
+	stdout, _, err := run(t, "", "decode", "--color", "always", fixture(t, "tx_success.env"))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(stdout, "\x1b[38;5;39m") {
+		t.Error("decode output did not use the environment-configured theme")
+	}
+}
+
+func TestDecodeReportsInvalidEnvironmentTheme(t *testing.T) {
+	t.Setenv("LENS_THEME", "unknown")
+
+	_, _, err := run(t, "", "decode", fixture(t, "tx_success.env"))
+	if err == nil || !strings.Contains(err.Error(), "LENS_THEME") {
+		t.Fatalf("Execute() error = %v, want invalid LENS_THEME error", err)
+	}
+}
+
 func TestExplainCommand(t *testing.T) {
 	t.Parallel()
 
@@ -209,6 +231,19 @@ func TestExplainCommand(t *testing.T) {
 				"invoke_host_function",
 				"trapped",
 				"Outcome",
+			},
+		},
+		{
+			name: "paired markdown report",
+			args: []string{
+				"explain", fixture(t, "tx_failed.env"),
+				"--result", fixture(t, "tx_failed.res"), "--markdown",
+			},
+			wantContain: []string{
+				"| Transaction | Details |",
+				"| Status | Failed |",
+				"| Operation | Source | Description | Result | Status | Hint |",
+				"invoke_host_function_trapped",
 			},
 		},
 		{
