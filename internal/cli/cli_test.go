@@ -752,3 +752,69 @@ func mapKeys(m map[string]any) []string {
 	sort.Strings(out)
 	return out
 }
+
+func TestDecodeNewFormatsAndCommands(t *testing.T) {
+	t.Parallel()
+
+	fixturePayload := fixture(t, "tx_success.env")
+
+	t.Run("decode --summary", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--summary", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --summary: %v", err)
+		}
+		if !strings.Contains(stdout, "TransactionEnvelope") || !strings.Contains(stdout, "type=v1") {
+			t.Errorf("unexpected summary output: %s", stdout)
+		}
+	})
+
+	t.Run("decode --format summary", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "summary", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format summary: %v", err)
+		}
+		if !strings.Contains(stdout, "TransactionEnvelope") {
+			t.Errorf("unexpected summary output: %s", stdout)
+		}
+	})
+
+	t.Run("decode --txrep", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--txrep", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --txrep: %v", err)
+		}
+		if !strings.Contains(stdout, "type: ENVELOPE_TYPE_TX") {
+			t.Errorf("unexpected txrep output: %s", stdout)
+		}
+	})
+
+	t.Run("decode --format txrep", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "txrep", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format txrep: %v", err)
+		}
+		if !strings.Contains(stdout, "type: ENVELOPE_TYPE_TX") {
+			t.Errorf("unexpected txrep output: %s", stdout)
+		}
+	})
+
+	t.Run("explore command", func(t *testing.T) {
+		stdout, _, err := run(t, "q\n", "explore", fixturePayload)
+		if err != nil {
+			t.Fatalf("explore: %v", err)
+		}
+		if !strings.Contains(stdout, "=== TransactionEnvelope Explorer ===") {
+			t.Errorf("unexpected explore output: %s", stdout)
+		}
+	})
+
+	t.Run("decode -i interactive", func(t *testing.T) {
+		stdout, _, err := run(t, "q\n", "decode", "-i", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode -i: %v", err)
+		}
+		if !strings.Contains(stdout, "Explorer") {
+			t.Errorf("unexpected interactive output: %s", stdout)
+		}
+	})
+}

@@ -121,6 +121,26 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
+#### Alternative Formats and Interactive Explorer
+
+```console
+# Terse single-line summary suitable for grep and shell pipelines
+$ lens decode --summary --file envelope.xdr
+# or: lens decode --format summary --file envelope.xdr
+
+# SEP-0011 TxRep human-readable format
+$ lens decode --txrep --file envelope.xdr
+# or: lens decode --format txrep --file envelope.xdr
+
+# Interactive terminal tree explorer (TUI)
+$ lens decode -i --file envelope.xdr
+# or use the dedicated command:
+$ lens explore --file envelope.xdr
+
+# Contract spec-aware ScVal decoding from contract WASM or spec XDR
+$ lens decode --spec contract.wasm --file invocation.xdr
+```
+
 ### `lens diff` — what changed?
 
 ```console
