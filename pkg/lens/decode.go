@@ -89,11 +89,15 @@ var registry = []xdrType{
 	{"SignerKey", func() any { return new(xdr.SignerKey) }, 7},
 	{"ClaimableBalanceId", func() any { return new(xdr.ClaimableBalanceId) }, 6},
 	{"ClaimableBalanceEntry", func() any { return new(xdr.ClaimableBalanceEntry) }, 5},
+	{"Claimant", func() any { return new(xdr.Claimant) }, 5},
+	{"ClaimPredicate", func() any { return new(xdr.ClaimPredicate) }, 5},
 	{"AccountEntry", func() any { return new(xdr.AccountEntry) }, 5},
 	{"TrustLineEntry", func() any { return new(xdr.TrustLineEntry) }, 5},
+	{"TrustLineEntryExtensionV2", func() any { return new(xdr.TrustLineEntryExtensionV2) }, 5},
 	{"OfferEntry", func() any { return new(xdr.OfferEntry) }, 5},
 	{"DataEntry", func() any { return new(xdr.DataEntry) }, 5},
 	{"LiquidityPoolEntry", func() any { return new(xdr.LiquidityPoolEntry) }, 5},
+	{"LiquidityPoolConstantProductParameters", func() any { return new(xdr.LiquidityPoolConstantProductParameters) }, 5},
 	{"ContractCodeEntry", func() any { return new(xdr.ContractCodeEntry) }, 5},
 }
 

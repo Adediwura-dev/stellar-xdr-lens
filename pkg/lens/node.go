@@ -192,6 +192,12 @@ func buildNode(name string, rv reflect.Value, depth int) *Node {
 			if note, ok := enrichAmountField(f.Name, rv.Field(i)); ok {
 				child.Note = note
 			}
+			// Field notes go further and key on the containing struct too,
+			// which is how TrustLineEntry.Flags gets its flag names without
+			// every other uint32 field named "Flags" being misread.
+			if note, ok := noteForField(rt, f.Name, rv.Field(i)); ok {
+				child.Note = note
+			}
 			n.Children = append(n.Children, child)
 		}
 		return n

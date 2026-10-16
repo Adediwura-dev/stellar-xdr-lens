@@ -18,28 +18,37 @@ import (
 // ok=false leaves the value to the generic tree walker.
 //
 // Enrichers are the primary extension point of this package. To teach the
-// tool to render a new XDR type nicely, write an Enricher and register it in
-// defaultEnrichers — nothing else needs to change, and every output format
-// picks it up at once. See docs/architecture.md.
+// tool to render a new XDR type nicely, write an Enricher and register it
+// with registerEnricher — nothing else needs to change, and every output
+// format picks it up at once. See docs/architecture.md.
 type Enricher func(rv reflect.Value) (display string, raw any, ok bool)
 
-// enricherFor maps a concrete XDR type to its Enricher. It is populated once
-// at init and read-only thereafter, so it needs no synchronisation.
-var enricherFor map[reflect.Type]Enricher
+// enricherFor maps a concrete XDR type to its Enricher. It is populated at
+// package load and read-only afterwards, so it needs no synchronisation.
+//
+// The base scalar types — accounts, assets, hashes — are registered here.
+// Rendering for a ledger entry family lives next to the rest of its domain
+// logic in liquidity_pool.go, claimable_balance.go, trustline.go and
+// diagnostic_events.go, which register from their own init functions.
+var enricherFor = map[reflect.Type]Enricher{
+	reflect.TypeOf(xdr.AccountId{}):        enrichAccountID,
+	reflect.TypeOf(xdr.MuxedAccount{}):     enrichMuxedAccount,
+	reflect.TypeOf(xdr.Asset{}):            enrichAsset,
+	reflect.TypeOf(xdr.ChangeTrustAsset{}): enrichChangeTrustAsset,
+	reflect.TypeOf(xdr.TrustLineAsset{}):   enrichTrustLineAsset,
+	reflect.TypeOf(xdr.TimePoint(0)):       enrichTimePoint,
+	reflect.TypeOf(xdr.Duration(0)):        enrichDuration,
+	reflect.TypeOf(xdr.Hash{}):             enrichHash,
+	reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
+	reflect.TypeOf(xdr.Signature{}):        enrichSignature,
+}
 
-func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}):        enrichAccountID,
-		reflect.TypeOf(xdr.MuxedAccount{}):     enrichMuxedAccount,
-		reflect.TypeOf(xdr.Asset{}):            enrichAsset,
-		reflect.TypeOf(xdr.ChangeTrustAsset{}): enrichChangeTrustAsset,
-		reflect.TypeOf(xdr.TrustLineAsset{}):   enrichTrustLineAsset,
-		reflect.TypeOf(xdr.TimePoint(0)):       enrichTimePoint,
-		reflect.TypeOf(xdr.Duration(0)):        enrichDuration,
-		reflect.TypeOf(xdr.Hash{}):             enrichHash,
-		reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
-		reflect.TypeOf(xdr.Signature{}):        enrichSignature,
-	}
+// registerEnricher adds an Enricher for a concrete XDR type. Domain files
+// call it from init; the map above is a package-level variable initialiser, so
+// it is fully populated before any init function runs and registration order
+// across files cannot race or clobber.
+func registerEnricher(t reflect.Type, fn Enricher) {
+	enricherFor[t] = fn
 }
 
 // enrich looks up and applies the Enricher registered for rv's type.
@@ -168,6 +177,11 @@ var amountFields = map[string]bool{
 	"Balance":          true,
 	"FeeCharged":       true,
 	"ClaimableBalance": true,
+	"ReserveA":         true,
+	"ReserveB":         true,
+	"TotalPoolShares":  true,
+	"Buying":           true,
+	"Selling":          true,
 }
 
 // enrichAmountField applies stroop formatting when a field is known to carry
@@ -182,6 +196,36 @@ func enrichAmountField(fieldName string, rv reflect.Value) (string, bool) {
 		return "", false
 	}
 	return amount.String(v) + " (stroops: " + strconv.FormatInt(int64(v), 10) + ")", true
+}
+
+// fieldNoteFn renders an extra Note for a struct field. Returning ok=false
+// leaves the field untouched.
+type fieldNoteFn func(rv reflect.Value) (note string, ok bool)
+
+// fieldNotes maps a containing struct type to per-field note renderers. Like
+// amountFields it exists because XDR encodes semantically distinct concepts
+// with the same scalar type: TrustLineEntry.Flags and OfferEntry.Flags are
+// both xdr.Uint32 but only the former is a trust line flag set, so the
+// containing type is needed as well as the field name.
+var fieldNotes = map[reflect.Type]map[string]fieldNoteFn{}
+
+// registerFieldNote registers fn for one field of one struct type. Domain
+// files call it from init; see registerEnricher for why this is ordering-safe.
+func registerFieldNote(parent reflect.Type, field string, fn fieldNoteFn) {
+	if fieldNotes[parent] == nil {
+		fieldNotes[parent] = map[string]fieldNoteFn{}
+	}
+	fieldNotes[parent][field] = fn
+}
+
+// noteForField applies a registered field note, if any. A missing entry is
+// not an error: most fields have no note.
+func noteForField(parent reflect.Type, field string, rv reflect.Value) (string, bool) {
+	fn, found := fieldNotes[parent][field]
+	if !found {
+		return "", false
+	}
+	return fn(rv)
 }
 
 // isEnumType reports whether t is a generated XDR enum. Enums carry a
