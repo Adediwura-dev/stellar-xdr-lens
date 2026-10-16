@@ -150,3 +150,11 @@ jobs:
 
       - name: reads from stdin
         run: cat testdata/tx_success.env.txt | ./lens decode - | head -3
+
+      - name: asset derives the mainnet USDC contract id
+        run: |
+          ./lens asset --file testdata/asset_usdc.txt \
+            | grep -q "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+
+      - name: types --json is a machine-readable index
+        run: ./lens types --json | jq -e '.[] | select(.name == "Hello" and .category == "overlay")'

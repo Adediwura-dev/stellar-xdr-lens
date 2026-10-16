@@ -80,6 +80,7 @@ unsigned transactions and works in CI.`,
 		newDecodeCmd(g, stdout, stdin),
 		newExplainCmd(g, stdout, stdin),
 		newDiffCmd(g, stdout, stdin),
+		newAssetCmd(g, stdout, stdin),
 		newTypesCmd(stdout),
 		newVersionCmd(stdout),
 	)

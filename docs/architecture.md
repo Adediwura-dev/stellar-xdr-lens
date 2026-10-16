@@ -19,7 +19,7 @@ base64 ──► detect ──► xdr decode ──► Node tree ──► enric
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 33 registered types at once,
+That is what lets a new output format work for all 54 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## Package layout
@@ -31,12 +31,20 @@ internal/cli/          cobra commands — deliberately thin
   decode.go            decode + types commands
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
+  asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
 pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
+  registry_index.go    introspection: RegistryIndex, categories, min sizes
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
-  contract_data.go     contract data rendering (addresses, durability, storage keys)
+  ledger_header.go     ledger-header field notes and protocol parameters
+  bucket_entry.go      bucket list, tombstone and hot archive terminology
+  scp.go               consensus node identity and pledge names
+  state_archival.go    TTL expiry and eviction rendering
+  overlay.go           peer addresses, certificate keys, overlay message names
+  tx_history.go        ledger-sequence field notes for history sets and batches
+  asset_types.go       asset details and Stellar Asset Contract id derivation
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   diff.go              structural path diff
@@ -114,8 +122,20 @@ var registry = []xdrType{
 ```
 
 The three fields are the display name, an allocator, and a detection priority.
-That is the whole change. Detection, `--type`, `lens types`, the tree, the JSON
-output and the differ all pick it up automatically.
+Then add the matching entry to `typeDocs` in
+[`registry_index.go`](../pkg/lens/registry_index.go) so `lens types --json`
+can describe it:
+
+```go
+"ClaimableBalanceEntry": {CategoryLedgerEntry,
+	"A balance claimable by named claimants, with its predicate and asset."},
+```
+
+That is the whole change. Detection, `--type`, `lens types` (including
+`--json`), the tree, the JSON output and the differ all pick it up
+automatically. `TestTypeDocsCoversRegistry` fails if the two maps drift apart,
+and `TestRegistryIndexMinWireSizeIsLowerBound` checks the published minimum
+size against the actual fixtures.
 
 ### Choosing a priority
 
@@ -126,24 +146,26 @@ Roughly:
 |---|---|
 | 90–100 | What developers paste most: envelopes, results, meta |
 | 60–89 | Ledger entries, keys, inner transaction types |
-| 30–59 | Soroban types |
+| 40–59 | Ledger-level types, Soroban, history-archive sets and batches |
+| 30–39 | Overlay messages and events, which are large but rarely pasted |
 | 1–29 | Small building blocks that decode from very few bytes |
 
 Small types deserve low priority because short payloads are ambiguous — a
 4-byte value may decode as half a dozen types, and the ranking decides which
-one `lens decode` shows by default.
+one `lens decode` shows by default. The overlay `Auth` message is the extreme
+case: four bytes that also parse as a void `ScVal`, so it ranks at 2 and is
+decoded with `--type` in practice.
 
 ## Adding an enricher
 
-Enrichers turn an XDR value into something a human recognises. They live next
-to the decoder they serve — [`enrich.go`](../pkg/lens/enrich.go) for the core
-types, [`contract_data.go`](../pkg/lens/contract_data.go) for contract data —
-and are registered by concrete type:
+Enrichers turn an XDR value into something a human recognises. `enricherFor` in
+[`enrich.go`](../pkg/lens/enrich.go) maps a concrete XDR type to its enricher.
+The core entries are a declaration-time literal; a type added by a feature file
+registers itself without touching `enrich.go` at all:
 
 ```go
-var enricherFor = map[reflect.Type]Enricher{
-	reflect.TypeOf(xdr.AccountId{}): enrichAccountID,
-	// add yours here
+func init() {
+	enricherFor[reflect.TypeOf(xdr.MyType{})] = enrichMyType
 }
 ```
 
@@ -167,50 +189,8 @@ Return `ok=false` to fall back to the generic rendering — do this for union ar
 you cannot sensibly render, such as liquidity-pool-share assets, rather than
 returning a misleading string.
 
-### Contract data and storage levels
-
-`pkg/lens/contract_data.go` decodes Soroban contract data and makes the three
-storage levels distinguishable in the output:
-
-- `xdr.ContractDataDurability` renders as `persistent` or `temporary` — the
-  durability recorded on the wire — instead of the
-  `ContractDataDurabilityPersistent` constant name.
-- `xdr.ScAddress` renders as its strkey form (`C...` for a contract, `G...` for
-  an account, and the matching forms for muxed accounts, liquidity pools and
-  claimable balances) instead of a discriminant plus a raw 32-byte hash.
-- The special `ScVal` ledger keys render by name: the contract instance key
-  becomes `instance storage key`, and the nonce key becomes `nonce key: 5`,
-  keeping the nonce that callers need. Every other `ScVal` keeps the structural
-  rendering that stays machine-readable without a contract spec.
-
-Instance storage is recorded with persistent durability and can only be
-recognised by its key, so the named instance key is what separates it from an
-ordinary persistent entry:
-
-| Storage level | What the output shows |
-|---|---|
-| instance | `Key: instance storage key` (durability is `persistent` on the wire) |
-| persistent | `Durability: persistent` with an ordinary `ScVal` key |
-| temporary | `Durability: temporary` |
-
-```console
-$ lens decode --type ContractDataEntry --depth 3 "$INSTANCE"
-ContractDataEntry
-├─ Ext
-│  └─ V: 0
-├─ Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3
-├─ Key: instance storage key
-├─ Durability: persistent
-└─ Val
-   ├─ Type: ScValTypeScvContractInstance
-   └─ Instance
-      └─ Executable
-         ... 1 more level(s) hidden
-```
-
-`ContractDataEntry` is registered (priority 5), so `lens decode --type
-ContractDataEntry` decodes a standalone blob, and an entry embedded in a
-`LedgerEntry` decodes the same way at `Data.ContractData`.
+The registry is populated once before any decoding happens and is read-only
+afterwards, so it needs no locking.
 
 ### Field-name enrichment
 
@@ -220,6 +200,17 @@ a value is an amount is the field it sits in. `amountFields` in `enrich.go`
 lists the known amount fields; anything not listed stays a plain integer,
 because rendering a sequence number as `12345.0000000` would be worse than
 showing it raw.
+
+`fieldNotes` is the same idea for anything that is not an amount — a hint
+attached to a field rendered alongside it. `LedgerVersion: 22` becomes
+`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N`.
+Feature files register notes from `init`:
+
+```go
+func init() {
+	fieldNotes["SlotIndex"] = slotIndexNote
+}
+```
 
 ## Adding a formatter
 
@@ -264,6 +255,29 @@ Two rules, both enforced by tests:
   codes across the 28 protocol enums by reflection and fails if any lacks an
   entry. When a new protocol version adds a code, that test tells you its name.
 
+## Introspection and contract ids
+
+Two small APIs round out the library for tooling use:
+
+- [`RegistryIndex()`](../pkg/lens/registry_index.go) returns a `TypeInfo` for
+  every registered type — name, category, description, priority and minimum
+  encoded size — which is what `lens types --json` emits. The index is derived
+  from the live registry, so it can never list a type `DecodeAs` rejects. Sizes
+  are computed structurally from the Go types by reflection, with a depth cap
+  for self-referential unions and a conservative fallback, so the number is a
+  lower bound that holds for every valid value; no fixture or network access is
+  involved.
+- [`DescribeAsset`](../pkg/lens/asset_types.go) decodes a classic asset and
+  derives its Stellar Asset Contract id. The id is a hash of the network id and
+  the asset (`Asset.ContractID`), rendered as a strkey `C…` address, so it is
+  deterministic, offline, and different on every network. `DescribeAssetValue`
+  does the same for an already-decoded `Value` and reports `ErrNotAsset` when
+  the value is not an asset.
+
+`ContractId` and `ScAddress` values anywhere in a decoded tree render as strkey
+addresses too, via enrichers registered in `asset_types.go` — a contract id
+buried in a Soroban footprint is as readable as one at the top level.
+
 ## Explain, and why it reads the Node tree
 
 `explainOperationResult` needs the type-specific result code buried in an
@@ -283,9 +297,18 @@ logic from the tree.
 
 ## Testing approach
 
-Fixtures in `testdata/` are **real captured mainnet transactions**, not
-synthetic ones, with `manifest.json` recording each transaction hash so a
-fixture can be traced back to the ledger. Tests never touch the network.
+Fixtures in `testdata/` are **real captured mainnet transactions**, with
+`manifest.json` recording each transaction hash so a fixture can be traced back
+to the ledger. Tests never touch the network.
+
+For types that never appear as standalone Horizon payloads — SCP envelopes,
+bucket entries, ledger headers, TTL entries, overlay messages, history-archive
+sets and classic assets — `manifest.json` also lists synthetic fixtures:
+deterministic payloads built with `xdr.MarshalBase64` from fixed hashes and
+sequence numbers. Each one is declared as such in the manifest, so provenance
+is never in doubt. Asset fixtures double as known-answer tests: the native and
+USDC assets carry well-known mainnet SAC contract ids that the tests assert
+exactly.
 
 Where a case cannot be captured — every classic operation type, memo variant and
 precondition shape — tests construct XDR with the SDK encoder and round-trip it
@@ -295,6 +318,9 @@ The suite deliberately targets properties that would break the tool if violated:
 
 - detection stays unambiguous on real payloads (`TestDetectIsUnambiguousForRealPayloads`);
 - ambiguity is reported, not hidden (`TestDetectReportsGenuineAmbiguity`);
+- the introspection index tracks the registry exactly
+  (`TestTypeDocsCoversRegistry`) and its size estimates hold as lower bounds
+  (`TestRegistryIndexMinWireSizeIsLowerBound`);
 - enums render as names, not integers (`TestEnumsRenderAsConstantNames`);
 - a failure is attributed to the operation that caused it
   (`TestExplainPairAttributesFailureToOperation`);
