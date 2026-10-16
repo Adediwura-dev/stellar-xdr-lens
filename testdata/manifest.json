@@ -39,5 +39,67 @@
       "envelope_file": "tx_soroban.env.txt",
       "result_file": "tx_soroban.res.txt"
     }
+  },
+  "synthetic_fixtures": {
+    "generated": "2026-10-16",
+    "note": "Synthetic payloads built with xdr.MarshalBase64 for XDR types that never appear as standalone Horizon payloads (issues #6-#9). Not captured from the network: fields are deterministic test vectors with filled hashes and fixed sequence numbers. hot_archive_bucket_entry is byte-identical to the corresponding BucketEntry arm on the wire, so decode it with an explicit --type.",
+    "fixtures": {
+      "ledger_header": {
+        "type": "LedgerHeader",
+        "description": "Ledger 55278432; exercises stroop notes for TotalCoins/FeePool/BaseFee/BaseReserve and the protocol-version note."
+      },
+      "ledger_header_history": {
+        "type": "LedgerHeaderHistoryEntry",
+        "description": "History entry wrapping the same header; exercises hash notes on Hash and Header."
+      },
+      "bucket_entry_live": {
+        "type": "BucketEntry",
+        "description": "LIVEENTRY wrapping an account ledger entry with a stroop balance."
+      },
+      "bucket_entry_dead": {
+        "type": "BucketEntry",
+        "description": "DEADENTRY tombstone for a TTL ledger key."
+      },
+      "bucket_entry_meta": {
+        "type": "BucketEntry",
+        "description": "METAENTRY at protocol 22 with the live bucket list type."
+      },
+      "bucket_metadata": {
+        "type": "BucketMetadata",
+        "description": "Standalone bucket metadata; on the wire this collides with ScVal encodings, so detection may report both."
+      },
+      "hot_archive_bucket_entry": {
+        "type": "HotArchiveBucketEntry",
+        "description": "ARCHIVED arm of the hot archive bucket; byte-identical to BucketEntry on the wire — decode with an explicit --type."
+      },
+      "scp_envelope": {
+        "type": "ScpEnvelope",
+        "description": "EXTERNALIZE envelope for slot 55278000 from validator GBIFCUSTKRKVMV2YLFNFWXC5LZPWAYLCMNSGKZTHNBUWU23MNVXG6NJZ."
+      },
+      "scp_statement": {
+        "type": "ScpStatement",
+        "description": "Bare EXTERNALIZE statement without the envelope signature."
+      },
+      "scp_quorum_set": {
+        "type": "ScpQuorumSet",
+        "description": "Threshold 2 of 3 validators plus a nested 1-of-1 inner set."
+      },
+      "ttl_entry": {
+        "type": "TtlEntry",
+        "description": "TTL entry live through ledger 55281000."
+      },
+      "ledger_key_ttl": {
+        "type": "LedgerKeyTtl",
+        "description": "TTL variant of LedgerKey, the state-archival deletion key."
+      },
+      "ledger_entry_ttl": {
+        "type": "LedgerEntry",
+        "description": "TTL ledger entry wrapping a TtlEntry payload."
+      },
+      "eviction_iterator": {
+        "type": "EvictionIterator",
+        "description": "Eviction iterator at bucket list level 6."
+      }
+    }
   }
 }
