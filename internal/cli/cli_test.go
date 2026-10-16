@@ -68,6 +68,46 @@ func TestDecodeCommand(t *testing.T) {
 			wantContain: []string{"TransactionResult", "TransactionResultCode"},
 		},
 		{
+			name:        "ledger header",
+			args:        []string{"decode", "--type", "LedgerHeader", fixture(t, "ledger_header")},
+			wantContain: []string{"LedgerHeader", "protocol 22", "104591297310.9999952", "0.5000000 (stroops: 5000000)"},
+		},
+		{
+			name:        "ledger header history entry",
+			args:        []string{"decode", "--type", "LedgerHeaderHistoryEntry", fixture(t, "ledger_header_history")},
+			wantContain: []string{"LedgerHeaderHistoryEntry", "Header", "protocol 22"},
+		},
+		{
+			name:        "bucket entry tombstone",
+			args:        []string{"decode", "--type", "BucketEntry", fixture(t, "bucket_entry_dead")},
+			wantContain: []string{"BucketEntry", "dead entry (tombstone)", "LedgerEntryTypeTtl"},
+		},
+		{
+			name:        "bucket metadata hot archive",
+			args:        []string{"decode", "--type", "BucketMetadata", fixture(t, "bucket_metadata")},
+			wantContain: []string{"BucketMetadata", "protocol 22", "BucketListType"},
+		},
+		{
+			name:        "scp envelope",
+			args:        []string{"decode", "--type", "ScpEnvelope", fixture(t, "scp_envelope")},
+			wantContain: []string{"ScpEnvelope", "externalize", "GBIFCUSTKRKVMV2YLFNFWXC5LZPWAYLCMNSGKZTHNBUWU23MNVXG6NJZ"},
+		},
+		{
+			name:        "scp quorum set",
+			args:        []string{"decode", "--type", "ScpQuorumSet", fixture(t, "scp_quorum_set")},
+			wantContain: []string{"ScpQuorumSet", "InnerSets", "GBYHC4TTOR2XM53YPF5HW7D5PZ7YBAMCQOCILBUHRCEYVC4MRWHI66TB"},
+		},
+		{
+			name:        "ttl entry",
+			args:        []string{"decode", "--type", "TtlEntry", fixture(t, "ttl_entry")},
+			wantContain: []string{"TtlEntry", "live through ledger 55281000"},
+		},
+		{
+			name:        "eviction iterator",
+			args:        []string{"decode", "--type", "EvictionIterator", fixture(t, "eviction_iterator")},
+			wantContain: []string{"EvictionIterator", "BucketFileOffset", "IsCurrBucket"},
+		},
+		{
 			name:        "depth limit",
 			args:        []string{"decode", "--depth", "2", fixture(t, "tx_success.env")},
 			wantContain: []string{"hidden"},

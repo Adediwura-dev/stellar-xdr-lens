@@ -19,7 +19,7 @@ base64 ──► detect ──► xdr decode ──► Node tree ──► enric
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 25 registered types at once,
+That is what lets a new output format work for all 41 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## Package layout
@@ -36,6 +36,10 @@ pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
+  ledger_header.go     ledger-header field notes and protocol parameters
+  bucket_entry.go      bucket list, tombstone and hot archive terminology
+  scp.go               consensus node identity and pledge names
+  state_archival.go    TTL expiry and eviction rendering
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   diff.go              structural path diff
@@ -134,15 +138,14 @@ one `lens decode` shows by default.
 
 ## Adding an enricher
 
-Enrichers turn an XDR value into something a human recognises. They live in
-[`enrich.go`](../pkg/lens/enrich.go) and are registered by concrete type:
+Enrichers turn an XDR value into something a human recognises. `enricherFor` in
+[`enrich.go`](../pkg/lens/enrich.go) maps a concrete XDR type to its enricher.
+The core entries are a declaration-time literal; a type added by a feature file
+registers itself without touching `enrich.go` at all:
 
 ```go
 func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}): enrichAccountID,
-		// add yours here
-	}
+	enricherFor[reflect.TypeOf(xdr.MyType{})] = enrichMyType
 }
 
 func enrichMyType(rv reflect.Value) (display string, raw any, ok bool) {
@@ -158,8 +161,8 @@ Return `ok=false` to fall back to the generic rendering — do this for union ar
 you cannot sensibly render, such as liquidity-pool-share assets, rather than
 returning a misleading string.
 
-The registry is populated once in `init` and read-only afterwards, so it needs
-no locking.
+The registry is populated once before any decoding happens and is read-only
+afterwards, so it needs no locking.
 
 ### Field-name enrichment
 
@@ -169,6 +172,17 @@ a value is an amount is the field it sits in. `amountFields` in `enrich.go`
 lists the known amount fields; anything not listed stays a plain integer,
 because rendering a sequence number as `12345.0000000` would be worse than
 showing it raw.
+
+`fieldNotes` is the same idea for anything that is not an amount — a hint
+attached to a field rendered alongside it. `LedgerVersion: 22` becomes
+`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N`.
+Feature files register notes from `init`:
+
+```go
+func init() {
+	fieldNotes["SlotIndex"] = slotIndexNote
+}
+```
 
 ## Adding a formatter
 
@@ -232,9 +246,15 @@ logic from the tree.
 
 ## Testing approach
 
-Fixtures in `testdata/` are **real captured mainnet transactions**, not
-synthetic ones, with `manifest.json` recording each transaction hash so a
-fixture can be traced back to the ledger. Tests never touch the network.
+Fixtures in `testdata/` are **real captured mainnet transactions**, with
+`manifest.json` recording each transaction hash so a fixture can be traced back
+to the ledger. Tests never touch the network.
+
+For types that never appear as standalone Horizon payloads — SCP envelopes,
+bucket entries, ledger headers, TTL entries — `manifest.json` also lists
+synthetic fixtures: deterministic payloads built with `xdr.MarshalBase64` from
+fixed hashes and sequence numbers. Each one is declared as such in the manifest,
+so provenance is never in doubt.
 
 Where a case cannot be captured — every classic operation type, memo variant and
 precondition shape — tests construct XDR with the SDK encoder and round-trip it

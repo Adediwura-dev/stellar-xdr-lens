@@ -245,8 +245,10 @@ On transaction-sized payloads this is reliable — the test suite asserts that e
 real fixture matches exactly one type.
 
 Short values are genuinely ambiguous, though. An empty `Memo` and a native `Asset`
-are both `AAAAAA==`, because they are the same four bytes. `lens` reports this
-rather than guessing silently:
+are both `AAAAAA==`, because they are the same four bytes. Some longer aliases are
+inherent to the wire format too: `HotArchiveBucketEntry` is byte-identical to the
+matching `BucketEntry` arm, and `BucketMetadata` collides with some `ScVal`
+encodings. `lens` reports these rather than guessing silently:
 
 ```console
 $ lens decode --candidates "AAAAAA=="
@@ -263,7 +265,7 @@ Pass `--type` when you need certainty.
 **Early but real.** v0.1 does what this README says, with tests over real captured
 mainnet XDR. The library API may still shift before v1.0 — it is not yet frozen.
 
-- Supports 25 XDR types out of the ~400 in the protocol, chosen to cover what
+- Supports 41 XDR types out of the ~400 in the protocol, chosen to cover what
   developers actually paste into a terminal. Adding more is a one-line change;
   see [docs/architecture.md](docs/architecture.md).
 - All 208 protocol result codes are explained.

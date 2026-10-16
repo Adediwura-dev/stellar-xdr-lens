@@ -71,6 +71,15 @@ var registry = []xdrType{
 	{"LedgerHeader", func() any { return new(xdr.LedgerHeader) }, 50},
 	{"LedgerHeaderHistoryEntry", func() any { return new(xdr.LedgerHeaderHistoryEntry) }, 45},
 
+	// Bucket-list and consensus types: the ledger-state archive and the
+	// protocol messages that agree on it.
+	{"BucketEntry", func() any { return new(xdr.BucketEntry) }, 49},
+	{"BucketMetadata", func() any { return new(xdr.BucketMetadata) }, 48},
+	{"HotArchiveBucketEntry", func() any { return new(xdr.HotArchiveBucketEntry) }, 47},
+	{"ScpEnvelope", func() any { return new(xdr.ScpEnvelope) }, 46},
+	{"ScpStatement", func() any { return new(xdr.ScpStatement) }, 44},
+	{"ScpQuorumSet", func() any { return new(xdr.ScpQuorumSet) }, 43},
+
 	// Soroban types.
 	{"ScVal", func() any { return new(xdr.ScVal) }, 40},
 	{"ScSpecEntry", func() any { return new(xdr.ScSpecEntry) }, 35},
@@ -78,6 +87,12 @@ var registry = []xdrType{
 	{"SorobanTransactionData", func() any { return new(xdr.SorobanTransactionData) }, 33},
 	{"SorobanAuthorizationEntry", func() any { return new(xdr.SorobanAuthorizationEntry) }, 32},
 	{"DiagnosticEvent", func() any { return new(xdr.DiagnosticEvent) }, 31},
+
+	// State-archival entries: TTL records, the keys that identify them, and
+	// the eviction cursor validators walk when expiring them.
+	{"TtlEntry", func() any { return new(xdr.TtlEntry) }, 39},
+	{"LedgerKeyTtl", func() any { return new(xdr.LedgerKeyTtl) }, 38},
+	{"EvictionIterator", func() any { return new(xdr.EvictionIterator) }, 37},
 
 	// Smaller building blocks. These decode from very short payloads and are
 	// frequently ambiguous with one another, hence the low priority.

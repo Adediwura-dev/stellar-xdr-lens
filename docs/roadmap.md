@@ -9,13 +9,14 @@ Working and tested:
 - `decode` with automatic type detection, tree and stable JSON output
 - `explain` for envelopes, results, and the two paired together
 - `diff` with path-level structural comparison
-- 25 registered XDR types; all 208 protocol result codes explained
+- 41 registered XDR types, including ledger headers, bucket entries, SCP
+  messages and the state-archival types; all 208 protocol result codes explained
 - Input from arguments, files or stdin; exit codes suitable for CI
 - No network access anywhere in the library or tests
 
 Known limits, stated plainly:
 
-- **25 types, not ~400.** The registry covers what developers actually paste
+- **41 types, not ~400.** The registry covers what developers actually paste
   into a terminal. Anything else needs a one-line addition.
 - **Soroban values render structurally.** `ScVal` decodes and displays, but
   without a contract spec `lens` cannot name a struct's fields or an enum's
@@ -29,9 +30,10 @@ Known limits, stated plainly:
 
 ### Broaden type coverage
 
-Work through the remaining commonly-encountered types — ledger entries, bucket
-entries, SCP messages, the archival types. Each is a registry line plus a test.
-Good first contributions.
+Ledger headers, bucket entries, SCP messages and the state-archival types are
+now covered, on top of the transaction, Soroban and ledger-entry families. What
+remains is the long tail — individual result and effect types, and the overlay
+messages. Each is a registry line plus a test. Good first contributions.
 
 ### Soroban diagnostic events
 
