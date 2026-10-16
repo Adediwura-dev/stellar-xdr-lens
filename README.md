@@ -59,6 +59,17 @@ go build ./cmd/lens
 Everything runs offline. `lens` makes no network calls, which makes it safe on
 unsigned transactions and deterministic in CI.
 
+## Contributor validation
+
+The CLI is exercised by subprocess tests in `cmd/lens/e2e_test.go` against the
+canonical fixtures in `testdata/`. These checks run the real command binary, not
+library call wrappers, and intentionally scrub proxy environment variables to
+prove the core execution path stays offline and deterministic in CI.
+
+```sh
+go test ./cmd/lens
+```
+
 ## Usage
 
 ### `lens explain` — why did this fail?

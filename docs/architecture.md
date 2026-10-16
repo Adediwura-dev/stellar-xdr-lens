@@ -22,6 +22,16 @@ becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
 That is what lets a new output format work for all 58 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
+## End-to-end CLI coverage
+
+The `cmd/lens` package includes end-to-end subprocess tests that execute the
+built `lens` binary against the canonical `testdata/` fixtures. They cover the
+real command surface (`decode`, `explain`, and `diff`), use the same input
+resolution path as users do, and assert the observable CLI output. The suite is
+explicitly offline-first: it runs with the standard proxy variables cleared to
+ensure no network pathway is introduced by the command wrapper or default
+runtime environment.
+
 ## Package layout
 
 ```
