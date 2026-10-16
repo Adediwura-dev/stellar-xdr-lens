@@ -1,7 +1,7 @@
 {
   "source": "Stellar Mainnet (Horizon: https://horizon.stellar.org)",
   "captured": "2026-08-03",
-  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content.",
+  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content. Constructed fixtures are listed separately under 'constructed'.",
   "fixtures": {
     "tx_failed": {
       "tx_hash": "a6e87c3d8e2ca78e026bf165cf8c3c6423f62c6133c54217804940c32b13e1fe",
@@ -38,6 +38,18 @@
       "fee_bump": true,
       "envelope_file": "tx_soroban.env.txt",
       "result_file": "tx_soroban.res.txt"
+    }
+  },
+  "constructed": {
+    "note": "Horizon does not serve these types as standalone XDR, so the fixtures are built with the SDK encoder. Regenerate with: go run ./cmd/gen-fixtures",
+    "entries": {
+      "liquidity_pool_entry": "constant product pool, native/USDC, 0.30% fee",
+      "claimable_balance_entry": "three claimants: absolute-time, unconditional and OR predicates",
+      "claimable_balance_entry_simple": "one claimant, relative-time predicate, native asset",
+      "trustline_entry_simple": "authorized USDC trust line, no extension",
+      "trustline_entry_v1": "USDC trust line with the V1 liabilities extension",
+      "trustline_entry_v2": "pool-share trust line with the V2 liquidity pool extension",
+      "diagnostic_event": "successful contract call event with topics and map data"
     }
   }
 }
