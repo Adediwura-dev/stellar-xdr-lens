@@ -2,7 +2,6 @@ package lens
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -10,12 +9,6 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
-
-// ErrNoMatch is returned when a payload does not decode as any known XDR type.
-var ErrNoMatch = errors.New("input did not decode as any known XDR type")
-
-// ErrUnknownType is returned when a caller names a type that is not registered.
-var ErrUnknownType = errors.New("unknown XDR type")
 
 // Value is a successfully decoded XDR payload.
 type Value struct {
@@ -95,6 +88,12 @@ var registry = []xdrType{
 	{"StellarMessage", func() any { return new(xdr.StellarMessage) }, 36},
 	{"Hello", func() any { return new(xdr.Hello) }, 35},
 	{"PeerAddress", func() any { return new(xdr.PeerAddress) }, 27},
+	{"SignedTimeSlicedSurveyRequestMessage", func() any { return new(xdr.SignedTimeSlicedSurveyRequestMessage) }, 26},
+	{"SignedTimeSlicedSurveyResponseMessage", func() any { return new(xdr.SignedTimeSlicedSurveyResponseMessage) }, 25},
+	{"SignedTimeSlicedSurveyStartCollectingMessage", func() any { return new(xdr.SignedTimeSlicedSurveyStartCollectingMessage) }, 24},
+	// Start and stop collect messages have identical field lists, so their
+	// encodings are identical; stop ranks lower and needs --type to win.
+	{"SignedTimeSlicedSurveyStopCollectingMessage", func() any { return new(xdr.SignedTimeSlicedSurveyStopCollectingMessage) }, 21},
 	{"DontHave", func() any { return new(xdr.DontHave) }, 23},
 	{"AuthCert", func() any { return new(xdr.AuthCert) }, 22},
 	{"Error", func() any { return new(xdr.Error) }, 3},
@@ -124,11 +123,15 @@ var registry = []xdrType{
 	{"SignerKey", func() any { return new(xdr.SignerKey) }, 7},
 	{"ClaimableBalanceId", func() any { return new(xdr.ClaimableBalanceId) }, 6},
 	{"ClaimableBalanceEntry", func() any { return new(xdr.ClaimableBalanceEntry) }, 5},
+	{"Claimant", func() any { return new(xdr.Claimant) }, 5},
+	{"ClaimPredicate", func() any { return new(xdr.ClaimPredicate) }, 5},
 	{"AccountEntry", func() any { return new(xdr.AccountEntry) }, 5},
 	{"TrustLineEntry", func() any { return new(xdr.TrustLineEntry) }, 5},
+	{"TrustLineEntryExtensionV2", func() any { return new(xdr.TrustLineEntryExtensionV2) }, 5},
 	{"OfferEntry", func() any { return new(xdr.OfferEntry) }, 5},
 	{"DataEntry", func() any { return new(xdr.DataEntry) }, 5},
 	{"LiquidityPoolEntry", func() any { return new(xdr.LiquidityPoolEntry) }, 5},
+	{"LiquidityPoolConstantProductParameters", func() any { return new(xdr.LiquidityPoolConstantProductParameters) }, 5},
 	{"ContractCodeEntry", func() any { return new(xdr.ContractCodeEntry) }, 5},
 }
 
@@ -174,7 +177,7 @@ func decodeInto(t xdrType, payload string) (*Value, error) {
 	rv := reflect.ValueOf(dest).Elem()
 	node := buildNode("", rv, 0)
 	if node == nil {
-		return nil, fmt.Errorf("%s produced an empty tree", t.name)
+		return nil, fmt.Errorf("%w: %s produced an empty tree", ErrInvalidXDR, t.name)
 	}
 	node.TypeName = t.name
 	return &Value{Type: t.name, Node: node, Raw: dest}, nil
@@ -186,11 +189,11 @@ func decodeInto(t xdrType, payload string) (*Value, error) {
 func safeUnmarshal(payload string, dest any) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("decoder panicked on malformed input: %v", r)
+			err = fmt.Errorf("%w: decoder panicked on malformed input: %v", ErrInvalidXDR, r)
 		}
 	}()
 	if err := xdr.SafeUnmarshalBase64(payload, dest); err != nil {
-		return fmt.Errorf("xdr decode: %w", err)
+		return fmt.Errorf("%w: xdr decode: %w", ErrInvalidXDR, err)
 	}
 	return nil
 }
@@ -205,11 +208,11 @@ func safeUnmarshal(payload string, dest any) (err error) {
 func Detect(payload string) ([]Candidate, error) {
 	payload = normalizeInput(payload)
 	if payload == "" {
-		return nil, fmt.Errorf("empty input")
+		return nil, ErrEmptyInput
 	}
 	raw, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
-		return nil, fmt.Errorf("input is not valid base64: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBase64, err)
 	}
 
 	var out []Candidate
@@ -276,10 +279,13 @@ func Decode(payload string) (*Value, error) {
 func DecodeAs(payload, typeName string) (*Value, error) {
 	payload = normalizeInput(payload)
 	if payload == "" {
-		return nil, fmt.Errorf("empty input")
+		return nil, ErrEmptyInput
 	}
 	for _, t := range registry {
 		if strings.EqualFold(t.name, typeName) {
+			if _, err := base64.StdEncoding.DecodeString(payload); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrInvalidBase64, err)
+			}
 			v, err := decodeInto(t, payload)
 			if err != nil {
 				return nil, fmt.Errorf("input is not a valid %s: %w", t.name, err)
