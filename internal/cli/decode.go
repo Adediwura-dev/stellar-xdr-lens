@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,6 +31,8 @@ func newDecodeCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comm
 		annotate    bool
 		listCands   bool
 		compactOut  bool
+		stream      bool
+		canonical   bool
 	)
 
 	cmd := &cobra.Command{
@@ -56,12 +61,34 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
   lens decode --interactive "$XDR"
   lens decode --type TransactionResult "$XDR"
   lens decode --candidates "AAAAAA=="
+  lens decode --stream --file records.xdr
+  lens decode --canonical "$XDR"
   echo "$XDR" | lens decode --depth 3`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if stream {
+				return runStream(stdout, g, firstArg(args), stdin, typeName, asJSON, compactOut, annotate, maxDepth, showTypes, canonical)
+			}
+
 			payload, err := resolveInput(firstArg(args), g.file, stdin)
 			if err != nil {
 				return err
+			}
+
+			if canonical {
+				raw, decErr := base64.StdEncoding.DecodeString(payload)
+				if decErr != nil {
+					return fmt.Errorf("decoding base64: %w", decErr)
+				}
+				if typeName != "" {
+					if err := lens.ValidateTypeCanonicalXDR(raw, typeName); err != nil {
+						return fmt.Errorf("canonical validation failed: %w", err)
+					}
+				} else {
+					if err := lens.ValidateCanonicalXDR(raw); err != nil {
+						return fmt.Errorf("canonical validation failed: %w", err)
+					}
+				}
 			}
 
 			if listCands {
@@ -141,6 +168,8 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 	cmd.Flags().BoolVar(&showTypes, "show-types", false, "annotate tree nodes with their XDR type")
 	cmd.Flags().BoolVar(&listCands, "candidates", false,
 		"list every XDR type the input decodes as, best first")
+	cmd.Flags().BoolVar(&stream, "stream", false, "stream and decode framed XDR chunks (RFC 5531 or length-prefixed)")
+	cmd.Flags().BoolVar(&canonical, "canonical", false, "verify that input adheres strictly to canonical XDR serialization")
 
 	return cmd
 }
@@ -193,6 +222,75 @@ Use arrow keys or j/k to navigate, Enter or Space to toggle node expansion,
 		"path to contract WASM or ScSpecEntry file for spec-aware decoding")
 
 	return cmd
+}
+
+func runStream(stdout io.Writer, g *globalFlags, arg string, stdin io.Reader, typeName string, asJSON, compactOut, annotate bool, maxDepth int, showTypes, canonical bool) error {
+	var r io.Reader
+	if g.file != "" {
+		f, err := os.Open(g.file)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		r = f
+	} else if arg != "" && arg != stdinMarker {
+		r = strings.NewReader(arg)
+	} else {
+		r = stdin
+	}
+
+	parser := lens.NewStreamParser(r)
+	for {
+		raw, err := parser.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+
+		if canonical {
+			if typeName != "" {
+				if err := lens.ValidateTypeCanonicalXDR(raw, typeName); err != nil {
+					return fmt.Errorf("chunk [%d] canonical error: %w", parser.ChunkIndex()-1, err)
+				}
+			} else {
+				if err := lens.ValidateCanonicalXDR(raw); err != nil {
+					return fmt.Errorf("chunk [%d] canonical error: %w", parser.ChunkIndex()-1, err)
+				}
+			}
+		}
+
+		b64 := base64.StdEncoding.EncodeToString(raw)
+		val, err := decodeValue(b64, typeName)
+		if err != nil {
+			return fmt.Errorf("chunk [%d]: %w", parser.ChunkIndex()-1, err)
+		}
+
+		if asJSON {
+			indent := "  "
+			if compactOut {
+				indent = ""
+			}
+			f := format.NewJSONFormatter(
+				format.WithIndent(indent),
+				format.WithAnnotations(annotate),
+			)
+			if err := f.Format(stdout, val); err != nil {
+				return err
+			}
+			continue
+		}
+
+		f := format.NewTreeFormatter(
+			format.WithPalette(format.PaletteFor(stdout, g.color)),
+			format.WithMaxDepth(maxDepth),
+			format.WithTypeNames(showTypes),
+		)
+		if err := f.Format(stdout, val); err != nil {
+			return err
+		}
+	}
 }
 
 // decodeValue decodes a payload, honouring an explicit type when given.

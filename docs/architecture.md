@@ -72,6 +72,9 @@ pkg/lens/              the library; this is the reusable surface
   simulation_explain.go Simulation-failure root-cause decoder (footprint, CPU, fee)
   feebump_explain.go   Fee-bump inner-vs-outer failure separation
   diff.go              structural path diff
+  canonical.go         deterministic canonical XDR validation (RFC 4506) and serialization
+  encode_errors.go     malformed input diagnostics, line/column tracking and error pointers
+  stream_parser.go     stream-oriented XDR reader and chunk parser (RFC 5531, length-prefixed, base64)
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
@@ -683,3 +686,37 @@ Soroban smart contracts encode arguments, return types, storage entries, and eve
   - UDT Unions (`ScSpecUdtUnionV0`): Labels case names and associated values.
   - Function Invocations (`ScSpecFunctionV0`): Resolves function names and parameter lists in `InvokeHostFunctionOp`.
 - Usable via `--spec <spec.xdr|contract.wasm>` in `lens decode`.
+
+## Streaming XDR Architecture (`stream_parser.go`)
+
+Parsing large ledger histories or bulk transaction archives requires stream processing without buffering entire archives in memory:
+
+```
+Framed Stream ──► StreamParser (bufio.Reader) ──► Record Chunk ──► Decode / Unmarshal
+                     │
+         Auto-Detect Framing
+         ├── RFC 5531 Record Marking (4-byte header, bit 31 final-frag flag)
+         ├── Length-Prefixed Framing (4-byte big-endian uint32 prefix)
+         └── Base64 Lines Framing (newline-delimited)
+```
+
+- **Chunked Reassembly**: Multi-fragment RFC 5531 records are streamed fragment-by-fragment and assembled directly into target records.
+- **Strict Bounded Memory**: `WithMaxRecordSize` protects against unbounded memory allocations and OOM crashes from malicious or corrupt streams.
+- **Zero Allocations Drain**: `Drain()` calculates stream metrics without storing historical chunks.
+
+## Canonical XDR Serialization (`canonical.go`)
+
+Adheres strictly to RFC 4506 deterministic serialization:
+
+- **4-Byte Word Alignment**: All records and variable-length segments must align to 4-byte boundaries.
+- **Zero Padding Enforcement**: Trailing padding bytes $(4 - (N \pmod 4)) \pmod 4$ in opaque arrays and strings must strictly be `0x00`. Non-zero padding bytes are detected and rejected as non-canonical leaks (`ErrNonCanonicalPadding`).
+- **Canonical Re-Encoding Verification**: Decodes input as registered XDR types, re-marshals canonically with SDK encoders, and asserts bit-for-bit equivalence, flagging trailing junk (`ErrTrailingGarbage`).
+
+## Malformed Input Diagnostics & Error Pointers (`encode_errors.go`)
+
+When JSON inputs fail syntax validation or schema parsing, `lens` computes exact line and column pointers:
+
+- **Path Tracking**: Resolves dot-and-bracket paths (e.g. `operations[0].amount`) to token byte offsets.
+- **Visual Caret Indicators**: Generates source code snippets with surrounding line context and aligned caret indicators (`^~~~`).
+- **Error Chaining**: Diagnostic errors wrap base causes with full compatibility for `errors.Is` and `errors.As`.
+

@@ -197,6 +197,16 @@ if err := f.FormatSummaries(os.Stdout, summaries); err != nil {
 switches the field delimiter — the column order, and the names scripts address
 by position, are pinned by tests and are a breaking change to alter.
 
+#### Streaming and Canonical Validation
+
+```console
+# Stream framed XDR records (RFC 5531 or length-prefixed) without buffering the whole file
+$ lens decode --stream --file ledger_archive.xdr
+
+# Verify that XDR input adheres strictly to canonical RFC 4506 encoding (no padding leaks)
+$ lens decode --canonical "$XDR"
+```
+
 ### `lens diff` — what changed?
 
 ```console
