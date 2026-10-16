@@ -3,7 +3,6 @@ package lens
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -25,15 +24,6 @@ import (
 // sections and read custom-section payloads. It is deliberately total and
 // offline: no part of it executes the module, and malformed input yields an
 // error rather than a panic.
-var (
-	// ErrNotWASM is returned when a contract's bytecode is not a version 1
-	// WASM module.
-	ErrNotWASM = errors.New("not a version 1 WASM module")
-	// ErrMalformedWASM is returned when a module's section structure or an
-	// embedded metadata stream is corrupt.
-	ErrMalformedWASM = errors.New("malformed WASM module")
-)
-
 // WASM custom section names that carry Soroban contract metadata, per
 // SEP-48 and CAP-0046-01.
 const (
@@ -180,7 +170,7 @@ func decodeSectionStream(content []byte, decode func(*xdr3.Decoder) (int, error)
 			return err
 		}
 		if n <= 0 {
-			return fmt.Errorf("decoder made no progress with %d byte(s) remaining", reader.Len())
+			return fmt.Errorf("%w: decoder made no progress with %d byte(s) remaining", ErrMalformedWASM, reader.Len())
 		}
 	}
 	return nil
@@ -212,13 +202,13 @@ func isWASM(code []byte) bool {
 func readU32(b []byte) (uint32, int, error) {
 	v, n := binary.Uvarint(b)
 	if n <= 0 {
-		return 0, 0, errors.New("truncated or overlong LEB128 value")
+		return 0, 0, fmt.Errorf("%w: truncated or overlong LEB128 value", ErrMalformedWASM)
 	}
 	if n > 5 {
-		return 0, 0, fmt.Errorf("u32 value spans %d bytes, want at most 5", n)
+		return 0, 0, fmt.Errorf("%w: u32 value spans %d bytes, want at most 5", ErrMalformedWASM, n)
 	}
 	if v > math.MaxUint32 {
-		return 0, 0, fmt.Errorf("u32 value %d out of range", v)
+		return 0, 0, fmt.Errorf("%w: u32 value %d out of range", ErrMalformedWASM, v)
 	}
 	return uint32(v), n, nil
 }

@@ -35,6 +35,7 @@ internal/cli/          cobra commands — deliberately thin
   input.go             argument / --file / stdin resolution
   tui_tree.go          interactive terminal tree explorer (TUI)
 pkg/lens/              the library; this is the reusable surface
+  errors.go            stable error kinds and errors.Is-compatible sentinels
   decode.go            type registry, Detect, Decode, DecodeAs
   registry_index.go    introspection: RegistryIndex, categories, min sizes
   node.go              the neutral Node tree — the only file using reflection
@@ -73,6 +74,28 @@ testdata/              real captured mainnet XDR + manifest.json recording prove
 cannot be imported by anyone else, which is deliberate: the CLI is an
 implementation detail, and keeping it internal means its shape is free to change
 without breaking anyone.
+
+## Library errors
+
+Errors from `pkg/lens` use exported sentinels for stable classification. Use
+`errors.Is` to match a specific condition, such as `lens.ErrInvalidBase64`, or
+`errors.As` to inspect the shared `lens.ErrorKind` value. Contextual wrapping
+preserves both forms of inspection:
+
+```go
+if errors.Is(err, lens.ErrInvalidBase64) {
+  // Reject or report the malformed payload.
+}
+
+var kind lens.ErrorKind
+if errors.As(err, &kind) {
+  log.Printf("lens error kind: %s", kind)
+}
+```
+
+Existing exported sentinels such as `ErrNoMatch`, `ErrUnknownType`,
+`ErrNotAsset`, and the WASM/spec errors remain available. Error classification
+is entirely local and does not add network access to library operations.
 
 ## The Node tree
 

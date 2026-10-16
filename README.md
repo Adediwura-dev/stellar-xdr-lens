@@ -293,6 +293,30 @@ func main() {
 See the [API reference](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens)
 and [docs/architecture.md](docs/architecture.md).
 
+### Error handling
+
+Library errors support stable classification with `errors.Is`; callers can
+also use `errors.As` to read the shared `lens.ErrorKind`. For example:
+
+```go
+value, err := lens.Decode(payload)
+if errors.Is(err, lens.ErrInvalidBase64) {
+  return fmt.Errorf("decode payload: %w", err)
+}
+if err != nil {
+  var kind lens.ErrorKind
+  if errors.As(err, &kind) {
+    log.Printf("lens error kind: %s", kind)
+  }
+  return err
+}
+_ = value
+```
+
+The CLI keeps its human-readable error messages on stderr and returns a
+non-zero exit status on failure. Error sentinels and kinds are library APIs;
+existing command flags and output formats are unchanged.
+
 ## A note on type detection
 
 `lens decode` detects the XDR type by trying each known type and keeping the ones
