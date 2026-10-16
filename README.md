@@ -78,6 +78,17 @@ continues to color only terminal output, while `--color always` and
 style parameters produce an error. `NO_COLOR` remains honored in automatic
 mode.
 
+## Contributor validation
+
+The CLI is exercised by subprocess tests in `cmd/lens/e2e_test.go` against the
+canonical fixtures in `testdata/`. These checks run the real command binary, not
+library call wrappers, and intentionally scrub proxy environment variables to
+prove the core execution path stays offline and deterministic in CI.
+
+```sh
+go test ./cmd/lens
+```
+
 ## Usage
 
 ### `lens explain` — why did this fail?
@@ -280,7 +291,7 @@ StellarMessage
 `lens` reads from an argument, a `--file`, or stdin, so it composes:
 
 ```sh
-# Explain a live transaction straight from Horizon
+# If you already have a Horizon response, pipe its XDR field into lens
 curl -s "https://horizon.stellar.org/transactions/$HASH" \
   | jq -r '.envelope_xdr' \
   | lens explain
@@ -291,6 +302,10 @@ lens decode --json "$XDR" | jq -r '.value.V1.Tx.Fee'
 # Gate a deployment on the transaction having succeeded
 lens explain "$ENV" --result "$RES" --fail-on-error || exit 1
 ```
+
+`lens` itself only processes the XDR supplied to it and makes no network calls.
+The optional `curl` pipeline above is a caller-managed input step; use `--file`
+or standard input when working entirely with local data.
 
 The `--json` output has a documented, stable shape:
 
@@ -369,6 +384,77 @@ func main() {
 
 See the [API reference](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens)
 and [docs/architecture.md](docs/architecture.md).
+
+### Failure diagnostics library
+
+Beyond `ExplainPair`, `pkg/lens` ships four offline diagnostics for the
+failures developers hit most often. All take decoded XDR (or captured RPC
+text) and make no network calls; existing CLI flags and output formats are
+unchanged.
+
+```go
+// 1. Insufficient balance: available = balance - selling liabilities - reserve.
+bal, _ := lens.DiagnoseBalance(accountEntry, lens.DefaultBaseReserve, spendStroops)
+fmt.Println(bal.Summary) // names the exact shortfall in stroops and XLM.
+
+// 2. Missing signatures: which signer weights are still needed.
+sig, _ := lens.DiagnoseTransactionSignatures(envelope, accountEntry)
+fmt.Println(sig.Summary) // "supply weight 1 but threshold 2 requires 1 more..."
+
+// 3. Simulation root cause: footprint, CPU/memory, fee, archived, auth, trap.
+sim, _ := lens.DiagnoseSimulationResponse(&lens.SimulationResponse{Error: rpcErr})
+fmt.Println(sim.Kind, sim.Hint) // e.g. missing_footprint + "use the footprint it returns..."
+
+// 4. Fee-bump: did the outer wrapper or the inner transaction fail?
+fb, _ := lens.DiagnoseFeeBump(envelope, result)
+fmt.Println(fb.Stage, fb.Summary) // inner vs outer, with fee-charged accounting.
+```
+
+### Error handling
+
+Library errors support stable classification with `errors.Is`; callers can
+also use `errors.As` to read the shared `lens.ErrorKind`. For example:
+
+```go
+value, err := lens.Decode(payload)
+if errors.Is(err, lens.ErrInvalidBase64) {
+  return fmt.Errorf("decode payload: %w", err)
+}
+if err != nil {
+  var kind lens.ErrorKind
+  if errors.As(err, &kind) {
+    log.Printf("lens error kind: %s", kind)
+  }
+  return err
+}
+_ = value
+```
+
+The CLI keeps its human-readable error messages on stderr and returns a
+non-zero exit status on failure. Error sentinels and kinds are library APIs;
+existing command flags and output formats are unchanged.
+
+Runnable Go examples for decoding, explaining, diffing, asset derivation, and
+other public library workflows are included in
+[`pkg/lens/examples_test.go`](pkg/lens/examples_test.go). They run offline
+against the repository fixtures; see
+[`docs/architecture.md`](docs/architecture.md#runnable-go-examples).
+
+### Decoder performance benchmarks
+
+The Go CLI does not add a benchmark flag; decoding benchmarks are run against
+the library's checked-in XDR fixtures. From the repository root:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'Benchmark(DecodeCanonicalFixtures|DetectCanonicalFixtures|DecodeByProtocolVersion)$' -benchmem
+```
+
+The output includes nanoseconds per operation and allocation statistics.
+Benchmarks run fully offline. Protocol-version cases vary the `LedgerVersion`
+field of the canonical Protocol 22 header fixture (Protocols 20–23), so those
+results compare version values with an otherwise identical XDR structure.
+See [docs/architecture.md](docs/architecture.md#testing-approach) for fixture
+selection and benchmark details.
 
 ## A note on type detection
 

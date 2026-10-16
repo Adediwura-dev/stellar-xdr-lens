@@ -22,6 +22,16 @@ becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
 That is what lets a new output format work for all 58 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
+## End-to-end CLI coverage
+
+The `cmd/lens` package includes end-to-end subprocess tests that execute the
+built `lens` binary against the canonical `testdata/` fixtures. They cover the
+real command surface (`decode`, `explain`, and `diff`), use the same input
+resolution path as users do, and assert the observable CLI output. The suite is
+explicitly offline-first: it runs with the standard proxy variables cleared to
+ensure no network pathway is introduced by the command wrapper or default
+runtime environment.
+
 ## Package layout
 
 ```
@@ -35,6 +45,7 @@ internal/cli/          cobra commands — deliberately thin
   input.go             argument / --file / stdin resolution
   tui_tree.go          interactive terminal tree explorer (TUI)
 pkg/lens/              the library; this is the reusable surface
+  errors.go            stable error kinds and errors.Is-compatible sentinels
   decode.go            type registry, Detect, Decode, DecodeAs
   registry_index.go    introspection: RegistryIndex, categories, min sizes
   node.go              the neutral Node tree — the only file using reflection
@@ -56,6 +67,10 @@ pkg/lens/              the library; this is the reusable surface
   protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
   op_isolator.go       Multi-operation failure isolator (pre-op vs execution pinpointing)
   trap_reasons.go      Soroban trapped host function diagnostic reason decoder
+  balance_explain.go   Insufficient-balance math (liabilities, reserve, shortfall)
+  signature_explain.go Signature-threshold diagnosis (hint matching, missing weight)
+  simulation_explain.go Simulation-failure root-cause decoder (footprint, CPU, fee)
+  feebump_explain.go   Fee-bump inner-vs-outer failure separation
   diff.go              structural path diff
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
@@ -76,6 +91,46 @@ testdata/              real captured mainnet XDR + manifest.json recording prove
 cannot be imported by anyone else, which is deliberate: the CLI is an
 implementation detail, and keeping it internal means its shape is free to change
 without breaking anyone.
+
+## Library errors
+
+Errors from `pkg/lens` use exported sentinels for stable classification. Use
+`errors.Is` to match a specific condition, such as `lens.ErrInvalidBase64`, or
+`errors.As` to inspect the shared `lens.ErrorKind` value. Contextual wrapping
+preserves both forms of inspection:
+
+```go
+if errors.Is(err, lens.ErrInvalidBase64) {
+  // Reject or report the malformed payload.
+}
+
+var kind lens.ErrorKind
+if errors.As(err, &kind) {
+  log.Printf("lens error kind: %s", kind)
+}
+```
+
+Existing exported sentinels such as `ErrNoMatch`, `ErrUnknownType`,
+`ErrNotAsset`, and the WASM/spec errors remain available. Error classification
+is entirely local and does not add network access to library operations.
+
+## Runnable Go examples
+
+[`pkg/lens/examples_test.go`](../pkg/lens/examples_test.go) contains executable
+`godoc` examples for the main public workflows: decoding and detecting XDR,
+structural diffs, transaction explanations, asset contract-id derivation,
+reason lookup, registry introspection, contract-spec parsing, and error
+classification. The examples use the checked-in fixtures in `testdata/` and
+deterministic local values; they make no network calls.
+
+Run them together with the library tests from the repository root:
+
+```sh
+go test -v -race ./pkg/...
+```
+
+Examples are ordinary Go examples, so they are also shown on
+[pkg.go.dev](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens).
 
 ## The Node tree
 
@@ -198,6 +253,20 @@ returning a misleading string.
 
 The registry is populated once before any decoding happens and is read-only
 afterwards, so it needs no locking.
+
+### Offer entries and price fractions
+
+`pkg/lens/offer_entry.go` teaches the tool about DEX order book offers:
+
+- `xdr.Price` renders as an `n/d` fraction with its decimal value, e.g.
+  `Price: 7/3 (= 2.3333333)`. A zero denominator is malformed, so the enricher
+  declines and the generic walker renders the raw numerator and denominator
+  instead of dividing by zero.
+- `xdr.OfferEntry` is already registered (priority 5) so `lens decode --type
+  OfferEntry` decodes a ledger offer and renders its seller as a strkey
+  address, its assets in `CODE:ISSUER` form (`native` for XLM), its amount in
+  stroops, its price as a fraction, and its flags. An offer embedded in a
+  `LedgerEntry` decodes the same way at `Data.Offer`.
 
 ### Field-name enrichment
 
@@ -413,6 +482,90 @@ diagnostic events to extract:
 
 The CLI exposes this via `lens explain --meta <path-or-base64>`.
 
+## Insufficient-balance and liabilities math
+
+`tx_insufficient_balance`, `payment_underfunded` and their siblings mean
+"the math did not fit", not "the account is empty": selling liabilities lock
+part of the balance and the base reserve must stay untouched.
+
+[`balance_explain.go`](../pkg/lens/balance_explain.go) computes the exact
+shortfall offline from a ledger entry plus a base reserve:
+
+- `AccountSellingLiabilities` / `AccountBuyingLiabilities` read the V1
+  liabilities extension (zero when absent).
+- `ReserveRequirement` implements
+  `(2 + numSubEntries + numSponsoring - numSponsored) * baseReserve`, with
+  `AccountReserveRequirement` pulling the counters from the V2 extension.
+- `DiagnoseBalance(entry, baseReserve, amountToSpend)` returns the available
+  balance, the shortfall in stroops and XLM, and a funding hint; a
+  `baseReserve` of 0 selects `DefaultBaseReserve` (0.5 XLM).
+- `DiagnoseTrustlineSpend` covers non-native balances, where only selling
+  liabilities reduce the spendable amount.
+
+Verified against the `account_entry_ext_v1/v2` and `trustline_entry_v1`
+fixtures; runnable examples live in `pkg/lens/examples_test.go` style tests
+alongside the unit suite.
+
+## Signature-threshold diagnosis
+
+`tx_bad_auth` and `op_bad_auth` mean "not enough signer weight", but the
+result code never says which signer is missing.
+
+[`signature_explain.go`](../pkg/lens/signature_explain.go) compares the
+envelope's `DecoratedSignature` hints against the account's signer set:
+
+- `OperationThresholdLevel` maps each operation to `low` (allow trust, set
+  trust-line flags, bump sequence, claim claimable balance), `high` (account
+  merge, set options) or `medium` (everything else).
+- `SignerHint` derives the 4-byte hint stellar-core uses (last four bytes of
+  the key), so matching needs no transaction hash and no network.
+- `DiagnoseSignatures(entry, sigs, threshold)` sums the weight of matched
+  signers, counts unknown signatures separately, and names the missing
+  signers; `DiagnoseTransactionSignatures` picks the threshold from the first
+  operation automatically.
+
+## Simulation-failure root cause
+
+`simulateTransaction` failures arrive as RPC error strings, not XDR result
+codes: "missing footprint key", "CPU budget exceeded", "insufficient
+refundable fee" and friends.
+
+[`simulation_explain.go`](../pkg/lens/simulation_explain.go) classifies those
+strings offline into a stable `SimulationKind` (`missing_footprint`,
+`cpu_exceeded`, `memory_exceeded`, `insufficient_fee`, `archived_entry`,
+`auth_missing`, `contract_trapped`, `invalid_input`, `unknown`):
+
+- `DiagnoseSimulationError(msg)` does case-insensitive substring matching and
+  never fails on unrecognised text (it yields `unknown`).
+- `DiagnoseSimulationResponse(resp)` prefers structured fields when present:
+  explicit `MissingKeys`, CPU/memory used-vs-limit counters, and the
+  recommended `MinResourceFee` are folded into the summary and hint.
+- `DiagnoseMissingFootprint` and `DiagnoseResourceExhaustion` cover callers
+  that already extracted keys or budgets numerically.
+
+`SimulationResponse` mirrors the RPC JSON names so callers can unmarshal a
+captured response directly; lens never fetches it.
+
+## Fee-bump inner-vs-outer separation
+
+A fee-bump result carries two verdicts: the outer wrapper's and the inner
+transaction's. Fixing the wrong half wastes a rebuild.
+
+[`feebump_explain.go`](../pkg/lens/feebump_explain.go) separates them:
+
+- `DiagnoseFeeBump(env, res)` reports `Stage` as `inner` (wrapper valid, inner
+  failed — fee still charged to the fee-bump source), `outer` (wrapper
+  rejected before the inner ran — inner codes are not the cause), `none`
+  (both applied) or `not_fee_bump` for classic transactions.
+- The diagnosis records both short codes, both plain-English reasons, the fee
+  source and inner source addresses, the fee charged, and the failing inner
+  operation indexes, plus a `DiagnosticReport()` for CLI-style output.
+- `DiagnoseFeeBumpFromValues` accepts decoded `*lens.Value`s, matching the
+  `ExplainPair` calling convention.
+
+Verified against the canonical `tx_failed` (inner failure), `tx_soroban`
+(inner success) and `tx_success` (non-fee-bump) fixtures.
+
 ## Testing approach
 
 Fixtures in `testdata/` are **real captured mainnet transactions**, with
@@ -432,6 +585,22 @@ exactly.
 Where a case cannot be captured — every classic operation type, memo variant and
 precondition shape — tests construct XDR with the SDK encoder and round-trip it
 through the real decode path, rather than reaching into internals.
+
+Decoder benchmarks live in
+[`pkg/lens/benchmarks_test.go`](../pkg/lens/benchmarks_test.go) and use only
+checked-in `testdata/` fixtures. Run them from the repository root with:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'Benchmark(DecodeCanonicalFixtures|DetectCanonicalFixtures|DecodeByProtocolVersion)$' -benchmem
+```
+
+The fixture benchmarks report decode and type-detection latency, allocations,
+and input throughput for representative transactions, ledger data and overlay
+messages. The protocol-version benchmark starts with the canonical Protocol 22
+ledger-header fixture and re-encodes its `LedgerVersion` as Protocols 20–23.
+Those cases deliberately keep the header's XDR shape and all other fields
+constant: they compare decoder cost across the version values, not historical
+wire-schema changes. No benchmark or library decode path makes network calls.
 
 The suite deliberately targets properties that would break the tool if violated:
 
