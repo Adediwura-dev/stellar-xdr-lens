@@ -2,7 +2,6 @@ package lens
 
 import (
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -333,7 +332,7 @@ func ExtractDiagnosticEvents(meta *xdr.TransactionMeta) []xdr.DiagnosticEvent {
 // the trapped host function reason.
 func DecodeTrapFromMeta(meta *xdr.TransactionMeta) (*TrappedReason, error) {
 	if meta == nil {
-		return nil, errors.New("cannot decode trap from nil TransactionMeta")
+		return nil, fmt.Errorf("%w: cannot decode trap from nil TransactionMeta", ErrInvalidArgument)
 	}
 	events := ExtractDiagnosticEvents(meta)
 	return DecodeTrapReason(events)
@@ -343,7 +342,7 @@ func DecodeTrapFromMeta(meta *xdr.TransactionMeta) (*TrappedReason, error) {
 // a host function trapped, and if so, correlates the failure with diagnostic events.
 func CorrelateTrap(res *xdr.TransactionResult, meta *xdr.TransactionMeta) (*TrappedReason, error) {
 	if res == nil {
-		return nil, errors.New("cannot correlate trap from nil TransactionResult")
+		return nil, fmt.Errorf("%w: cannot correlate trap from nil TransactionResult", ErrInvalidArgument)
 	}
 
 	// Verify if transaction resulted in a trapped host function
@@ -399,11 +398,11 @@ func CorrelateTrap(res *xdr.TransactionResult, meta *xdr.TransactionMeta) (*Trap
 // decoded TransactionMeta Value.
 func CorrelateTrapFromValues(resVal *Value, metaVal *Value) (*TrappedReason, error) {
 	if resVal == nil {
-		return nil, errors.New("result Value is required")
+		return nil, fmt.Errorf("%w: result Value is required", ErrInvalidArgument)
 	}
 	res, ok := resVal.Raw.(*xdr.TransactionResult)
 	if !ok {
-		return nil, fmt.Errorf("expected *xdr.TransactionResult, got %T", resVal.Raw)
+		return nil, fmt.Errorf("%w: expected *xdr.TransactionResult, got %T", ErrInvalidArgument, resVal.Raw)
 	}
 
 	var meta *xdr.TransactionMeta

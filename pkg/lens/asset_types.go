@@ -1,16 +1,11 @@
 package lens
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
-
-// ErrNotAsset is returned when a value offered for asset inspection is not a
-// classic Asset.
-var ErrNotAsset = errors.New("value is not a classic asset")
 
 // AssetDetails describes a classic Stellar asset together with the derived
 // identifiers a caller needs to work with it. ContractID is the Stellar Asset
@@ -67,7 +62,7 @@ func DescribeAssetValue(v *Value, networkPassphrase string) (*AssetDetails, erro
 // long as the network passphrase is.
 func SACContractID(asset xdr.Asset, networkPassphrase string) (string, error) {
 	if networkPassphrase == "" {
-		return "", errors.New("network passphrase must not be empty")
+		return "", ErrInvalidNetworkPassphrase
 	}
 	hash, err := asset.ContractID(networkPassphrase)
 	if err != nil {
@@ -87,7 +82,7 @@ func SACContractID(asset xdr.Asset, networkPassphrase string) (string, error) {
 func describeAsset(asset xdr.Asset, networkPassphrase string) (details *AssetDetails, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			details, err = nil, fmt.Errorf("malformed asset: %v", r)
+			details, err = nil, fmt.Errorf("%w: %v", ErrMalformedAsset, r)
 		}
 	}()
 
