@@ -121,14 +121,24 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
-#### Streaming and Canonical Validation
+#### Alternative Formats and Interactive Explorer
 
 ```console
-# Stream framed XDR records (RFC 5531 or length-prefixed) without buffering the whole file
-$ lens decode --stream --file ledger_archive.xdr
+# Terse single-line summary suitable for grep and shell pipelines
+$ lens decode --summary --file envelope.xdr
+# or: lens decode --format summary --file envelope.xdr
 
-# Verify that XDR input adheres strictly to canonical RFC 4506 encoding (no padding leaks)
-$ lens decode --canonical "$XDR"
+# SEP-0011 TxRep human-readable format
+$ lens decode --txrep --file envelope.xdr
+# or: lens decode --format txrep --file envelope.xdr
+
+# Interactive terminal tree explorer (TUI)
+$ lens decode -i --file envelope.xdr
+# or use the dedicated command:
+$ lens explore --file envelope.xdr
+
+# Contract spec-aware ScVal decoding from contract WASM or spec XDR
+$ lens decode --spec contract.wasm --file invocation.xdr
 ```
 
 ### `lens diff` — what changed?
@@ -152,6 +162,42 @@ TransactionResult
 ```
 
 Use `--exit-code` to exit non-zero when the values differ, like `diff(1)`.
+
+### `lens asset` — derive a Stellar Asset Contract id
+
+Classic assets have deterministic Stellar Asset Contract ids: the network
+passphrase and the asset are hashed into a `C…` address. `lens` computes it
+offline, so you can go from an asset to its contract without an RPC call:
+
+```console
+$ lens asset "AAAAAVVTREMAAAAAO5kROA7+mIugqJAOsc/kTzZvfb6Ua+0HckD39iTfFcU="
+Network      mainnet
+Type         credit_alphanum4
+Code         USDC
+Issuer       GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+Canonical    USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+Contract ID  CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75
+```
+
+`--network` accepts `mainnet`, `testnet`, `futurenet`, or a raw passphrase —
+the same asset has a different contract address on each network. `--json`
+emits the details with camelCase keys.
+
+### `lens types` — what can it decode?
+
+`lens types` lists the registered type names. `--json` adds the category, a
+one-line description, the detection priority and the minimum encoded size:
+
+```console
+$ lens types --json | jq -r '.[] | select(.category == "overlay") | .name'
+Auth
+AuthCert
+DontHave
+Error
+Hello
+PeerAddress
+StellarMessage
+```
 
 ### Piping and scripting
 
@@ -255,15 +301,20 @@ On transaction-sized payloads this is reliable — the test suite asserts that e
 real fixture matches exactly one type.
 
 Short values are genuinely ambiguous, though. An empty `Memo` and a native `Asset`
-are both `AAAAAA==`, because they are the same four bytes. `lens` reports this
-rather than guessing silently:
+are both `AAAAAA==`, because they are the same four bytes. The overlay `Auth`
+flags and a void `ScVal` collide the same way, and short messages like `DontHave`
+also decode as a `LedgerKey` or TTL entry. Some longer aliases are inherent to the
+wire format too: `HotArchiveBucketEntry` is byte-identical to the matching
+`BucketEntry` arm, and `BucketMetadata` collides with some `ScVal` encodings.
+`lens` reports these rather than guessing silently:
 
 ```console
 $ lens decode --candidates "AAAAAA=="
 * Memo
   Asset
+  Auth
 
-2 types matched; the starred one is used by default. Use --type to choose.
+3 types matched; the starred one is used by default. Use --type to choose.
 ```
 
 Pass `--type` when you need certainty.
@@ -273,9 +324,10 @@ Pass `--type` when you need certainty.
 **Early but real.** v0.1 does what this README says, with tests over real captured
 mainnet XDR. The library API may still shift before v1.0 — it is not yet frozen.
 
-- Supports 25 XDR types out of the ~400 in the protocol, chosen to cover what
-  developers actually paste into a terminal. Adding more is a one-line change;
-  see [docs/architecture.md](docs/architecture.md).
+- Supports 54 XDR types out of the ~400 in the protocol, chosen to cover what
+  developers actually paste into a terminal: transactions, ledger entries, SCP,
+  overlay messages, history-archive sets and Soroban. Adding more is a one-line
+  change; see [docs/architecture.md](docs/architecture.md).
 - All 208 protocol result codes are explained.
 - No network access anywhere in the library or the tests.
 

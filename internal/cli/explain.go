@@ -18,9 +18,12 @@ func newExplainCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Com
 	var (
 		resultArg  string
 		resultFile string
+		metaArg    string
+		metaFile   string
 		asJSON     bool
 		verbose    bool
 		failOnErr  bool
+		isolate    bool
 	)
 
 	cmd := &cobra.Command{
@@ -31,7 +34,12 @@ func newExplainCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Com
 Given an envelope, explain describes the source account, preconditions and
 each operation. Given a result, it explains the outcome. Given both — via
 --result — it attributes each result code to the operation that produced it,
-which is what actually answers "why did this fail".`,
+which is what actually answers "why did this fail".
+
+Use --isolate to pinpoint the exact failing operation and distinguish
+pre-operation check failures from operation execution failures.
+Use --meta / --meta-file to correlate trapped Soroban host invocations with
+diagnostic events and display contract panic messages.`,
 		Example: `  # Envelope alone: what would this transaction do?
   lens explain "$ENVELOPE"
 
@@ -40,6 +48,12 @@ which is what actually answers "why did this fail".`,
 
   # Both: which operation failed, and why
   lens explain "$ENVELOPE" --result "$RESULT"
+
+  # Pinpoint failing operation index and pre-op vs execution failure
+  lens explain "$ENVELOPE" --result "$RESULT" --isolate
+
+  # Decode Soroban contract panic message from diagnostic events
+  lens explain "$ENVELOPE" --result "$RESULT" --meta "$META"
 
   # In CI: exit non-zero when the transaction failed
   lens explain "$ENVELOPE" --result "$RESULT" --fail-on-error`,
@@ -55,9 +69,22 @@ which is what actually answers "why did this fail".`,
 				return err
 			}
 
-			summary, err := buildSummary(primary, resultArg, resultFile)
+			summary, resultVal, err := buildSummary(primary, resultArg, resultFile)
 			if err != nil {
 				return err
+			}
+
+			// Handle optional metadata correlation for Soroban trapped host calls
+			metaPayload, err := readOptional(metaArg, metaFile)
+			if err != nil {
+				return err
+			}
+			var metaVal *lens.Value
+			if metaPayload != "" {
+				metaVal, err = lens.Decode(metaPayload)
+				if err != nil {
+					return fmt.Errorf("decoding --meta: %w", err)
+				}
 			}
 
 			if asJSON {
@@ -74,6 +101,46 @@ which is what actually answers "why did this fail".`,
 				if err := f.Format(stdout, summary); err != nil {
 					return err
 				}
+
+				// If failure isolation requested, print the report
+				if isolate && summary.Outcome != nil {
+					var resVal *lens.Value
+					var envVal *lens.Value
+					if primary.Type == "TransactionResult" {
+						resVal = primary
+					} else {
+						envVal = primary
+						resVal = resultVal
+					}
+					if resVal != nil {
+						if isolated, err := lens.IsolateFailureFromValue(resVal, envVal); err == nil {
+							fmt.Fprintln(stdout)
+							fmt.Fprint(stdout, isolated.DiagnosticReport())
+						}
+					}
+				}
+
+				// If meta is supplied and transaction had trapped operations, display trap reason
+				if metaVal != nil && summary.Outcome != nil {
+					var resVal *lens.Value
+					if primary.Type == "TransactionResult" {
+						resVal = primary
+					} else {
+						resVal = resultVal
+					}
+					if resVal != nil {
+						if trap, err := lens.CorrelateTrapFromValues(resVal, metaVal); err == nil && trap.Trapped {
+							fmt.Fprintln(stdout)
+							fmt.Fprintf(stdout, "Trapped Reason: %s\n", trap.Summary)
+							if trap.PanicMessage != "" {
+								fmt.Fprintf(stdout, "Panic Message:  %s\n", trap.PanicMessage)
+							}
+							if trap.Hint != "" {
+								fmt.Fprintf(stdout, "Hint:           %s\n", trap.Hint)
+							}
+						}
+					}
+				}
 			}
 
 			// Reporting failure through the exit code is what makes this
@@ -89,6 +156,12 @@ which is what actually answers "why did this fail".`,
 		"the base64 TransactionResult that accompanies the envelope")
 	cmd.Flags().StringVar(&resultFile, "result-file", "",
 		"read the TransactionResult from a file")
+	cmd.Flags().StringVar(&metaArg, "meta", "",
+		"the base64 TransactionMeta to correlate diagnostic events")
+	cmd.Flags().StringVar(&metaFile, "meta-file", "",
+		"read the TransactionMeta from a file")
+	cmd.Flags().BoolVar(&isolate, "isolate", false,
+		"isolate and pinpoint the exact failing operation index")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the summary as JSON")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false,
 		"include the underlying XDR result-code constants")
@@ -125,28 +198,28 @@ func ExitCode(err error) (code int, printable bool) {
 
 // buildSummary decides whether to explain one value or a pair, based on what
 // the user supplied and what the primary payload turned out to be.
-func buildSummary(primary *lens.Value, resultArg, resultFile string) (*lens.Summary, error) {
+func buildSummary(primary *lens.Value, resultArg, resultFile string) (*lens.Summary, *lens.Value, error) {
 	resultPayload, err := readOptional(resultArg, resultFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if resultPayload == "" {
 		summary, err := lens.Explain(primary)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return summary, nil
+		return summary, nil, nil
 	}
 
 	result, err := lens.Decode(resultPayload)
 	if err != nil {
-		return nil, fmt.Errorf("decoding --result: %w", err)
+		return nil, nil, fmt.Errorf("decoding --result: %w", err)
 	}
 	summary, err := lens.ExplainPair(primary, result)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return summary, nil
+	return summary, result, nil
 }
 
 // readOptional resolves an optional payload from an inline value or a file.
