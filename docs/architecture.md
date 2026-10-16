@@ -14,7 +14,7 @@ Everything flows one way:
 ```
 base64 ──► detect ──► xdr decode ──► Node tree ──► enrich ──► Formatter ──► output
               │            │             │                        │
-        registry      stellar SDK    neutral IR            tree │ json │ text │ diff
+        registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep
 ```
 
 The important property is that **only one stage knows about XDR**. Once a value
@@ -27,12 +27,13 @@ and lets the differ work without knowing what it is comparing.
 ```
 cmd/lens/              main; wires os.Args to internal/cli and maps errors to exit codes
 internal/cli/          cobra commands — deliberately thin
-  root.go              command tree, global flags
-  decode.go            decode + types commands
+  root.go              command tree, global flags, explore (TUI) command
+  decode.go            decode + types commands, formatting and spec decoding flags
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
   asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
+  tui_tree.go          interactive terminal tree explorer (TUI)
 pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
   registry_index.go    introspection: RegistryIndex, categories, min sizes
@@ -47,13 +48,20 @@ pkg/lens/              the library; this is the reusable surface
   asset_types.go       asset details and Stellar Asset Contract id derivation
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
+  reason_lookup.go     O(1) short code lookup table (ReasonByCode)
+  protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
+  op_isolator.go       Multi-operation failure isolator (pre-op vs execution pinpointing)
+  trap_reasons.go      Soroban trapped host function diagnostic reason decoder
   diff.go              structural path diff
+  spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
     tree.go            colourised tree
     json.go            stable JSON
     text.go            explain summaries
     diff.go            diff rendering
+    summary.go         compact single-line summary (grep/pipeline friendly)
+    txrep.go           SEP-0011 human-readable TxRep format
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -295,6 +303,77 @@ The rest of `explain.go` uses the concrete SDK types, because
 envelopes. Using them is both clearer and more correct than re-deriving that
 logic from the tree.
 
+## Reason lookup table (ReasonByCode)
+
+Downstream consumers (such as `focus` and automated diagnostic linters) frequently
+require O(1) random-access lookups for short canonical result codes without
+performing linear scans or importing raw XDR definitions.
+
+[`reason_lookup.go`](../pkg/lens/reason_lookup.go) provides:
+
+- `lens.ReasonByCode(short string) (Reason, bool)`: thread-safe, case-insensitive
+  O(1) resolution of canonical short codes (e.g. `payment_underfunded`, `tx_bad_seq`).
+- `lens.AllReasons() []Reason`: sorted slice of all registered reasons for enumeration.
+- `lens.ReasonLookupTable() map[string]Reason`: snapshot copy of the full lookup map.
+
+The lookup table is precomputed at initialization and automatically updated
+whenever protocol extension packages register additional result codes.
+
+## Protocol 21+ Error Codes and Explanations
+
+Stellar Protocol 21 and 22 introduce state archival, TTL management, key freezing,
+and expanded Soroban host error semantics. [`protocol21_reasons.go`](../pkg/lens/protocol21_reasons.go)
+provides plain-English diagnostic explanations and actionable remediation hints for:
+
+- **State Archival & Key Freezing**: `tx_frozen_key_accessed` (CAP-0056) when an
+  operation attempts to access an expired, frozen ledger entry.
+- **Soroban State and Fee Codes**: `invoke_host_function_entry_archived`,
+  `invoke_host_function_insufficient_refundable_fee`,
+  `extend_footprint_ttl_insufficient_refundable_fee`, and
+  `restore_footprint_insufficient_refundable_fee`.
+- **Soroban Host Errors**: Full decoders for `xdr.ScError`, mapping error types
+  (`ScErrorTypeSceStorage`, `ScErrorTypeSceBudget`, `ScErrorTypeSceWasmVm`, etc.)
+  and error codes (`ScErrorCodeScecIndexBounds`, `ScErrorCodeScecExceededLimit`, etc.)
+  into descriptive developer-facing errors.
+
+## Multi-Operation Transaction Failure Isolator
+
+Stellar transactions execute atomically. When a transaction contains multiple
+operations, developers need to isolate:
+
+1. **Pre-operation Check Failures**: Transaction-level failures (e.g. `tx_bad_seq`,
+   `tx_bad_auth`, `tx_too_early`, `tx_insufficient_balance`) reject the transaction
+   during header and precondition validation before any operation runs.
+2. **Operation Execution Failures**: The transaction passed pre-operation checks and
+   was applied up to the failing operation index.
+
+[`op_isolator.go`](../pkg/lens/op_isolator.go) inspects envelopes and results to pinpoint:
+
+- The exact zero-based operation index where execution halted (`FailingOpIndex`).
+- The operation type name (`FailingOpType`, e.g. `payment`, `manage_buy_offer`).
+- Whether the failure was a `pre_operation` check failure or an `operation` execution failure.
+- A comprehensive multi-line `DiagnosticReport()` for debugging.
+
+The CLI exposes this via `lens explain --isolate`.
+
+## Soroban Trapped Host Function Diagnostic Decoder
+
+When a Soroban contract call traps, the transaction result code is simply
+`invoke_host_function_trapped` without internal error details. The actionable panic
+string or host abort reason is stored in `DiagnosticEvent` payloads within transaction
+metadata (`TransactionMeta.V3.SorobanMeta.DiagnosticEvents`).
+
+[`trap_reasons.go`](../pkg/lens/trap_reasons.go) correlates trapped invocations with
+diagnostic events to extract:
+
+- **Panic Messages**: Human-readable strings from `log` and `panic` topics/data.
+- **Host & Contract Errors**: Decoded `ScError` values including custom contract error codes.
+- **Contract & Function Identity**: Identifies the contract ID (rendered as strkey `C...`)
+  and function name in the failing execution frame.
+- **Diagnostic Trace**: Chronological trace of diagnostic events leading to the abort.
+
+The CLI exposes this via `lens explain --meta <path-or-base64>`.
+
 ## Testing approach
 
 Fixtures in `testdata/` are **real captured mainnet transactions**, with
@@ -326,3 +405,46 @@ The suite deliberately targets properties that would break the tool if violated:
   (`TestExplainPairAttributesFailureToOperation`);
 - JSON output is deterministic and omits nulls;
 - every result code has a real explanation.
+
+## Compact single-line summary (`pkg/lens/format/summary.go`)
+
+`CompactFormatter` serialises any decoded XDR `*lens.Value` into a terse, single-line format ideal for shell pipelines, `grep`, and quick log examination.
+- Envelopes and Transactions output source accounts, sequence numbers, operation counts, and fees.
+- Operation results and transaction results highlight execution codes and failure/success status.
+- Nested structures are flattened into concise key-value tokens (`type=TransactionEnvelope v1 source=G... ops=1 fee=100 stroops`).
+- Like all formatters, it is strictly offline and adheres to the `Formatter` interface without calling network APIs.
+
+## SEP-0011 TxRep formatter (`pkg/lens/format/txrep.go`)
+
+`TxRepFormatter` implements the human-readable [SEP-0011 TxRep](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0011.md) standard format for Stellar transaction envelopes.
+- Emits canonical TxRep colon-delimited lines (e.g. `tx.sourceAccount: G...`, `tx.fee: 100`, `tx.operations[0].body.paymentOp...`).
+- Handles `TransactionEnvelope` variants: V0, V1, and FeeBump envelopes.
+- Formats signatures with key hints and base64 payloads (`tx.signatures[0].signature: ...`).
+- Generates valid TxRep output for debugging and multisig coordination offline.
+
+## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
+
+`TUITree` provides a curses-like interactive navigation experience within standard ANSI terminals for exploring deeply nested XDR structures.
+- Launchable with `lens decode -i`, `lens decode --interactive`, or `lens explore` / `lens tui`.
+- Keybindings:
+  - `j` / `Down`: Move selection down
+  - `k` / `Up`: Move selection up
+  - `Enter` / `Space` / `Right`: Expand or toggle node
+  - `Left` / `h`: Collapse node or jump to parent
+  - `e`: Expand all nodes
+  - `c`: Collapse all nodes
+  - `/`: Search / filter node paths
+  - `q` / `Ctrl+C`: Quit
+- Pure offline terminal handling using raw mode and ANSI escape codes with fallback to static rendering in non-TTY environments.
+
+## Contract spec-aware ScVal decoding (`pkg/lens/spec_decode.go`)
+
+Soroban smart contracts encode arguments, return types, storage entries, and events as opaque `xdr.ScVal` structures. `pkg/lens/spec_decode.go` resolves these generic values against contract specifications:
+- Accepts contract specs as raw XDR byte slices/streams or extracted from WebAssembly (`.wasm`) binaries via the `contractspecv0` custom section.
+- Resolves:
+  - UDT Structs (`ScSpecUdtStructV0`): Maps tuple/map fields to human-readable struct member names.
+  - UDT Enums (`ScSpecUdtEnumV0`): Maps numeric discriminant values to enum variant identifiers.
+  - UDT Unions (`ScSpecUdtUnionV0`): Labels case names and associated values.
+  - Function Invocations (`ScSpecFunctionV0`): Resolves function names and parameter lists in `InvokeHostFunctionOp`.
+- Usable via `--spec <spec.xdr|contract.wasm>` in `lens decode`.
+

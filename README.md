@@ -121,29 +121,25 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
-`lens decode --type ContractDataEntry` decodes Soroban contract data and names
-its storage level. `persistent` and `temporary` come from the wire durability;
-instance storage keeps persistent durability on the wire and is recognised by
-its special key:
+#### Alternative Formats and Interactive Explorer
 
 ```console
-$ lens decode --type ContractDataEntry "$TEMP"
-ContractDataEntry
-├─ Ext
-│  └─ V: 0
-├─ Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3
-├─ Key
-│  ├─ Type: ScValTypeScvSymbol
-│  └─ Sym: SEEN
-├─ Durability: temporary
-└─ Val
-   ├─ Type: ScValTypeScvBool
-   └─ B: true
-```
+# Terse single-line summary suitable for grep and shell pipelines
+$ lens decode --summary --file envelope.xdr
+# or: lens decode --format summary --file envelope.xdr
 
-For an instance entry the same fields render as `Key: instance storage key`
-with `Durability: persistent`, which is what separates instance storage from an
-ordinary persistent entry.
+# SEP-0011 TxRep human-readable format
+$ lens decode --txrep --file envelope.xdr
+# or: lens decode --format txrep --file envelope.xdr
+
+# Interactive terminal tree explorer (TUI)
+$ lens decode -i --file envelope.xdr
+# or use the dedicated command:
+$ lens explore --file envelope.xdr
+
+# Contract spec-aware ScVal decoding from contract WASM or spec XDR
+$ lens decode --spec contract.wasm --file invocation.xdr
+```
 
 ### `lens diff` — what changed?
 
