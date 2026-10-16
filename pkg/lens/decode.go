@@ -68,11 +68,37 @@ var registry = []xdrType{
 	{"LedgerCloseMeta", func() any { return new(xdr.LedgerCloseMeta) }, 85},
 	{"LedgerEntry", func() any { return new(xdr.LedgerEntry) }, 80},
 	{"LedgerKey", func() any { return new(xdr.LedgerKey) }, 75},
+	{"LedgerCloseMetaBatch", func() any { return new(xdr.LedgerCloseMetaBatch) }, 54},
 	{"LedgerHeader", func() any { return new(xdr.LedgerHeader) }, 50},
 	{"LedgerHeaderHistoryEntry", func() any { return new(xdr.LedgerHeaderHistoryEntry) }, 45},
-	// ScpValue carries the upgrades a validator voted for; upgrade votes are
-	// otherwise unreachable because the protocol keeps them as opaque bytes.
-	{"StellarValue", func() any { return new(xdr.StellarValue) }, 44},
+	{"TransactionHistoryEntry", func() any { return new(xdr.TransactionHistoryEntry) }, 42},
+	{"TransactionHistoryResultEntry", func() any { return new(xdr.TransactionHistoryResultEntry) }, 41},
+
+	// Bucket-list and consensus types: the ledger-state archive and the
+	// protocol messages that agree on it.
+	{"BucketEntry", func() any { return new(xdr.BucketEntry) }, 49},
+	{"BucketMetadata", func() any { return new(xdr.BucketMetadata) }, 48},
+	{"HotArchiveBucketEntry", func() any { return new(xdr.HotArchiveBucketEntry) }, 47},
+	{"ScpEnvelope", func() any { return new(xdr.ScpEnvelope) }, 46},
+	{"ScpStatement", func() any { return new(xdr.ScpStatement) }, 44},
+	{"ScpQuorumSet", func() any { return new(xdr.ScpQuorumSet) }, 43},
+
+	// Generalized transaction sets: the phase-based form introduced in
+	// protocol 19, and the legacy v0 set it replaced.
+	{"GeneralizedTransactionSet", func() any { return new(xdr.GeneralizedTransactionSet) }, 30},
+	{"TransactionSetV1", func() any { return new(xdr.TransactionSetV1) }, 29},
+	{"TransactionSet", func() any { return new(xdr.TransactionSet) }, 28},
+
+	// Overlay (peer-to-peer) types: the messages Stellar Core nodes exchange
+	// to find each other and share data. Hello and StellarMessage are
+	// message-sized; Auth is a bare 4-byte flag word, so it ranks very low.
+	{"StellarMessage", func() any { return new(xdr.StellarMessage) }, 36},
+	{"Hello", func() any { return new(xdr.Hello) }, 35},
+	{"PeerAddress", func() any { return new(xdr.PeerAddress) }, 27},
+	{"DontHave", func() any { return new(xdr.DontHave) }, 23},
+	{"AuthCert", func() any { return new(xdr.AuthCert) }, 22},
+	{"Error", func() any { return new(xdr.Error) }, 3},
+	{"Auth", func() any { return new(xdr.Auth) }, 2},
 
 	// Soroban types.
 	{"ScVal", func() any { return new(xdr.ScVal) }, 40},
@@ -81,6 +107,12 @@ var registry = []xdrType{
 	{"SorobanTransactionData", func() any { return new(xdr.SorobanTransactionData) }, 33},
 	{"SorobanAuthorizationEntry", func() any { return new(xdr.SorobanAuthorizationEntry) }, 32},
 	{"DiagnosticEvent", func() any { return new(xdr.DiagnosticEvent) }, 31},
+
+	// State-archival entries: TTL records, the keys that identify them, and
+	// the eviction cursor validators walk when expiring them.
+	{"TtlEntry", func() any { return new(xdr.TtlEntry) }, 39},
+	{"LedgerKeyTtl", func() any { return new(xdr.LedgerKeyTtl) }, 38},
+	{"EvictionIterator", func() any { return new(xdr.EvictionIterator) }, 37},
 
 	// Smaller building blocks. These decode from very short payloads and are
 	// frequently ambiguous with one another, hence the low priority.
