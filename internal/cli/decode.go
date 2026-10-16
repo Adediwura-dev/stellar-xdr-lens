@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -131,15 +132,36 @@ func runCandidates(stdout io.Writer, payload string) error {
 }
 
 func newTypesCmd(stdout io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+
+	cmd := &cobra.Command{
 		Use:   "types",
 		Short: "List the XDR types lens can decode",
-		Args:  cobra.NoArgs,
+		Long: `List every XDR type lens can decode.
+
+With --json the command emits the introspection index: the name, category,
+one-line description, detection priority and minimum encoded size of each type.
+The shape is stable and intended for scripts.`,
+		Example: `  lens types
+  lens types --json | jq '.[] | select(.category == "overlay") | .name'`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if asJSON {
+				enc := json.NewEncoder(stdout)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(lens.RegistryIndex()); err != nil {
+					return fmt.Errorf("encoding type index: %w", err)
+				}
+				return nil
+			}
 			_, err := fmt.Fprintln(stdout, strings.Join(lens.TypeNames(), "\n"))
 			return err
 		},
 	}
+
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the introspection index as JSON")
+
+	return cmd
 }
 
 func firstArg(args []string) string {

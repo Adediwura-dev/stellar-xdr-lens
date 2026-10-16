@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/network"
+
 	"github.com/stellar-optics/stellar-xdr-lens/internal/cli"
 )
 
@@ -453,6 +455,9 @@ func TestErrorsAreReported(t *testing.T) {
 		{"explain unsupported type", []string{"explain", "AAAAAA=="}},
 		{"diff needs two operands", []string{"diff", "AAAAAA=="}},
 		{"explain bad result", []string{"explain", fixture(t, "tx_failed.env"), "--result", "!!!"}},
+		{"asset invalid base64", []string{"asset", "!!!not base64!!!"}},
+		{"asset non-asset payload", []string{"asset", fixture(t, "overlay_hello")}},
+		{"asset empty network", []string{"asset", "--network", "", fixture(t, "asset_native")}},
 	}
 
 	for _, tc := range tests {
@@ -492,7 +497,7 @@ func TestBareInvocationPrintsHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	for _, want := range []string{"decode", "explain", "diff", "Usage"} {
+	for _, want := range []string{"decode", "explain", "diff", "asset", "Usage"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("bare invocation help does not mention %q", want)
 		}
@@ -584,6 +589,144 @@ func TestExplainJSONShapeIsCamelCase(t *testing.T) {
 		if _, ok := op[want]; !ok {
 			t.Errorf("operations[0] has no %q field; keys were %v", want, mapKeys(op))
 		}
+	}
+}
+
+func TestAssetCommand(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		args        []string
+		stdin       string
+		wantContain []string
+	}{
+		{
+			name:        "native asset on mainnet",
+			args:        []string{"asset", fixture(t, "asset_native")},
+			wantContain: []string{"native", "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"},
+		},
+		{
+			name:        "credit asset on mainnet",
+			args:        []string{"asset", fixture(t, "asset_usdc")},
+			wantContain: []string{"USDC", "credit_alphanum4", "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"},
+		},
+		{
+			name:        "native asset on testnet",
+			args:        []string{"asset", "--network", "testnet", fixture(t, "asset_native")},
+			wantContain: []string{"testnet", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"},
+		},
+		{
+			name:        "custom passphrase",
+			args:        []string{"asset", "--network", "Integration Test Network", fixture(t, "asset_native")},
+			wantContain: []string{"Integration Test Network"},
+		},
+		{
+			name:        "from stdin",
+			args:        []string{"asset", "-"},
+			stdin:       fixture(t, "asset_native"),
+			wantContain: []string{"CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"},
+		},
+		{
+			name:        "from file flag",
+			args:        []string{"asset", "--file", fixturePath("asset_usdc")},
+			wantContain: []string{"USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stdout, _, err := run(t, tc.stdin, tc.args...)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			for _, want := range tc.wantContain {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("output does not contain %q\n%s", want, stdout)
+				}
+			}
+		})
+	}
+}
+
+func TestAssetCommandJSON(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := run(t, "", "asset", "--json", fixture(t, "asset_usdc"))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var doc struct {
+		Type       string `json:"type"`
+		Code       string `json:"code"`
+		Issuer     string `json:"issuer"`
+		Canonical  string `json:"canonical"`
+		Native     bool   `json:"native"`
+		ContractID string `json:"contractId"`
+		Network    string `json:"network"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, stdout)
+	}
+	if doc.Type != "credit_alphanum4" || doc.Code != "USDC" || doc.Native {
+		t.Errorf("asset = %+v, want a non-native USDC asset", doc)
+	}
+	if doc.ContractID != "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75" {
+		t.Errorf("contractId = %q, want the mainnet USDC contract", doc.ContractID)
+	}
+	if doc.Network != network.PublicNetworkPassphrase {
+		t.Errorf("network = %q, want the mainnet passphrase", doc.Network)
+	}
+}
+
+func TestTypesJSONCommand(t *testing.T) {
+	t.Parallel()
+
+	plain, _, err := run(t, "", "types")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	plainCount := len(strings.Fields(plain))
+
+	stdout, _, err := run(t, "", "types", "--json")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var doc []struct {
+		Name        string `json:"name"`
+		Category    string `json:"category"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		MinWireSize int    `json:"minWireSize"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("types --json output is not valid JSON: %v\n%s", err, stdout)
+	}
+	if len(doc) != plainCount {
+		t.Errorf("types --json lists %d types, plain output lists %d", len(doc), plainCount)
+	}
+
+	var hello *struct {
+		Name        string `json:"name"`
+		Category    string `json:"category"`
+		Description string `json:"description"`
+		Priority    int    `json:"priority"`
+		MinWireSize int    `json:"minWireSize"`
+	}
+	for i := range doc {
+		if doc[i].Name == "Hello" {
+			hello = &doc[i]
+		}
+	}
+	if hello == nil {
+		t.Fatal("types --json does not include Hello")
+	}
+	if hello.Category != "overlay" || hello.Priority != 35 || hello.MinWireSize != 164 {
+		t.Errorf("Hello entry = %+v, want overlay/35/164", hello)
 	}
 }
 
