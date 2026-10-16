@@ -798,6 +798,34 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("decode --csv", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--csv", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --csv: %v", err)
+		}
+		lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("decode --csv should emit a header and one row, got %d lines: %s", len(lines), stdout)
+		}
+		if !strings.HasPrefix(lines[0], "type,variant,source,fee_bump_source,") ||
+			!strings.HasSuffix(lines[0], ",detail") {
+			t.Errorf("unexpected csv header: %s", lines[0])
+		}
+		if !strings.HasPrefix(lines[1], "TransactionEnvelope,v1,") {
+			t.Errorf("unexpected csv row: %s", lines[1])
+		}
+	})
+
+	t.Run("decode --format csv", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "csv", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format csv: %v", err)
+		}
+		if !strings.Contains(stdout, "TransactionEnvelope") {
+			t.Errorf("unexpected csv output: %s", stdout)
+		}
+	})
+
 	t.Run("explore command", func(t *testing.T) {
 		stdout, _, err := run(t, "q\n", "explore", fixturePayload)
 		if err != nil {
