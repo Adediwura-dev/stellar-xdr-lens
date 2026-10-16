@@ -8,26 +8,8 @@ import (
 )
 
 func init() {
-	enricherFor[reflect.TypeOf(xdr.ScAddress{})] = enrichScAddress
-	enricherFor[reflect.TypeOf(xdr.ContractDataDurability(0))] = enrichContractDataDurability
-	enricherFor[reflect.TypeOf(xdr.ScVal{})] = enrichStorageKey
-}
-
-// enrichScAddress renders a Soroban address as its strkey form — "C..." for a
-// contract, "G..." for an account, and the matching forms for muxed accounts,
-// liquidity pools and claimable balances. The raw union is a discriminant plus
-// a 32-byte hash, which is unreadable; the strkey is the scalar value itself,
-// exactly as AccountId and Asset render.
-func enrichScAddress(rv reflect.Value) (display string, raw any, ok bool) {
-	address, valid := rv.Interface().(xdr.ScAddress)
-	if !valid {
-		return "", nil, false
-	}
-	s, err := address.String()
-	if err != nil || s == "" {
-		return "", nil, false
-	}
-	return "", s, true
+	registerEnricher(reflect.TypeOf(xdr.ContractDataDurability(0)), enrichContractDataDurability)
+	registerEnricher(reflect.TypeOf(xdr.ScVal{}), enrichStorageKey)
 }
 
 // enrichContractDataDurability renders a contract data entry's storage

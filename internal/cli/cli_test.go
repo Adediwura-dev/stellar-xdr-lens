@@ -70,6 +70,16 @@ func TestDecodeCommand(t *testing.T) {
 			wantContain: []string{"TransactionResult", "TransactionResultCode"},
 		},
 		{
+			name:        "contract data instance storage",
+			args:        []string{"decode", "--type", "ContractDataEntry", fixture(t, "contract_data_instance")},
+			wantContain: []string{"ContractDataEntry", "instance storage key", "Durability: persistent", "Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3"},
+		},
+		{
+			name:        "contract data temporary storage",
+			args:        []string{"decode", "--type", "ContractDataEntry", fixture(t, "contract_data_temporary")},
+			wantContain: []string{"Durability: temporary", "Sym: SEEN"},
+		},
+		{
 			name:        "ledger header",
 			args:        []string{"decode", "--type", "LedgerHeader", fixture(t, "ledger_header")},
 			wantContain: []string{"LedgerHeader", "protocol 22", "104591297310.9999952", "0.5000000 (stroops: 5000000)"},
