@@ -60,6 +60,7 @@ pkg/lens/              the library; this is the reusable surface
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
+    theme.go           environment-selected light/dark ANSI palettes
     tree.go            colourised tree
     json.go            stable JSON
     text.go            explain summaries
@@ -264,9 +265,17 @@ for every registered type immediately and needs no XDR knowledge. Follow the
 existing files' functional-options pattern (`WithPalette`, `WithIndent`) for
 configuration.
 
-Colour is handled centrally: call `format.PaletteFor(w, mode)`, which honours
-`--color`, the [`NO_COLOR`](https://no-color.org) convention, and whether the
-writer is a terminal. Never write escape sequences directly.
+Colour is handled centrally: the CLI uses `format.ThemeFromEnv` and
+`format.PaletteForTheme(w, mode, palette)`. `LENS_THEME=dark|light` selects a
+scheme (dark is the default), and per-role values such as
+`LENS_THEME_DARK_KEY=38;5;39` customize its ANSI SGR colours. Supported roles
+are `KEY`, `TYPE`, `STR`, `NUM`, `NOTE`, `DIM`, `ADD`, `REMOVE`, and `CHANGE`;
+set a role variable to an empty value to disable that colour. Values contain
+only semicolon-separated SGR integers from 0 to 255, without escape prefixes.
+The palette helper honours `--color`, the
+[`NO_COLOR`](https://no-color.org) convention, and whether the writer is a
+terminal. Invalid theme configuration is reported as an error. Never write
+escape sequences directly.
 
 ## Adding a result code explanation
 
@@ -514,4 +523,3 @@ Soroban smart contracts encode arguments, return types, storage entries, and eve
   - UDT Unions (`ScSpecUdtUnionV0`): Labels case names and associated values.
   - Function Invocations (`ScSpecFunctionV0`): Resolves function names and parameter lists in `InvokeHostFunctionOp`.
 - Usable via `--spec <spec.xdr|contract.wasm>` in `lens decode`.
-

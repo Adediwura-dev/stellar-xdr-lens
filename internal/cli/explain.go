@@ -94,8 +94,12 @@ diagnostic events and display contract panic messages.`,
 					return fmt.Errorf("encoding summary: %w", err)
 				}
 			} else {
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
 				f := format.NewSummaryFormatter(
-					format.WithSummaryPalette(format.PaletteFor(stdout, g.color)),
+					format.WithSummaryPalette(palette),
 					format.WithVerbose(verbose),
 				)
 				if err := f.Format(stdout, summary); err != nil {

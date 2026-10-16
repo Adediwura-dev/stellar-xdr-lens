@@ -59,6 +59,25 @@ go build ./cmd/lens
 Everything runs offline. `lens` makes no network calls, which makes it safe on
 unsigned transactions and deterministic in CI.
 
+#### Terminal colors
+
+Human-readable terminal output uses the dark color theme by default. Set
+`LENS_THEME=light` for a palette suited to light terminal backgrounds; set it
+to `dark` to select the default palette explicitly. Customize individual ANSI
+styles with `LENS_THEME_DARK_KEY`, `LENS_THEME_LIGHT_ADD`, and the equivalent
+`KEY`, `TYPE`, `STR`, `NUM`, `NOTE`, `DIM`, `ADD`, `REMOVE`, and `CHANGE`
+variables. Values are SGR parameters without escape characters, for example:
+
+```sh
+LENS_THEME=dark LENS_THEME_DARK_KEY='38;5;39' lens decode "$XDR"
+```
+
+Set a style variable to an empty string to disable that style. `--color auto`
+continues to color only terminal output, while `--color always` and
+`--color never` explicitly enable or disable colors. Invalid theme values or
+style parameters produce an error. `NO_COLOR` remains honored in automatic
+mode.
+
 ## Usage
 
 ### `lens explain` — why did this fail?

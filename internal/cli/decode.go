@@ -82,20 +82,32 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 			}
 
 			if interactive {
-				tui := NewTUITree(value, stdin, stdout, format.PaletteFor(stdout, g.color))
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
+				tui := NewTUITree(value, stdin, stdout, palette)
 				return tui.Run()
 			}
 
 			if asSummary || formatName == "summary" {
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
 				f := format.NewCompactFormatter(
-					format.WithCompactPalette(format.PaletteFor(stdout, g.color)),
+					format.WithCompactPalette(palette),
 				)
 				return f.Format(stdout, value)
 			}
 
 			if asTxRep || formatName == "txrep" {
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
 				f := format.NewTxRepFormatter(
-					format.WithTxRepPalette(format.PaletteFor(stdout, g.color)),
+					format.WithTxRepPalette(palette),
 					format.WithTxRepNetwork(network),
 				)
 				return f.Format(stdout, value)
@@ -117,8 +129,12 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 				return f.Format(stdout, value)
 			}
 
+			palette, err := paletteForOutput(stdout, g.color)
+			if err != nil {
+				return err
+			}
 			f := format.NewTreeFormatter(
-				format.WithPalette(format.PaletteFor(stdout, g.color)),
+				format.WithPalette(palette),
 				format.WithMaxDepth(maxDepth),
 				format.WithTypeNames(showTypes),
 			)
@@ -182,7 +198,11 @@ Use arrow keys or j/k to navigate, Enter or Space to toggle node expansion,
 				spec.ApplyToValue(value)
 			}
 
-			tui := NewTUITree(value, stdin, stdout, format.PaletteFor(stdout, g.color))
+			palette, err := paletteForOutput(stdout, g.color)
+			if err != nil {
+				return err
+			}
+			tui := NewTUITree(value, stdin, stdout, palette)
 			return tui.Run()
 		},
 	}
