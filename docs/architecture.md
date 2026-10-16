@@ -14,7 +14,7 @@ Decoding and explaining flows one way:
 ```
 base64 ──► detect ──► xdr decode ──► Node tree ──► enrich ──► Formatter ──► output
               │            │             │                        │
-        registry      stellar SDK    neutral IR            tree │ json │ text │ diff
+        registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep
 ```
 
 Encoding simplified JSON into XDR flows deterministically:
@@ -27,7 +27,7 @@ JSON spec ──► schema validate (strict) ──► type coerce ──► xdr
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 25 registered types at once,
+That is what lets a new output format work for all 54 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## Package layout
@@ -35,29 +35,41 @@ and lets the differ work without knowing what it is comparing.
 ```
 cmd/lens/              main; wires os.Args to internal/cli and maps errors to exit codes
 internal/cli/          cobra commands — deliberately thin
-  root.go              command tree, global flags
-  decode.go            decode + types commands
+  root.go              command tree, global flags, explore (TUI) command
+  decode.go            decode + types commands, formatting and spec decoding flags
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
-  encode.go            encode command for JSON -> base64 XDR
+  asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
+  tui_tree.go          interactive terminal tree explorer (TUI)
 pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
+  registry_index.go    introspection: RegistryIndex, categories, min sizes
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
+  ledger_header.go     ledger-header field notes and protocol parameters
+  bucket_entry.go      bucket list, tombstone and hot archive terminology
+  scp.go               consensus node identity and pledge names
+  state_archival.go    TTL expiry and eviction rendering
+  overlay.go           peer addresses, certificate keys, overlay message names
+  tx_history.go        ledger-sequence field notes for history sets and batches
+  asset_types.go       asset details and Stellar Asset Contract id derivation
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
+  reason_lookup.go     O(1) short code lookup table (ReasonByCode)
+  protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
+  op_isolator.go       Multi-operation failure isolator (pre-op vs execution pinpointing)
+  trap_reasons.go      Soroban trapped host function diagnostic reason decoder
   diff.go              structural path diff
-  validate.go          strict schema validation for JSON templates
-  coerce.go            permissive type coercion & number parsing (stringified numbers, hex, assets)
-  scval_encode.go      ScVal constructor from intuitive JSON literals
-  tx_builder.go        TransactionEnvelope builder from JSON spec
+  spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
     tree.go            colourised tree
     json.go            stable JSON
     text.go            explain summaries
     diff.go            diff rendering
+    summary.go         compact single-line summary (grep/pipeline friendly)
+    txrep.go           SEP-0011 human-readable TxRep format
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -126,8 +138,20 @@ var registry = []xdrType{
 ```
 
 The three fields are the display name, an allocator, and a detection priority.
-That is the whole change. Detection, `--type`, `lens types`, the tree, the JSON
-output and the differ all pick it up automatically.
+Then add the matching entry to `typeDocs` in
+[`registry_index.go`](../pkg/lens/registry_index.go) so `lens types --json`
+can describe it:
+
+```go
+"ClaimableBalanceEntry": {CategoryLedgerEntry,
+	"A balance claimable by named claimants, with its predicate and asset."},
+```
+
+That is the whole change. Detection, `--type`, `lens types` (including
+`--json`), the tree, the JSON output and the differ all pick it up
+automatically. `TestTypeDocsCoversRegistry` fails if the two maps drift apart,
+and `TestRegistryIndexMinWireSizeIsLowerBound` checks the published minimum
+size against the actual fixtures.
 
 ### Choosing a priority
 
@@ -138,24 +162,26 @@ Roughly:
 |---|---|
 | 90–100 | What developers paste most: envelopes, results, meta |
 | 60–89 | Ledger entries, keys, inner transaction types |
-| 30–59 | Soroban types |
+| 40–59 | Ledger-level types, Soroban, history-archive sets and batches |
+| 30–39 | Overlay messages and events, which are large but rarely pasted |
 | 1–29 | Small building blocks that decode from very few bytes |
 
 Small types deserve low priority because short payloads are ambiguous — a
 4-byte value may decode as half a dozen types, and the ranking decides which
-one `lens decode` shows by default.
+one `lens decode` shows by default. The overlay `Auth` message is the extreme
+case: four bytes that also parse as a void `ScVal`, so it ranks at 2 and is
+decoded with `--type` in practice.
 
 ## Adding an enricher
 
-Enrichers turn an XDR value into something a human recognises. They live in
-[`enrich.go`](../pkg/lens/enrich.go) and are registered by concrete type:
+Enrichers turn an XDR value into something a human recognises. `enricherFor` in
+[`enrich.go`](../pkg/lens/enrich.go) maps a concrete XDR type to its enricher.
+The core entries are a declaration-time literal; a type added by a feature file
+registers itself without touching `enrich.go` at all:
 
 ```go
 func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}): enrichAccountID,
-		// add yours here
-	}
+	enricherFor[reflect.TypeOf(xdr.MyType{})] = enrichMyType
 }
 
 func enrichMyType(rv reflect.Value) (display string, raw any, ok bool) {
@@ -171,8 +197,8 @@ Return `ok=false` to fall back to the generic rendering — do this for union ar
 you cannot sensibly render, such as liquidity-pool-share assets, rather than
 returning a misleading string.
 
-The registry is populated once in `init` and read-only afterwards, so it needs
-no locking.
+The registry is populated once before any decoding happens and is read-only
+afterwards, so it needs no locking.
 
 ### Field-name enrichment
 
@@ -182,6 +208,17 @@ a value is an amount is the field it sits in. `amountFields` in `enrich.go`
 lists the known amount fields; anything not listed stays a plain integer,
 because rendering a sequence number as `12345.0000000` would be worse than
 showing it raw.
+
+`fieldNotes` is the same idea for anything that is not an amount — a hint
+attached to a field rendered alongside it. `LedgerVersion: 22` becomes
+`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N`.
+Feature files register notes from `init`:
+
+```go
+func init() {
+	fieldNotes["SlotIndex"] = slotIndexNote
+}
+```
 
 ## Adding a formatter
 
@@ -226,6 +263,29 @@ Two rules, both enforced by tests:
   codes across the 28 protocol enums by reflection and fails if any lacks an
   entry. When a new protocol version adds a code, that test tells you its name.
 
+## Introspection and contract ids
+
+Two small APIs round out the library for tooling use:
+
+- [`RegistryIndex()`](../pkg/lens/registry_index.go) returns a `TypeInfo` for
+  every registered type — name, category, description, priority and minimum
+  encoded size — which is what `lens types --json` emits. The index is derived
+  from the live registry, so it can never list a type `DecodeAs` rejects. Sizes
+  are computed structurally from the Go types by reflection, with a depth cap
+  for self-referential unions and a conservative fallback, so the number is a
+  lower bound that holds for every valid value; no fixture or network access is
+  involved.
+- [`DescribeAsset`](../pkg/lens/asset_types.go) decodes a classic asset and
+  derives its Stellar Asset Contract id. The id is a hash of the network id and
+  the asset (`Asset.ContractID`), rendered as a strkey `C…` address, so it is
+  deterministic, offline, and different on every network. `DescribeAssetValue`
+  does the same for an already-decoded `Value` and reports `ErrNotAsset` when
+  the value is not an asset.
+
+`ContractId` and `ScAddress` values anywhere in a decoded tree render as strkey
+addresses too, via enrichers registered in `asset_types.go` — a contract id
+buried in a Soroban footprint is as readable as one at the top level.
+
 ## Explain, and why it reads the Node tree
 
 `explainOperationResult` needs the type-specific result code buried in an
@@ -243,11 +303,91 @@ The rest of `explain.go` uses the concrete SDK types, because
 envelopes. Using them is both clearer and more correct than re-deriving that
 logic from the tree.
 
+## Reason lookup table (ReasonByCode)
+
+Downstream consumers (such as `focus` and automated diagnostic linters) frequently
+require O(1) random-access lookups for short canonical result codes without
+performing linear scans or importing raw XDR definitions.
+
+[`reason_lookup.go`](../pkg/lens/reason_lookup.go) provides:
+
+- `lens.ReasonByCode(short string) (Reason, bool)`: thread-safe, case-insensitive
+  O(1) resolution of canonical short codes (e.g. `payment_underfunded`, `tx_bad_seq`).
+- `lens.AllReasons() []Reason`: sorted slice of all registered reasons for enumeration.
+- `lens.ReasonLookupTable() map[string]Reason`: snapshot copy of the full lookup map.
+
+The lookup table is precomputed at initialization and automatically updated
+whenever protocol extension packages register additional result codes.
+
+## Protocol 21+ Error Codes and Explanations
+
+Stellar Protocol 21 and 22 introduce state archival, TTL management, key freezing,
+and expanded Soroban host error semantics. [`protocol21_reasons.go`](../pkg/lens/protocol21_reasons.go)
+provides plain-English diagnostic explanations and actionable remediation hints for:
+
+- **State Archival & Key Freezing**: `tx_frozen_key_accessed` (CAP-0056) when an
+  operation attempts to access an expired, frozen ledger entry.
+- **Soroban State and Fee Codes**: `invoke_host_function_entry_archived`,
+  `invoke_host_function_insufficient_refundable_fee`,
+  `extend_footprint_ttl_insufficient_refundable_fee`, and
+  `restore_footprint_insufficient_refundable_fee`.
+- **Soroban Host Errors**: Full decoders for `xdr.ScError`, mapping error types
+  (`ScErrorTypeSceStorage`, `ScErrorTypeSceBudget`, `ScErrorTypeSceWasmVm`, etc.)
+  and error codes (`ScErrorCodeScecIndexBounds`, `ScErrorCodeScecExceededLimit`, etc.)
+  into descriptive developer-facing errors.
+
+## Multi-Operation Transaction Failure Isolator
+
+Stellar transactions execute atomically. When a transaction contains multiple
+operations, developers need to isolate:
+
+1. **Pre-operation Check Failures**: Transaction-level failures (e.g. `tx_bad_seq`,
+   `tx_bad_auth`, `tx_too_early`, `tx_insufficient_balance`) reject the transaction
+   during header and precondition validation before any operation runs.
+2. **Operation Execution Failures**: The transaction passed pre-operation checks and
+   was applied up to the failing operation index.
+
+[`op_isolator.go`](../pkg/lens/op_isolator.go) inspects envelopes and results to pinpoint:
+
+- The exact zero-based operation index where execution halted (`FailingOpIndex`).
+- The operation type name (`FailingOpType`, e.g. `payment`, `manage_buy_offer`).
+- Whether the failure was a `pre_operation` check failure or an `operation` execution failure.
+- A comprehensive multi-line `DiagnosticReport()` for debugging.
+
+The CLI exposes this via `lens explain --isolate`.
+
+## Soroban Trapped Host Function Diagnostic Decoder
+
+When a Soroban contract call traps, the transaction result code is simply
+`invoke_host_function_trapped` without internal error details. The actionable panic
+string or host abort reason is stored in `DiagnosticEvent` payloads within transaction
+metadata (`TransactionMeta.V3.SorobanMeta.DiagnosticEvents`).
+
+[`trap_reasons.go`](../pkg/lens/trap_reasons.go) correlates trapped invocations with
+diagnostic events to extract:
+
+- **Panic Messages**: Human-readable strings from `log` and `panic` topics/data.
+- **Host & Contract Errors**: Decoded `ScError` values including custom contract error codes.
+- **Contract & Function Identity**: Identifies the contract ID (rendered as strkey `C...`)
+  and function name in the failing execution frame.
+- **Diagnostic Trace**: Chronological trace of diagnostic events leading to the abort.
+
+The CLI exposes this via `lens explain --meta <path-or-base64>`.
+
 ## Testing approach
 
-Fixtures in `testdata/` are **real captured mainnet transactions**, not
-synthetic ones, with `manifest.json` recording each transaction hash so a
-fixture can be traced back to the ledger. Tests never touch the network.
+Fixtures in `testdata/` are **real captured mainnet transactions**, with
+`manifest.json` recording each transaction hash so a fixture can be traced back
+to the ledger. Tests never touch the network.
+
+For types that never appear as standalone Horizon payloads — SCP envelopes,
+bucket entries, ledger headers, TTL entries, overlay messages, history-archive
+sets and classic assets — `manifest.json` also lists synthetic fixtures:
+deterministic payloads built with `xdr.MarshalBase64` from fixed hashes and
+sequence numbers. Each one is declared as such in the manifest, so provenance
+is never in doubt. Asset fixtures double as known-answer tests: the native and
+USDC assets carry well-known mainnet SAC contract ids that the tests assert
+exactly.
 
 Where a case cannot be captured — every classic operation type, memo variant and
 precondition shape — tests construct XDR with the SDK encoder and round-trip it
@@ -257,37 +397,54 @@ The suite deliberately targets properties that would break the tool if violated:
 
 - detection stays unambiguous on real payloads (`TestDetectIsUnambiguousForRealPayloads`);
 - ambiguity is reported, not hidden (`TestDetectReportsGenuineAmbiguity`);
+- the introspection index tracks the registry exactly
+  (`TestTypeDocsCoversRegistry`) and its size estimates hold as lower bounds
+  (`TestRegistryIndexMinWireSizeIsLowerBound`);
 - enums render as names, not integers (`TestEnumsRenderAsConstantNames`);
 - a failure is attributed to the operation that caused it
   (`TestExplainPairAttributesFailureToOperation`);
 - JSON output is deterministic and omits nulls;
 - every result code has a real explanation.
 
-## JSON to XDR Encoding Architecture
+## Compact single-line summary (`pkg/lens/format/summary.go`)
 
-The JSON-to-XDR subsystem (`pkg/lens/validate.go`, `pkg/lens/coerce.go`, `pkg/lens/scval_encode.go`, `pkg/lens/tx_builder.go`) enables offline authoring and synthesis of Stellar transactions and Soroban contract values from human-ergonomic JSON specifications.
+`CompactFormatter` serialises any decoded XDR `*lens.Value` into a terse, single-line format ideal for shell pipelines, `grep`, and quick log examination.
+- Envelopes and Transactions output source accounts, sequence numbers, operation counts, and fees.
+- Operation results and transaction results highlight execution codes and failure/success status.
+- Nested structures are flattened into concise key-value tokens (`type=TransactionEnvelope v1 source=G... ops=1 fee=100 stroops`).
+- Like all formatters, it is strictly offline and adheres to the `Formatter` interface without calling network APIs.
 
-### Strict Schema Validation (`validate.go`)
-- Zero-dependency schema validation engine reporting all violations across the entire JSON tree.
-- Uses `errors.Is` and `errors.As` compatible `ValidationError` containing explicit JSON path traces (e.g. `operations[0].amount`).
-- In strict mode, unknown properties are flagged to catch silent configuration typos.
+## SEP-0011 TxRep formatter (`pkg/lens/format/txrep.go`)
 
-### Permissive Type Coercion (`coerce.go`)
-- **Numbers**: Coerces integers, floats, stringified numbers (`"10000000"`), and hex-formatted numbers (`"0x05f5e100"`). Underscores in strings are stripped cleanly.
-- **Amounts**: Coerces decimal XLM amounts (e.g. `"10.5"` XLM to `105000000` stroops) or raw integer stroops.
-- **Addresses & Keys**: Handles standard Ed25519 public keys (`G...`), Muxed Accounts (`M...` or `{address, id}` objects), and Soroban contract addresses (`C...`).
-- **Assets**: Parses canonical string representations (`"native"`, `"XLM"`, `"USDC:GBRP..."`) as well as asset objects.
-- **Prices**: Parses `"n/d"` fraction strings, floats, integers, or `{n, d}` numerator/denominator maps.
+`TxRepFormatter` implements the human-readable [SEP-0011 TxRep](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0011.md) standard format for Stellar transaction envelopes.
+- Emits canonical TxRep colon-delimited lines (e.g. `tx.sourceAccount: G...`, `tx.fee: 100`, `tx.operations[0].body.paymentOp...`).
+- Handles `TransactionEnvelope` variants: V0, V1, and FeeBump envelopes.
+- Formats signatures with key hints and base64 payloads (`tx.signatures[0].signature: ...`).
+- Generates valid TxRep output for debugging and multisig coordination offline.
 
-### Soroban ScVal Constructor (`scval_encode.go`)
-Ergonomic constructor creating `xdr.ScVal` values from intuitive JSON literals:
-- Primitives: booleans, integers (`i32`, `u32`), strings (`string` or `symbol`), and null (`void`).
-- Tagged objects: typed wrappers such as `{"i64": 100}`, `{"u128": "340282366920938463463374607431768211455"}`, `{"contract_id": "C..."}`, `{"symbol": "transfer"}`.
-- Maps & Vectors: arrays map to `xdr.ScVec`, maps to `xdr.ScMap` with automatic sorting of keys.
+## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
 
-### Transaction Envelope Builder (`tx_builder.go`)
-Constructs standard Stellar `xdr.TransactionEnvelope` (V1, V0, or FeeBump):
-- Resolves classic operations (`payment`, `create_account`, `change_trust`, `manage_data`, `manage_buy_offer`, `manage_sell_offer`, etc.) and Soroban operations (`invoke_host_function`, `extend_footprint_ttl`, `restore_footprint`).
-- Translates preconditions (time bounds, ledger bounds, sequence bounds, extra signers) into `PreconditionsV2`.
-- Strict offline guarantee: zero network calls in any builder or encoding path.
+`TUITree` provides a curses-like interactive navigation experience within standard ANSI terminals for exploring deeply nested XDR structures.
+- Launchable with `lens decode -i`, `lens decode --interactive`, or `lens explore` / `lens tui`.
+- Keybindings:
+  - `j` / `Down`: Move selection down
+  - `k` / `Up`: Move selection up
+  - `Enter` / `Space` / `Right`: Expand or toggle node
+  - `Left` / `h`: Collapse node or jump to parent
+  - `e`: Expand all nodes
+  - `c`: Collapse all nodes
+  - `/`: Search / filter node paths
+  - `q` / `Ctrl+C`: Quit
+- Pure offline terminal handling using raw mode and ANSI escape codes with fallback to static rendering in non-TTY environments.
+
+## Contract spec-aware ScVal decoding (`pkg/lens/spec_decode.go`)
+
+Soroban smart contracts encode arguments, return types, storage entries, and events as opaque `xdr.ScVal` structures. `pkg/lens/spec_decode.go` resolves these generic values against contract specifications:
+- Accepts contract specs as raw XDR byte slices/streams or extracted from WebAssembly (`.wasm`) binaries via the `contractspecv0` custom section.
+- Resolves:
+  - UDT Structs (`ScSpecUdtStructV0`): Maps tuple/map fields to human-readable struct member names.
+  - UDT Enums (`ScSpecUdtEnumV0`): Maps numeric discriminant values to enum variant identifiers.
+  - UDT Unions (`ScSpecUdtUnionV0`): Labels case names and associated values.
+  - Function Invocations (`ScSpecFunctionV0`): Resolves function names and parameter lists in `InvokeHostFunctionOp`.
+- Usable via `--spec <spec.xdr|contract.wasm>` in `lens decode`.
 
