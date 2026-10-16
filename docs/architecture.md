@@ -67,6 +67,10 @@ pkg/lens/              the library; this is the reusable surface
   protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
   op_isolator.go       Multi-operation failure isolator (pre-op vs execution pinpointing)
   trap_reasons.go      Soroban trapped host function diagnostic reason decoder
+  balance_explain.go   Insufficient-balance math (liabilities, reserve, shortfall)
+  signature_explain.go Signature-threshold diagnosis (hint matching, missing weight)
+  simulation_explain.go Simulation-failure root-cause decoder (footprint, CPU, fee)
+  feebump_explain.go   Fee-bump inner-vs-outer failure separation
   diff.go              structural path diff
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
@@ -467,6 +471,90 @@ diagnostic events to extract:
 - **Diagnostic Trace**: Chronological trace of diagnostic events leading to the abort.
 
 The CLI exposes this via `lens explain --meta <path-or-base64>`.
+
+## Insufficient-balance and liabilities math
+
+`tx_insufficient_balance`, `payment_underfunded` and their siblings mean
+"the math did not fit", not "the account is empty": selling liabilities lock
+part of the balance and the base reserve must stay untouched.
+
+[`balance_explain.go`](../pkg/lens/balance_explain.go) computes the exact
+shortfall offline from a ledger entry plus a base reserve:
+
+- `AccountSellingLiabilities` / `AccountBuyingLiabilities` read the V1
+  liabilities extension (zero when absent).
+- `ReserveRequirement` implements
+  `(2 + numSubEntries + numSponsoring - numSponsored) * baseReserve`, with
+  `AccountReserveRequirement` pulling the counters from the V2 extension.
+- `DiagnoseBalance(entry, baseReserve, amountToSpend)` returns the available
+  balance, the shortfall in stroops and XLM, and a funding hint; a
+  `baseReserve` of 0 selects `DefaultBaseReserve` (0.5 XLM).
+- `DiagnoseTrustlineSpend` covers non-native balances, where only selling
+  liabilities reduce the spendable amount.
+
+Verified against the `account_entry_ext_v1/v2` and `trustline_entry_v1`
+fixtures; runnable examples live in `pkg/lens/examples_test.go` style tests
+alongside the unit suite.
+
+## Signature-threshold diagnosis
+
+`tx_bad_auth` and `op_bad_auth` mean "not enough signer weight", but the
+result code never says which signer is missing.
+
+[`signature_explain.go`](../pkg/lens/signature_explain.go) compares the
+envelope's `DecoratedSignature` hints against the account's signer set:
+
+- `OperationThresholdLevel` maps each operation to `low` (allow trust, set
+  trust-line flags, bump sequence, claim claimable balance), `high` (account
+  merge, set options) or `medium` (everything else).
+- `SignerHint` derives the 4-byte hint stellar-core uses (last four bytes of
+  the key), so matching needs no transaction hash and no network.
+- `DiagnoseSignatures(entry, sigs, threshold)` sums the weight of matched
+  signers, counts unknown signatures separately, and names the missing
+  signers; `DiagnoseTransactionSignatures` picks the threshold from the first
+  operation automatically.
+
+## Simulation-failure root cause
+
+`simulateTransaction` failures arrive as RPC error strings, not XDR result
+codes: "missing footprint key", "CPU budget exceeded", "insufficient
+refundable fee" and friends.
+
+[`simulation_explain.go`](../pkg/lens/simulation_explain.go) classifies those
+strings offline into a stable `SimulationKind` (`missing_footprint`,
+`cpu_exceeded`, `memory_exceeded`, `insufficient_fee`, `archived_entry`,
+`auth_missing`, `contract_trapped`, `invalid_input`, `unknown`):
+
+- `DiagnoseSimulationError(msg)` does case-insensitive substring matching and
+  never fails on unrecognised text (it yields `unknown`).
+- `DiagnoseSimulationResponse(resp)` prefers structured fields when present:
+  explicit `MissingKeys`, CPU/memory used-vs-limit counters, and the
+  recommended `MinResourceFee` are folded into the summary and hint.
+- `DiagnoseMissingFootprint` and `DiagnoseResourceExhaustion` cover callers
+  that already extracted keys or budgets numerically.
+
+`SimulationResponse` mirrors the RPC JSON names so callers can unmarshal a
+captured response directly; lens never fetches it.
+
+## Fee-bump inner-vs-outer separation
+
+A fee-bump result carries two verdicts: the outer wrapper's and the inner
+transaction's. Fixing the wrong half wastes a rebuild.
+
+[`feebump_explain.go`](../pkg/lens/feebump_explain.go) separates them:
+
+- `DiagnoseFeeBump(env, res)` reports `Stage` as `inner` (wrapper valid, inner
+  failed — fee still charged to the fee-bump source), `outer` (wrapper
+  rejected before the inner ran — inner codes are not the cause), `none`
+  (both applied) or `not_fee_bump` for classic transactions.
+- The diagnosis records both short codes, both plain-English reasons, the fee
+  source and inner source addresses, the fee charged, and the failing inner
+  operation indexes, plus a `DiagnosticReport()` for CLI-style output.
+- `DiagnoseFeeBumpFromValues` accepts decoded `*lens.Value`s, matching the
+  `ExplainPair` calling convention.
+
+Verified against the canonical `tx_failed` (inner failure), `tx_soroban`
+(inner success) and `tx_success` (non-fee-bump) fixtures.
 
 ## Testing approach
 

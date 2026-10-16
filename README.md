@@ -354,6 +354,31 @@ func main() {
 See the [API reference](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens)
 and [docs/architecture.md](docs/architecture.md).
 
+### Failure diagnostics library
+
+Beyond `ExplainPair`, `pkg/lens` ships four offline diagnostics for the
+failures developers hit most often. All take decoded XDR (or captured RPC
+text) and make no network calls; existing CLI flags and output formats are
+unchanged.
+
+```go
+// 1. Insufficient balance: available = balance - selling liabilities - reserve.
+bal, _ := lens.DiagnoseBalance(accountEntry, lens.DefaultBaseReserve, spendStroops)
+fmt.Println(bal.Summary) // names the exact shortfall in stroops and XLM.
+
+// 2. Missing signatures: which signer weights are still needed.
+sig, _ := lens.DiagnoseTransactionSignatures(envelope, accountEntry)
+fmt.Println(sig.Summary) // "supply weight 1 but threshold 2 requires 1 more..."
+
+// 3. Simulation root cause: footprint, CPU/memory, fee, archived, auth, trap.
+sim, _ := lens.DiagnoseSimulationResponse(&lens.SimulationResponse{Error: rpcErr})
+fmt.Println(sim.Kind, sim.Hint) // e.g. missing_footprint + "use the footprint it returns..."
+
+// 4. Fee-bump: did the outer wrapper or the inner transaction fail?
+fb, _ := lens.DiagnoseFeeBump(envelope, result)
+fmt.Println(fb.Stage, fb.Summary) // inner vs outer, with fee-charged accounting.
+```
+
 ### Error handling
 
 Library errors support stable classification with `errors.Is`; callers can
