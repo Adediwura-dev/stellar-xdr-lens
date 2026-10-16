@@ -68,6 +68,7 @@ pkg/lens/              the library; this is the reusable surface
     summary.go         compact single-line summary (grep/pipeline friendly)
     txrep.go           SEP-0011 human-readable TxRep format
     csv.go             flat CSV export for batch ledger envelopes
+    markdown.go        GitHub-flavored Markdown transaction reports
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -497,6 +498,22 @@ cost, what it did, and whether it succeeded" — needs.
 
 Reachable from the CLI as `lens decode --csv` (or `--format csv`); see the
 [README](../README.md#csv-export) for the column list.
+
+## Markdown transaction reports (`pkg/lens/format/markdown.go`)
+
+`MarkdownFormatter` renders a `lens.Summary` as GitHub-flavored Markdown: a
+transaction details table followed by an operation table containing each
+operation's description, result, status, and hint. `Format` accepts a decoded
+transaction envelope or result; `FormatSummary` accepts a summary, including
+the paired summary from `lens.ExplainPair`.
+
+Table cells escape Markdown pipes and convert embedded line breaks to `<br>`,
+so memos, operation descriptions, and protocol hints do not break the table.
+The formatter only reads the summary and writes to the supplied writer; it
+makes no network calls and does not use the environment or clock.
+
+The CLI exposes paired transaction reports as `lens explain --markdown`; see
+the [README](../README.md#lens-explain--why-did-this-fail) for usage.
 
 ## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
 

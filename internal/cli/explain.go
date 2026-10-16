@@ -21,6 +21,7 @@ func newExplainCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Com
 		metaArg    string
 		metaFile   string
 		asJSON     bool
+		asMarkdown bool
 		verbose    bool
 		failOnErr  bool
 		isolate    bool
@@ -48,6 +49,9 @@ diagnostic events and display contract panic messages.`,
 
   # Both: which operation failed, and why
   lens explain "$ENVELOPE" --result "$RESULT"
+
+  # GitHub-flavored Markdown tables for a report or pull request
+  lens explain "$ENVELOPE" --result "$RESULT" --markdown
 
   # Pinpoint failing operation index and pre-op vs execution failure
   lens explain "$ENVELOPE" --result "$RESULT" --isolate
@@ -85,6 +89,10 @@ diagnostic events and display contract panic messages.`,
 				if err != nil {
 					return fmt.Errorf("decoding --meta: %w", err)
 				}
+			}
+
+			if asMarkdown {
+				return format.NewMarkdownFormatter().FormatSummary(stdout, summary)
 			}
 
 			if asJSON {
@@ -167,6 +175,8 @@ diagnostic events and display contract panic messages.`,
 	cmd.Flags().BoolVar(&isolate, "isolate", false,
 		"isolate and pinpoint the exact failing operation index")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the summary as JSON")
+	cmd.Flags().BoolVar(&asMarkdown, "markdown", false,
+		"emit GitHub-flavored Markdown tables for transaction details and operations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false,
 		"include the underlying XDR result-code constants")
 	cmd.Flags().BoolVar(&failOnErr, "fail-on-error", false,

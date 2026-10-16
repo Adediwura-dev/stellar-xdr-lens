@@ -219,6 +219,19 @@ func TestExplainCommand(t *testing.T) {
 			},
 		},
 		{
+			name: "paired markdown report",
+			args: []string{
+				"explain", fixture(t, "tx_failed.env"),
+				"--result", fixture(t, "tx_failed.res"), "--markdown",
+			},
+			wantContain: []string{
+				"| Transaction | Details |",
+				"| Status | Failed |",
+				"| Operation | Source | Description | Result | Status | Hint |",
+				"invoke_host_function_trapped",
+			},
+		},
+		{
 			name: "paired via files",
 			args: []string{
 				"explain", "--file", fixturePath("tx_failed.env"),

@@ -113,6 +113,18 @@ Outcome
 All 208 protocol result codes have a written explanation. Use `--fail-on-error`
 to exit non-zero when the transaction failed, which makes this usable as a CI gate.
 
+For a GitHub-flavored Markdown report with transaction details and one row per
+operation, add `--markdown`:
+
+```console
+$ lens explain --file envelope.xdr --result-file result.xdr --markdown
+```
+
+The output contains a transaction-details table and an operations table with
+each operation's description, result, status, and hint. It is deterministic and
+offline, and can be redirected into an issue, pull request, or other Markdown
+document.
+
 ### `lens decode` — read the structure
 
 ```console
