@@ -23,9 +23,11 @@ import (
 // picks it up at once. See docs/architecture.md.
 type Enricher func(rv reflect.Value) (display string, raw any, ok bool)
 
-// enricherFor maps a concrete XDR type to its Enricher. It is initialized
-// at package load time so feature files can register enrichers in their
-// own init() functions without init-order issues.
+// enricherFor maps a concrete XDR type to its Enricher. It is a
+// declaration-time literal so every core entry exists before any init runs,
+// regardless of file order; feature files register their own enrichers from
+// an init function. It is read-only after package initialization, so it needs
+// no synchronisation.
 var enricherFor = map[reflect.Type]Enricher{
 	reflect.TypeOf(xdr.AccountId{}):        enrichAccountID,
 	reflect.TypeOf(xdr.MuxedAccount{}):     enrichMuxedAccount,
@@ -144,12 +146,12 @@ func enrichDuration(rv reflect.Value) (string, any, bool) {
 	return (time.Duration(d) * time.Second).String(), uint64(d), true
 }
 
-// amountFields are the field names whose xdr.Int64 payload is a stroop
-// amount. XDR models amounts, sequence numbers and offer ids with the same
-// Int64 type, so the field name is the only available signal. Anything not
-// listed here is left as a plain integer, which is the safe default: showing
-// a sequence number as "12345.0000000" would be worse than showing it raw.
-// Additional fields may be registered by feature files during init.
+// amountFields are the field names whose payload is a stroop amount. XDR
+// models amounts, sequence numbers and offer ids with the same integer types,
+// so the field name is the only available signal. Anything not listed here is
+// left as a plain integer, which is the safe default: showing a sequence
+// number as "12345.0000000" would be worse than showing it raw. Feature files
+// may register additional fields during init.
 var amountFields = map[string]bool{
 	"Amount":           true,
 	"StartingBalance":  true,
@@ -182,15 +184,59 @@ var amountFields = map[string]bool{
 // enrichAmountField applies stroop formatting when a field is known to carry
 // an amount. It is applied by the walker after the type-based registry, since
 // it depends on the field name rather than the type alone.
+//
+// Amounts reach the walker as Int64 on ledger entries and as Uint32 on the
+// protocol parameters that denominate them (the base fee and base reserve),
+// and optional union arms arrive pointer-wrapped, so both shapes are accepted.
 func enrichAmountField(fieldName string, rv reflect.Value) (string, bool) {
 	if !amountFields[fieldName] {
 		return "", false
 	}
-	v, ok := rv.Interface().(xdr.Int64)
-	if !ok {
+	for rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return "", false
+		}
+		rv = rv.Elem()
+	}
+	var stroops int64
+	switch v := rv.Interface().(type) {
+	case xdr.Int64:
+		stroops = int64(v)
+	case xdr.Uint32:
+		stroops = int64(v)
+	default:
 		return "", false
 	}
-	return amount.String(v) + " (stroops: " + strconv.FormatInt(int64(v), 10) + ")", true
+	return amount.String(xdr.Int64(stroops)) + " (stroops: " + strconv.FormatInt(stroops, 10) + ")", true
+}
+
+// fieldNotes maps a field name to a function that produces an additional
+// human-friendly rendering for it. It is the field-name counterpart of the
+// type-based enricher registry, for cases where the type alone is not enough:
+// a protocol version and a ledger count are both plain Uint32, and only the
+// field they sit in says which is which. Feature files register their notes
+// during init; the map is read-only after package initialization.
+var fieldNotes = map[string]func(reflect.Value) (string, bool){}
+
+// enrichField applies the field-name-based renderings: stroop amounts first,
+// then any note registered in fieldNotes. It returns ok=false when the field
+// has no special rendering, leaving the generic walker output untouched.
+// A note function that panics on a malformed value degrades to no note rather
+// than taking the process down.
+func enrichField(fieldName string, rv reflect.Value) (note string, ok bool) {
+	if note, ok := enrichAmountField(fieldName, rv); ok {
+		return note, true
+	}
+	fn, found := fieldNotes[fieldName]
+	if !found {
+		return "", false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			note, ok = "", false
+		}
+	}()
+	return fn(rv)
 }
 
 // fieldNotes maps a field name to a function that produces an additional

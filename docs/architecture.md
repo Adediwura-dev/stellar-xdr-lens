@@ -19,7 +19,7 @@ base64 ──► detect ──► xdr decode ──► Node tree ──► enric
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 25 registered types at once,
+That is what lets a new output format work for all 54 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## Package layout
@@ -31,11 +31,20 @@ internal/cli/          cobra commands — deliberately thin
   decode.go            decode + types commands
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
+  asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
 pkg/lens/              the library; this is the reusable surface
   decode.go            type registry, Detect, Decode, DecodeAs
+  registry_index.go    introspection: RegistryIndex, categories, min sizes
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
+  ledger_header.go     ledger-header field notes and protocol parameters
+  bucket_entry.go      bucket list, tombstone and hot archive terminology
+  scp.go               consensus node identity and pledge names
+  state_archival.go    TTL expiry and eviction rendering
+  overlay.go           peer addresses, certificate keys, overlay message names
+  tx_history.go        ledger-sequence field notes for history sets and batches
+  asset_types.go       asset details and Stellar Asset Contract id derivation
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   diff.go              structural path diff
@@ -113,8 +122,20 @@ var registry = []xdrType{
 ```
 
 The three fields are the display name, an allocator, and a detection priority.
-That is the whole change. Detection, `--type`, `lens types`, the tree, the JSON
-output and the differ all pick it up automatically.
+Then add the matching entry to `typeDocs` in
+[`registry_index.go`](../pkg/lens/registry_index.go) so `lens types --json`
+can describe it:
+
+```go
+"ClaimableBalanceEntry": {CategoryLedgerEntry,
+	"A balance claimable by named claimants, with its predicate and asset."},
+```
+
+That is the whole change. Detection, `--type`, `lens types` (including
+`--json`), the tree, the JSON output and the differ all pick it up
+automatically. `TestTypeDocsCoversRegistry` fails if the two maps drift apart,
+and `TestRegistryIndexMinWireSizeIsLowerBound` checks the published minimum
+size against the actual fixtures.
 
 ### Choosing a priority
 
@@ -125,24 +146,26 @@ Roughly:
 |---|---|
 | 90–100 | What developers paste most: envelopes, results, meta |
 | 60–89 | Ledger entries, keys, inner transaction types |
-| 30–59 | Soroban types |
+| 40–59 | Ledger-level types, Soroban, history-archive sets and batches |
+| 30–39 | Overlay messages and events, which are large but rarely pasted |
 | 1–29 | Small building blocks that decode from very few bytes |
 
 Small types deserve low priority because short payloads are ambiguous — a
 4-byte value may decode as half a dozen types, and the ranking decides which
-one `lens decode` shows by default.
+one `lens decode` shows by default. The overlay `Auth` message is the extreme
+case: four bytes that also parse as a void `ScVal`, so it ranks at 2 and is
+decoded with `--type` in practice.
 
 ## Adding an enricher
 
-Enrichers turn an XDR value into something a human recognises. They live in
-[`enrich.go`](../pkg/lens/enrich.go) and are registered by concrete type:
+Enrichers turn an XDR value into something a human recognises. `enricherFor` in
+[`enrich.go`](../pkg/lens/enrich.go) maps a concrete XDR type to its enricher.
+The core entries are a declaration-time literal; a type added by a feature file
+registers itself without touching `enrich.go` at all:
 
 ```go
 func init() {
-	enricherFor = map[reflect.Type]Enricher{
-		reflect.TypeOf(xdr.AccountId{}): enrichAccountID,
-		// add yours here
-	}
+	enricherFor[reflect.TypeOf(xdr.MyType{})] = enrichMyType
 }
 
 func enrichMyType(rv reflect.Value) (display string, raw any, ok bool) {
@@ -158,8 +181,8 @@ Return `ok=false` to fall back to the generic rendering — do this for union ar
 you cannot sensibly render, such as liquidity-pool-share assets, rather than
 returning a misleading string.
 
-The registry is populated once in `init` and read-only afterwards, so it needs
-no locking.
+The registry is populated once before any decoding happens and is read-only
+afterwards, so it needs no locking.
 
 ### Field-name enrichment
 
@@ -169,6 +192,17 @@ a value is an amount is the field it sits in. `amountFields` in `enrich.go`
 lists the known amount fields; anything not listed stays a plain integer,
 because rendering a sequence number as `12345.0000000` would be worse than
 showing it raw.
+
+`fieldNotes` is the same idea for anything that is not an amount — a hint
+attached to a field rendered alongside it. `LedgerVersion: 22` becomes
+`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N`.
+Feature files register notes from `init`:
+
+```go
+func init() {
+	fieldNotes["SlotIndex"] = slotIndexNote
+}
+```
 
 ## Adding a formatter
 
@@ -213,52 +247,28 @@ Two rules, both enforced by tests:
   codes across the 28 protocol enums by reflection and fails if any lacks an
   entry. When a new protocol version adds a code, that test tells you its name.
 
-## Ledger upgrades and protocol votes
+## Introspection and contract ids
 
-Ledger upgrade votes (carried in `StellarValue.upgrades` and `LedgerHeader.ledgerUpgrade`
-as `UpgradeType` opaque bytes) are decoded by an enricher registered for
-`xdr.UpgradeType`. The enricher attempts to `SafeUnmarshal` the bytes as
-`xdr.LedgerUpgrade`. On success, the hex bytes remain the machine `Value` and a
-one-line human summary becomes the `Note` (e.g. `protocol version 21`,
-`base fee 100 stroops (0.0000100 XLM)`). Unknown or malformed votes decline,
-falling back to the generic hex rendering.
+Two small APIs round out the library for tooling use:
 
-Protocol configuration entries (`ConfigSettingEntry`) are decoded by registering
-the union type at priority 5 (same as other ledger-entry payloads). The union's
-21 arms — scalar limits, compute/ledger-cost/historical/events/bandwidth
-settings, cost-param arrays, state-archival TTLs, eviction iterator, parallel
-compute, SCP timing, and the protocol-23 freeze-bypass arms — all render
-structurally.
+- [`RegistryIndex()`](../pkg/lens/registry_index.go) returns a `TypeInfo` for
+  every registered type — name, category, description, priority and minimum
+  encoded size — which is what `lens types --json` emits. The index is derived
+  from the live registry, so it can never list a type `DecodeAs` rejects. Sizes
+  are computed structurally from the Go types by reflection, with a depth cap
+  for self-referential unions and a conservative fallback, so the number is a
+  lower bound that holds for every valid value; no fixture or network access is
+  involved.
+- [`DescribeAsset`](../pkg/lens/asset_types.go) decodes a classic asset and
+  derives its Stellar Asset Contract id. The id is a hash of the network id and
+  the asset (`Asset.ContractID`), rendered as a strkey `C…` address, so it is
+  deterministic, offline, and different on every network. `DescribeAssetValue`
+  does the same for an already-decoded `Value` and reports `ErrNotAsset` when
+  the value is not an asset.
 
-Two enrichers add human-friendly notes:
-
-1. **Fee/rent fields** — ten `Int64` fields across the ledger-cost, compute,
-   historical-data, events, bandwidth, and ledger-cost-ext arms are registered
-   in `amountFields` so they render as XLM amounts with the raw stroops in
-   parentheses (e.g. `FeeDiskReadLedgerEntry: 1563  0.0001563 (stroops: 1563)`).
-   Negative values (e.g. `RentFee1KbSorobanStateSizeLow: -17000`) are handled
-   correctly.
-
-2. **TTL/duration fields** — four `Uint32` ledger-count fields in
-   `StateArchivalSettings` (`MaxEntryTtl`, `MinTemporaryTtl`,
-   `MinPersistentTtl`, `LiveSorobanStateSizeWindowSamplePeriod`) are registered
-   in the new `fieldNotes` map. They render an approximate wall-clock duration
-   at the protocol's default 5s target close time (e.g. `3110400  ≈180.0 days
-   (at 5s per ledger)`).
-
-The freeze-bypass arms (`FrozenLedgerKeys`, `FrozenLedgerKeysDelta`,
-`FreezeBypassTxs`, `FreezeBypassTxsDelta`) carry `EncodedLedgerKey` — an
-`opaque <>` that the protocol guarantees is a valid `LedgerKey`. An enricher for
-`EncodedLedgerKey` decodes it with `SafeUnmarshal` and produces a one-line
-summary identifying the key type and its identifying value (account ID, trustline
-asset, offer ID, data name, contract ID, etc.). The raw hex remains the machine
-value; the summary is the note.
-
-Cost-model arrays (`ContractCostParams`) render structurally: each entry shows
-`ConstTerm` and `LinearTerm` (the coefficients of the `const + linear×n` cost
-formula). The array index corresponds to the `ContractCostType` enum ordinal;
-mapping indices to names is intentionally not done because the enum grows with
-protocol versions and a positional mapping could mislead on older/newer networks.
+`ContractId` and `ScAddress` values anywhere in a decoded tree render as strkey
+addresses too, via enrichers registered in `asset_types.go` — a contract id
+buried in a Soroban footprint is as readable as one at the top level.
 
 ## Explain, and why it reads the Node tree
 
@@ -279,9 +289,18 @@ logic from the tree.
 
 ## Testing approach
 
-Fixtures in `testdata/` are **real captured mainnet transactions**, not
-synthetic ones, with `manifest.json` recording each transaction hash so a
-fixture can be traced back to the ledger. Tests never touch the network.
+Fixtures in `testdata/` are **real captured mainnet transactions**, with
+`manifest.json` recording each transaction hash so a fixture can be traced back
+to the ledger. Tests never touch the network.
+
+For types that never appear as standalone Horizon payloads — SCP envelopes,
+bucket entries, ledger headers, TTL entries, overlay messages, history-archive
+sets and classic assets — `manifest.json` also lists synthetic fixtures:
+deterministic payloads built with `xdr.MarshalBase64` from fixed hashes and
+sequence numbers. Each one is declared as such in the manifest, so provenance
+is never in doubt. Asset fixtures double as known-answer tests: the native and
+USDC assets carry well-known mainnet SAC contract ids that the tests assert
+exactly.
 
 Where a case cannot be captured — every classic operation type, memo variant and
 precondition shape — tests construct XDR with the SDK encoder and round-trip it
@@ -291,6 +310,9 @@ The suite deliberately targets properties that would break the tool if violated:
 
 - detection stays unambiguous on real payloads (`TestDetectIsUnambiguousForRealPayloads`);
 - ambiguity is reported, not hidden (`TestDetectReportsGenuineAmbiguity`);
+- the introspection index tracks the registry exactly
+  (`TestTypeDocsCoversRegistry`) and its size estimates hold as lower bounds
+  (`TestRegistryIndexMinWireSizeIsLowerBound`);
 - enums render as names, not integers (`TestEnumsRenderAsConstantNames`);
 - a failure is attributed to the operation that caused it
   (`TestExplainPairAttributesFailureToOperation`);
