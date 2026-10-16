@@ -14,7 +14,7 @@ Everything flows one way:
 ```
 base64 ──► detect ──► xdr decode ──► Node tree ──► enrich ──► Formatter ──► output
               │            │             │                        │
-        registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep
+        registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep │ csv
 ```
 
 The important property is that **only one stage knows about XDR**. Once a value
@@ -66,6 +66,7 @@ pkg/lens/              the library; this is the reusable surface
     diff.go            diff rendering
     summary.go         compact single-line summary (grep/pipeline friendly)
     txrep.go           SEP-0011 human-readable TxRep format
+    csv.go             flat CSV export for batch ledger envelopes
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -450,6 +451,43 @@ The suite deliberately targets properties that would break the tool if violated:
 - Handles `TransactionEnvelope` variants: V0, V1, and FeeBump envelopes.
 - Formats signatures with key hints and base64 payloads (`tx.signatures[0].signature: ...`).
 - Generates valid TxRep output for debugging and multisig coordination offline.
+
+## Flat CSV export (`pkg/lens/format/csv.go`)
+
+`CSVFormatter` extracts the high-level fields of many transactions into one flat,
+machine-readable table, which is the shape a batch export — "who sent it, what it
+cost, what it did, and whether it succeeded" — needs.
+
+- The schema is fixed and exported: [`CSVColumns`](../pkg/lens/format/csv.go)
+  lists the sixteen columns in emit order, and the column constants and the
+  header row are pinned against it by `TestCSVColumnIndexesMatchSchema` and
+  `TestCSVColumnsAreStable`. Renaming or reordering a column is a breaking
+  change for scripts that address them positionally.
+- `FormatAll` and `FormatSummaries` are the batch entry points: one header,
+  then one row per value, so thousands of transactions concatenate under a
+  single header. `WithCSVHeader(false)` drops the header for appends.
+- Rows are fixed-width. A field that does not apply to a row — the fee bid of a
+  bare `TransactionResult`, the variant of a bucket entry — is emitted as an
+  empty field, never omitted, so every row parses with the same reader.
+- Transaction values go through `lens.Explain`, which is what turns the raw
+  tree into short result codes, short operation names and the outcome. The
+  paired form, `FormatSummary` / `FormatSummaries` on a `lens.Summary` from
+  `ExplainPair`, is the one that fills `success`, `result_code`,
+  `inner_result_code` and `failed_operations` from a single transaction.
+- Any other registered type still exports: `type` carries the XDR type name and
+  `detail` carries the tree flattened to `key=value` pairs. A transaction that
+  cannot be explained is an error instead, because a half-filled transaction row
+  would be a lie.
+- Output is written through `encoding/csv`, so a memo containing the delimiter,
+  a quote or a newline is quoted per RFC 4180 and round-trips through any
+  standard reader. Nothing but the value and the writer influences the bytes:
+  no network, no clock, no environment, which is what makes the export
+  deterministic in CI.
+- Rows are built before the writer is touched, so a failed batch leaves the
+  writer untouched rather than truncated mid-export.
+
+Reachable from the CLI as `lens decode --csv` (or `--format csv`); see the
+[README](../README.md#csv-export) for the column list.
 
 ## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
 

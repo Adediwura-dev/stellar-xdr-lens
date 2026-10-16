@@ -132,6 +132,10 @@ $ lens decode --summary --file envelope.xdr
 $ lens decode --txrep --file envelope.xdr
 # or: lens decode --format txrep --file envelope.xdr
 
+# Flat CSV row of the high-level transaction fields
+$ lens decode --csv --file envelope.xdr
+# or: lens decode --format csv --file envelope.xdr
+
 # Interactive terminal tree explorer (TUI)
 $ lens decode -i --file envelope.xdr
 # or use the dedicated command:
@@ -140,6 +144,47 @@ $ lens explore --file envelope.xdr
 # Contract spec-aware ScVal decoding from contract WASM or spec XDR
 $ lens decode --spec contract.wasm --file invocation.xdr
 ```
+
+#### CSV export
+
+`lens decode --csv` prints one fixed-schema row per value, which is what a
+batch export over thousands of transactions wants:
+
+```csv
+type,variant,source,fee_bump_source,seq_num,fee,memo,signatures,operation_count,operation_types,fee_charged,success,result_code,inner_result_code,failed_operations,detail
+TransactionEnvelope,fee_bump,GAPB7YMUQ6MPQ23PTFDNBZP7HGGTZPI2DT5JJURUOIXNPLGHW2O3WYXZ,GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW,264125967419700139,24167,,1,1,invoke_host_function,,,,,,
+```
+
+Every row carries the same number of fields, so rows from different
+invocations concatenate and still parse: a column that does not apply — the
+fee bid of a bare `TransactionResult`, say — is an empty field rather than a
+missing one. `Type` is the XDR type name, `variant` is the envelope shape
+(`v0`, `v1`, `fee_bump`), and non-transaction types set `detail` instead of
+the transaction columns. Output is RFC 4180, so memos containing commas,
+quotes or newlines round-trip through any CSV reader.
+
+Each `lens decode --csv` call emits the header once. To export a batch under a
+single header, use the library, which is also how the pairing works:
+
+```go
+summaries := make([]*lens.Summary, 0, len(rows))
+for _, row := range rows {
+	s, err := lens.ExplainPair(row.envelope, row.result)
+	if err != nil {
+		return err
+	}
+	summaries = append(summaries, s)
+}
+
+f := format.NewCSVFormatter()
+if err := f.FormatSummaries(os.Stdout, summaries); err != nil {
+	return err
+}
+```
+
+`WithCSVHeader(false)` drops the header for appends, and `WithCSVDelimiter`
+switches the field delimiter — the column order, and the names scripts address
+by position, are pinned by tests and are a breaking change to alter.
 
 ### `lens diff` — what changed?
 
@@ -250,7 +295,8 @@ and Soroban RPC:
 ```
 
 These field names are part of the public interface — sibling tools and scripts
-address them with `jq`, so renaming one is a breaking change.
+address them with `jq`, so renaming one is a breaking change. The CSV column
+names in [`CSVColumns`](#csv-export) are part of the same contract.
 
 ## Library use
 
