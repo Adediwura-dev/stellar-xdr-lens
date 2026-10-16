@@ -251,6 +251,57 @@ func TestDiffListLengthChange(t *testing.T) {
 	}
 }
 
+func TestDiffWithOptionsAlignsInsertedListItem(t *testing.T) {
+	t.Parallel()
+
+	value := func(items ...string) *lens.Value {
+		children := make([]*lens.Node, 0, len(items))
+		for _, item := range items {
+			children = append(children, &lens.Node{Kind: lens.KindScalar, Value: item})
+		}
+		return &lens.Value{Type: "List", Node: &lens.Node{Kind: lens.KindList, Children: children}}
+	}
+
+	left, right := value("a", "b"), value("new", "a", "b")
+	defaultDiff, err := lens.Diff(left, right)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	aligned, err := lens.DiffWithOptions(left, right, lens.DiffOptions{AlignLists: true})
+	if err != nil {
+		t.Fatalf("DiffWithOptions() error = %v", err)
+	}
+	if len(defaultDiff.Changes) <= 1 {
+		t.Fatalf("positional diff got %d change(s), want cascading changes", len(defaultDiff.Changes))
+	}
+	if len(aligned.Changes) != 1 {
+		t.Fatalf("aligned diff got %d change(s), want one: %+v", len(aligned.Changes), aligned.Changes)
+	}
+	if aligned.Changes[0].Op != lens.ChangeAdded || aligned.Changes[0].Path != "[0]" {
+		t.Errorf("aligned change = %+v, want added item at [0]", aligned.Changes[0])
+	}
+}
+
+func TestDiffWithOptionsAlignsRemovedListItem(t *testing.T) {
+	t.Parallel()
+
+	value := func(items ...string) *lens.Value {
+		children := make([]*lens.Node, 0, len(items))
+		for _, item := range items {
+			children = append(children, &lens.Node{Kind: lens.KindScalar, Value: item})
+		}
+		return &lens.Value{Type: "List", Node: &lens.Node{Kind: lens.KindList, Children: children}}
+	}
+
+	got, err := lens.DiffWithOptions(value("a", "remove", "b"), value("a", "b"), lens.DiffOptions{AlignLists: true})
+	if err != nil {
+		t.Fatalf("DiffWithOptions() error = %v", err)
+	}
+	if len(got.Changes) != 1 || got.Changes[0].Op != lens.ChangeRemoved {
+		t.Fatalf("aligned diff = %+v, want one removal", got.Changes)
+	}
+}
+
 func TestDiffRejectsNilValues(t *testing.T) {
 	t.Parallel()
 
@@ -308,6 +359,72 @@ func TestChangeOpString(t *testing.T) {
 		if got := tc.op.String(); got != tc.want {
 			t.Errorf("ChangeOp(%d).String() = %q, want %q", tc.op, got, tc.want)
 		}
+	}
+}
+
+func TestChangeStringAndDiffSummary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		change lens.Change
+		want   string
+	}{
+		{lens.Change{Path: "Field", Op: lens.ChangeAdded, After: "new"}, "+ Field = new"},
+		{lens.Change{Path: "Field", Op: lens.ChangeRemoved, Before: "old"}, "- Field = old"},
+		{lens.Change{Path: "Field", Op: lens.ChangeModified, Before: 1, After: 2}, "~ Field: 1 -> 2"},
+		{lens.Change{Path: "Field", Op: lens.ChangeTypeChanged, BeforeNote: "before", AfterNote: "after"}, "~ Field: before -> after"},
+	}
+	for _, tc := range tests {
+		if got := tc.change.String(); got != tc.want {
+			t.Errorf("Change.String() = %q, want %q", got, tc.want)
+		}
+	}
+
+	result := &lens.DiffResult{Changes: []lens.Change{
+		{Op: lens.ChangeModified},
+		{Op: lens.ChangeTypeChanged},
+		{Op: lens.ChangeAdded},
+		{Op: lens.ChangeRemoved},
+	}}
+	if got, want := result.Summary(), "2 changed, 1 added, 1 removed"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+}
+
+func TestDiffChangeSummariesForAddedContainers(t *testing.T) {
+	t.Parallel()
+
+	left := &lens.Value{Type: "Root", Node: &lens.Node{Kind: lens.KindStruct}}
+	right := &lens.Value{Type: "Root", Node: &lens.Node{Kind: lens.KindStruct, Children: []*lens.Node{
+		{Name: "Record", Kind: lens.KindStruct, TypeName: "RecordType"},
+		{Name: "Items", Kind: lens.KindList, Children: []*lens.Node{{Kind: lens.KindScalar, Value: "x"}}},
+	}}}
+	got, err := lens.Diff(left, right)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if len(got.Changes) != 2 || got.Changes[0].After != "{RecordType}" || got.Changes[1].After != "[1 item(s)]" {
+		t.Errorf("container addition values = %+v", got.Changes)
+	}
+}
+
+func TestDiffAlignmentComparesNestedStructItems(t *testing.T) {
+	t.Parallel()
+
+	item := func(id string) *lens.Node {
+		return &lens.Node{Kind: lens.KindStruct, TypeName: "Item", Children: []*lens.Node{
+			{Name: "ID", Kind: lens.KindScalar, Value: id},
+		}}
+	}
+	list := func(items ...*lens.Node) *lens.Value {
+		return &lens.Value{Type: "Items", Node: &lens.Node{Kind: lens.KindList, Children: items}}
+	}
+	got, err := lens.DiffWithOptions(list(item("a"), item("b")), list(item("inserted"), item("a"), item("b")), lens.DiffOptions{AlignLists: true})
+	if err != nil {
+		t.Fatalf("DiffWithOptions() error = %v", err)
+	}
+	if len(got.Changes) != 1 || got.Changes[0].Op != lens.ChangeAdded || got.Changes[0].After != "{Item}" {
+		t.Errorf("aligned struct diff = %+v, want one inserted Item", got.Changes)
 	}
 }
 

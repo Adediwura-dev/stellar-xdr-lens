@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-xdr-lens/internal/cli"
 )
@@ -476,6 +477,74 @@ func TestDiffJSON(t *testing.T) {
 		if c.Path == "" || c.Op == "" {
 			t.Errorf("change has empty path or op: %+v", c)
 		}
+	}
+}
+
+func TestDiffSemanticFlag(t *testing.T) {
+	t.Parallel()
+
+	leftRaw := xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &xdr.Int128Parts{Hi: 1, Lo: 5}}
+	rightRaw := xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &xdr.Int128Parts{Hi: 1, Lo: 6}}
+	left, err := xdr.MarshalBase64(leftRaw)
+	if err != nil {
+		t.Fatalf("MarshalBase64(left) error = %v", err)
+	}
+	right, err := xdr.MarshalBase64(rightRaw)
+	if err != nil {
+		t.Fatalf("MarshalBase64(right) error = %v", err)
+	}
+	stdout, _, err := run(t, "", "diff", "--type", "ScVal", "--semantic", left, right)
+	if err != nil {
+		t.Fatalf("diff --semantic error = %v", err)
+	}
+	for _, want := range []string{"18446744073709551621", "18446744073709551622"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("semantic diff output does not contain %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestMetaDiffCommand(t *testing.T) {
+	t.Parallel()
+
+	meta := xdr.TransactionMeta{V: 0, Operations: &[]xdr.OperationMeta{}}
+	payload, err := xdr.MarshalBase64(meta)
+	if err != nil {
+		t.Fatalf("MarshalBase64() error = %v", err)
+	}
+
+	stdout, _, err := run(t, "", "meta-diff", payload)
+	if err != nil {
+		t.Fatalf("meta-diff error = %v", err)
+	}
+	if !strings.Contains(stdout, "no balance changes") {
+		t.Errorf("meta-diff output = %q, want empty-delta message", stdout)
+	}
+
+	stdout, _, err = run(t, payload, "meta-diff", "--json", "-")
+	if err != nil {
+		t.Fatalf("meta-diff --json from stdin error = %v", err)
+	}
+	var result struct {
+		Changes []json.RawMessage `json:"changes"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("meta-diff JSON is invalid: %v\n%s", err, stdout)
+	}
+	if len(result.Changes) != 0 {
+		t.Errorf("meta-diff JSON has %d changes, want 0", len(result.Changes))
+	}
+
+	metaPath := filepath.Join(t.TempDir(), "transaction-meta.xdr")
+	if err := os.WriteFile(metaPath, []byte(payload), 0o600); err != nil {
+		t.Fatalf("WriteFile(metadata fixture) error = %v", err)
+	}
+	stdout, _, err = run(t, "", "meta-diff", "--file", metaPath)
+	if err != nil {
+		t.Fatalf("meta-diff --file error = %v", err)
+	}
+	if !strings.Contains(stdout, "no balance changes") {
+		t.Errorf("meta-diff --file output = %q, want empty-delta message", stdout)
 	}
 }
 

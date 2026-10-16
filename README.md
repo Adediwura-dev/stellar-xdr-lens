@@ -283,6 +283,32 @@ TransactionResult
 ```
 
 Use `--exit-code` to exit non-zero when the values differ, like `diff(1)`.
+The default compares ordered lists by index. Use `--align` to opt into LCS
+matching for unchanged list elements when insertions or removals would cause a
+cascade of positional changes. `--semantic` compares ScVal wide integers as
+exact decimal values and matches recursive map entries by their canonical
+XDR keys. These options can be combined:
+
+```console
+$ lens diff --align --semantic before.xdr after.xdr
+```
+
+### `lens meta-diff` — how did ledger balances change?
+
+Transaction metadata carries ledger-entry state and changes. `meta-diff`
+pairs those snapshots locally and reports account XLM, trustline, and
+claimable-balance changes without contacting a ledger or RPC endpoint:
+
+```console
+$ lens meta-diff transaction-meta.xdr
+G... XLM: 10.0000000 XLM -> 12.5000000 XLM (+2.5000000 XLM)
+```
+
+Use `--json` for machine-readable output. Balances are represented as signed
+64-bit ledger units (`stroops` for XLM); `beforeKnown` is false when metadata
+contains an after-value without its prior state. Created and removed entries
+use zero on the absent side when the corresponding metadata record makes that
+baseline known.
 
 ### `lens asset` — derive a Stellar Asset Contract id
 

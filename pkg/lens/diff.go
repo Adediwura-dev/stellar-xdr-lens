@@ -90,6 +90,17 @@ type DiffResult struct {
 	Changes []Change
 }
 
+// DiffOptions configures structural comparison behavior.
+type DiffOptions struct {
+	// AlignLists matches unchanged list elements with a longest-common-
+	// subsequence pass before comparing them. It is useful when insertions
+	// would otherwise shift every later positional diff.
+	AlignLists bool
+	// Semantic compares supported ScVal integers as exact decimal values and
+	// pairs ScVal map entries by canonical key instead of list position.
+	Semantic bool
+}
+
 // Equal reports whether the two values were structurally identical.
 func (d *DiffResult) Equal() bool { return len(d.Changes) == 0 }
 
@@ -104,16 +115,34 @@ func (d *DiffResult) Equal() bool { return len(d.Changes) == 0 }
 // reported and the walk proceeds, since a TransactionV0 and a Transaction
 // often share most of their structure.
 func Diff(left, right *Value) (*DiffResult, error) {
+	return DiffWithOptions(left, right, DiffOptions{})
+}
+
+// DiffWithOptions structurally compares two values using the supplied options.
+// The default Diff function remains positional for ordered XDR sequences.
+func DiffWithOptions(left, right *Value, options DiffOptions) (*DiffResult, error) {
 	if left == nil || right == nil {
 		return nil, fmt.Errorf("%w: diff requires two decoded values", ErrInvalidArgument)
 	}
+	leftNode, rightNode := left.Node, right.Node
+	if options.Semantic {
+		var err error
+		leftNode, err = scValNodeForValue(left, true)
+		if err != nil {
+			return nil, fmt.Errorf("preparing left semantic value: %w", err)
+		}
+		rightNode, err = scValNodeForValue(right, true)
+		if err != nil {
+			return nil, fmt.Errorf("preparing right semantic value: %w", err)
+		}
+	}
 	res := &DiffResult{LeftType: left.Type, RightType: right.Type}
-	diffNodes(left.Node, right.Node, "", &res.Changes)
+	diffNodesWithOptions(leftNode, rightNode, "", &res.Changes, options)
 	return res, nil
 }
 
-// diffNodes walks two subtrees in parallel, appending changes as it goes.
-func diffNodes(a, b *Node, path string, out *[]Change) {
+// diffNodesWithOptions walks two subtrees in parallel, appending changes as it goes.
+func diffNodesWithOptions(a, b *Node, path string, out *[]Change, options DiffOptions) {
 	switch {
 	case a == nil && b == nil:
 		return
@@ -151,21 +180,21 @@ func diffNodes(a, b *Node, path string, out *[]Change) {
 		}
 
 	case KindList:
-		diffLists(a, b, path, out)
+		diffListsWithOptions(a, b, path, out, options)
 
 	case KindStruct:
-		diffStructs(a, b, path, out)
+		diffStructsWithOptions(a, b, path, out, options)
 	}
 }
 
 // diffStructs compares two records field by field, preserving the field order
 // of the left-hand side so output reads top-to-bottom like the source.
-func diffStructs(a, b *Node, path string, out *[]Change) {
+func diffStructsWithOptions(a, b *Node, path string, out *[]Change, options DiffOptions) {
 	seen := make(map[string]bool, len(a.Children))
 
 	for _, ac := range a.Children {
 		seen[ac.Name] = true
-		diffNodes(ac, b.Child(ac.Name), join(path, ac.Name), out)
+		diffNodesWithOptions(ac, b.Child(ac.Name), join(path, ac.Name), out, options)
 	}
 	// Fields present only on the right: a union that switched arms shows up
 	// here as a removal plus an addition.
@@ -173,18 +202,21 @@ func diffStructs(a, b *Node, path string, out *[]Change) {
 		if seen[bc.Name] {
 			continue
 		}
-		diffNodes(nil, bc, join(path, bc.Name), out)
+		diffNodesWithOptions(nil, bc, join(path, bc.Name), out, options)
 	}
 }
 
-// diffLists compares two sequences positionally.
-//
-// Positional comparison is the right default for XDR: operations, signatures
-// and claimants are ordered, and their index is meaningful. A
-// longest-common-subsequence alignment would report an inserted operation as
-// one insert rather than a cascade of modifications, which reads better but
-// hides the index shift that actually matters when debugging.
-func diffLists(a, b *Node, path string, out *[]Change) {
+const maxAlignmentCells = 1 << 20
+
+// diffListsWithOptions compares sequences positionally unless alignment was
+// requested. Very large products fall back to positional comparison to bound
+// memory use on untrusted XDR input.
+func diffListsWithOptions(a, b *Node, path string, out *[]Change, options DiffOptions) {
+	if options.AlignLists && len(a.Children) > 0 && len(b.Children) > 0 &&
+		len(a.Children) <= maxAlignmentCells/len(b.Children) {
+		diffAlignedLists(a.Children, b.Children, path, out, options)
+		return
+	}
 	maxLen := len(a.Children)
 	if len(b.Children) > maxLen {
 		maxLen = len(b.Children)
@@ -197,8 +229,66 @@ func diffLists(a, b *Node, path string, out *[]Change) {
 		if i < len(b.Children) {
 			bc = b.Children[i]
 		}
-		diffNodes(ac, bc, path+"["+strconv.Itoa(i)+"]", out)
+		diffNodesWithOptions(ac, bc, path+"["+strconv.Itoa(i)+"]", out, options)
 	}
+}
+
+func diffAlignedLists(left, right []*Node, path string, out *[]Change, options DiffOptions) {
+	rows, columns := len(left)+1, len(right)+1
+	lcs := make([][]int, rows)
+	for i := range rows {
+		lcs[i] = make([]int, columns)
+	}
+	for i := len(left) - 1; i >= 0; i-- {
+		for j := len(right) - 1; j >= 0; j-- {
+			if sameNode(left[i], right[j]) {
+				lcs[i][j] = 1 + lcs[i+1][j+1]
+			} else if lcs[i+1][j] > lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+
+	i, j := 0, 0
+	for i < len(left) && j < len(right) {
+		if sameNode(left[i], right[j]) {
+			diffNodesWithOptions(left[i], right[j], path+"["+strconv.Itoa(j)+"]", out, options)
+			i++
+			j++
+		} else if lcs[i][j+1] >= lcs[i+1][j] {
+			diffNodesWithOptions(nil, right[j], path+"["+strconv.Itoa(j)+"]", out, options)
+			j++
+		} else {
+			diffNodesWithOptions(left[i], nil, path+"["+strconv.Itoa(i)+"]", out, options)
+			i++
+		}
+	}
+	for ; i < len(left); i++ {
+		diffNodesWithOptions(left[i], nil, path+"["+strconv.Itoa(i)+"]", out, options)
+	}
+	for ; j < len(right); j++ {
+		diffNodesWithOptions(nil, right[j], path+"["+strconv.Itoa(j)+"]", out, options)
+	}
+}
+
+func sameNode(a, b *Node) bool {
+	if a == nil || b == nil || a.Kind != b.Kind || a.Name != b.Name {
+		return a == b
+	}
+	if a.Kind == KindScalar {
+		return sameScalar(a, b)
+	}
+	if len(a.Children) != len(b.Children) {
+		return false
+	}
+	for i := range a.Children {
+		if !sameNode(a.Children[i], b.Children[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func sameScalar(a, b *Node) bool {
@@ -242,6 +332,13 @@ func join(path, name string) string {
 // them. When typeName is empty the type is auto-detected for each side
 // independently.
 func DiffBase64(leftPayload, rightPayload, typeName string) (*DiffResult, error) {
+	return DiffBase64WithOptions(leftPayload, rightPayload, typeName, DiffOptions{})
+}
+
+// DiffBase64WithOptions decodes and compares two payloads using the supplied
+// structural diff options. When typeName is empty, each side is detected
+// independently.
+func DiffBase64WithOptions(leftPayload, rightPayload, typeName string, options DiffOptions) (*DiffResult, error) {
 	decode := func(p string) (*Value, error) {
 		if typeName != "" {
 			return DecodeAs(p, typeName)
@@ -256,7 +353,7 @@ func DiffBase64(leftPayload, rightPayload, typeName string) (*DiffResult, error)
 	if err != nil {
 		return nil, fmt.Errorf("decoding right value: %w", err)
 	}
-	return Diff(left, right)
+	return DiffWithOptions(left, right, options)
 }
 
 // Summary renders a one-line description of the diff, suitable for a CI log.
