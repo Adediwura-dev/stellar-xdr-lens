@@ -215,6 +215,12 @@ func TestExtractWasmContractSpecErrors(t *testing.T) {
 	if !errors.Is(err, lens.ErrNoContractSpecSection) {
 		t.Errorf("expected ErrNoContractSpecSection, got: %v", err)
 	}
+
+	malformedSection := append(append([]byte(nil), dummyWasm...), 0, 1, 1, 'x')
+	_, err = lens.ExtractWasmContractSpec(malformedSection)
+	if !errors.Is(err, lens.ErrMalformedWASM) {
+		t.Errorf("expected ErrMalformedWASM, got: %v", err)
+	}
 }
 
 func TestLoadContractSpecFile(t *testing.T) {

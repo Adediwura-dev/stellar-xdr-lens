@@ -120,6 +120,11 @@ func TestDecodeCommand(t *testing.T) {
 			args:        []string{"decode", "--candidates", "AAAAAA=="},
 			wantContain: []string{"Memo", "Asset", "types matched"},
 		},
+		{
+			name:        "offer entry ledger type",
+			args:        []string{"decode", "--type", "OfferEntry", fixture(t, "offer_entry")},
+			wantContain: []string{"OfferEntry", "OfferId", "7/3 (= 2.3333333)", "GAISEM2EKVTHPCEZVK54ZXPO74ABCIRTIRKWM54ITGVLXTG5537QAQZ5"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -799,6 +804,34 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("decode --csv", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--csv", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --csv: %v", err)
+		}
+		lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("decode --csv should emit a header and one row, got %d lines: %s", len(lines), stdout)
+		}
+		if !strings.HasPrefix(lines[0], "type,variant,source,fee_bump_source,") ||
+			!strings.HasSuffix(lines[0], ",detail") {
+			t.Errorf("unexpected csv header: %s", lines[0])
+		}
+		if !strings.HasPrefix(lines[1], "TransactionEnvelope,v1,") {
+			t.Errorf("unexpected csv row: %s", lines[1])
+		}
+	})
+
+	t.Run("decode --format csv", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "csv", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format csv: %v", err)
+		}
+		if !strings.Contains(stdout, "TransactionEnvelope") {
+			t.Errorf("unexpected csv output: %s", stdout)
+		}
+	})
+
 	t.Run("explore command", func(t *testing.T) {
 		stdout, _, err := run(t, "q\n", "explore", fixturePayload)
 		if err != nil {
@@ -816,6 +849,80 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 		}
 		if !strings.Contains(stdout, "Explorer") {
 			t.Errorf("unexpected interactive output: %s", stdout)
+		}
+	})
+}
+
+func TestEncodeCommand(t *testing.T) {
+	t.Parallel()
+
+	validAccount := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+	txJSON := `{
+		"source_account": "` + validAccount + `",
+		"fee": 100,
+		"sequence": 12345,
+		"operations": [
+			{
+				"type": "payment",
+				"destination": "` + validAccount + `",
+				"amount": 1000
+			}
+		]
+	}`
+
+	t.Run("encode_transaction_envelope", func(t *testing.T) {
+		stdout, _, err := run(t, "", "encode", txJSON)
+		if err != nil {
+			t.Fatalf("encode failed: %v", err)
+		}
+		b64 := strings.TrimSpace(stdout)
+		if len(b64) == 0 {
+			t.Fatalf("expected base64 output")
+		}
+		// verify decoding back
+		val, err := lens.Decode(b64)
+		if err != nil || val.Type != "TransactionEnvelope" {
+			t.Fatalf("failed decoding built transaction: %v", err)
+		}
+	})
+
+	t.Run("encode_transaction_strict", func(t *testing.T) {
+		stdout, _, err := run(t, "", "encode", "--strict", txJSON)
+		if err != nil {
+			t.Fatalf("strict encode failed: %v", err)
+		}
+		if len(strings.TrimSpace(stdout)) == 0 {
+			t.Fatalf("expected base64 output")
+		}
+	})
+
+	t.Run("encode_scval", func(t *testing.T) {
+		stdout, _, err := run(t, "", "encode", "--scval", `{"symbol": "hello"}`)
+		if err != nil {
+			t.Fatalf("encode scval failed: %v", err)
+		}
+		b64 := strings.TrimSpace(stdout)
+		val, err := lens.Decode(b64)
+		if err != nil || val.Type != "ScVal" {
+			t.Fatalf("failed decoding scval: %v", err)
+		}
+	})
+
+	t.Run("encode_from_stdin", func(t *testing.T) {
+		stdout, _, err := run(t, txJSON, "encode", "-")
+		if err != nil {
+			t.Fatalf("encode from stdin failed: %v", err)
+		}
+		if len(strings.TrimSpace(stdout)) == 0 {
+			t.Fatalf("expected output from stdin")
+		}
+	})
+
+	t.Run("encode_strict_error", func(t *testing.T) {
+		badJSON := `{"source_account": "` + validAccount + `", "unknown_field": 123}`
+		_, _, err := run(t, "", "encode", "--strict", badJSON)
+		if err == nil {
+			t.Fatalf("expected strict validation error")
 		}
 	})
 }

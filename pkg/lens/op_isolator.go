@@ -1,7 +1,6 @@
 package lens
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -56,7 +55,7 @@ type IsolatedFailure struct {
 // checks vs execution failures from a TransactionResult and an optional TransactionEnvelope.
 func IsolateFailure(res *xdr.TransactionResult, env *xdr.TransactionEnvelope) (*IsolatedFailure, error) {
 	if res == nil {
-		return nil, errors.New("cannot isolate failure from nil TransactionResult")
+		return nil, fmt.Errorf("%w: cannot isolate failure from nil TransactionResult", ErrInvalidArgument)
 	}
 
 	// 1. Success check
@@ -219,12 +218,12 @@ func IsolateResult(res *xdr.TransactionResult) (*IsolatedFailure, error) {
 // IsolateFailureFromValue isolates failure details from decoded Value instances.
 func IsolateFailureFromValue(resultVal *Value, envelopeVal *Value) (*IsolatedFailure, error) {
 	if resultVal == nil {
-		return nil, errors.New("result value is required")
+		return nil, fmt.Errorf("%w: result value is required", ErrInvalidArgument)
 	}
 
 	res, ok := resultVal.Raw.(*xdr.TransactionResult)
 	if !ok {
-		return nil, fmt.Errorf("result value is %T, want *xdr.TransactionResult", resultVal.Raw)
+		return nil, fmt.Errorf("%w: result value is %T, want *xdr.TransactionResult", ErrInvalidArgument, resultVal.Raw)
 	}
 
 	var env *xdr.TransactionEnvelope
