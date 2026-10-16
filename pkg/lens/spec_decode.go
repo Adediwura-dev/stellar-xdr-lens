@@ -12,15 +12,6 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
-var (
-	// ErrNoContractSpecSection is returned when a WASM binary contains no contractspecv0 section.
-	ErrNoContractSpecSection = errors.New("contract WASM does not contain a contractspecv0 section")
-	// ErrInvalidWasm is returned when the data does not start with the WASM magic header.
-	ErrInvalidWasm = errors.New("invalid WebAssembly binary header")
-	// ErrTypeNotFound is returned when a spec type name is not defined in the contract spec.
-	ErrTypeNotFound = errors.New("spec type not found")
-)
-
 // ContractSpec holds parsed Soroban contract specifications.
 type ContractSpec struct {
 	Functions  map[string]xdr.ScSpecFunctionV0
@@ -89,7 +80,7 @@ func LoadContractSpecFile(path string) (*ContractSpec, error) {
 // If the payload is a WASM binary, it extracts the contractspecv0 section first.
 func ParseContractSpec(data []byte) (*ContractSpec, error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("empty contract spec data")
+		return nil, fmt.Errorf("%w: empty contract spec data", ErrInvalidContractSpec)
 	}
 
 	// If it's a WASM binary, extract custom section
@@ -127,13 +118,13 @@ func ParseContractSpec(data []byte) (*ContractSpec, error) {
 				// We already decoded at least one entry
 				break
 			}
-			return nil, fmt.Errorf("xdr unmarshal ScSpecEntry: %w", err)
+			return nil, fmt.Errorf("%w: xdr unmarshal ScSpecEntry: %w", ErrInvalidContractSpec, err)
 		}
 		cs.AddEntry(entry)
 	}
 
 	if len(cs.Entries) == 0 {
-		return nil, fmt.Errorf("no ScSpecEntry definitions found")
+		return nil, fmt.Errorf("%w: no ScSpecEntry definitions found", ErrInvalidContractSpec)
 	}
 
 	return cs, nil
@@ -153,39 +144,47 @@ func ExtractWasmContractSpec(wasmData []byte) ([]byte, error) {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return nil, fmt.Errorf("reading wasm section id: %w", err)
+			return nil, fmt.Errorf("%w: reading wasm section id: %w", ErrMalformedWASM, err)
 		}
 
 		sectionLen, err := readVarUint32(r)
 		if err != nil {
-			return nil, fmt.Errorf("reading section length: %w", err)
+			return nil, fmt.Errorf("%w: reading section length: %w", ErrMalformedWASM, err)
+		}
+		if uint64(sectionLen) > uint64(r.Len()) {
+			return nil, fmt.Errorf("%w: section %d claims %d byte(s), %d remain",
+				ErrMalformedWASM, sectionID, sectionLen, r.Len())
 		}
 
 		if sectionID == 0 { // Custom section
 			startPos, err := r.Seek(0, io.SeekCurrent)
 			if err != nil {
-				return nil, fmt.Errorf("seeking section: %w", err)
+				return nil, fmt.Errorf("%w: seeking section: %w", ErrMalformedWASM, err)
 			}
 			nameLen, err := readVarUint32(r)
 			if err != nil {
-				return nil, fmt.Errorf("reading custom section name len: %w", err)
+				return nil, fmt.Errorf("%w: reading custom section name len: %w", ErrMalformedWASM, err)
 			}
 			nameBytes := make([]byte, nameLen)
 			if _, err := io.ReadFull(r, nameBytes); err != nil {
-				return nil, fmt.Errorf("reading custom section name: %w", err)
+				return nil, fmt.Errorf("%w: reading custom section name: %w", ErrMalformedWASM, err)
 			}
 
 			afterNamePos, err := r.Seek(0, io.SeekCurrent)
 			if err != nil {
-				return nil, fmt.Errorf("seeking section: %w", err)
+				return nil, fmt.Errorf("%w: seeking section: %w", ErrMalformedWASM, err)
 			}
 			nameHeaderSize := uint32(afterNamePos - startPos)
+			if nameHeaderSize > sectionLen {
+				return nil, fmt.Errorf("%w: custom section name uses %d byte(s), section has %d",
+					ErrMalformedWASM, nameHeaderSize, sectionLen)
+			}
 
 			if string(nameBytes) == "contractspecv0" {
 				payloadLen := sectionLen - nameHeaderSize
 				payload := make([]byte, payloadLen)
 				if _, err := io.ReadFull(r, payload); err != nil {
-					return nil, fmt.Errorf("reading contractspecv0 payload: %w", err)
+					return nil, fmt.Errorf("%w: reading contractspecv0 payload: %w", ErrMalformedWASM, err)
 				}
 				return payload, nil
 			}
@@ -193,12 +192,12 @@ func ExtractWasmContractSpec(wasmData []byte) ([]byte, error) {
 			// Skip remaining custom section
 			remaining := int64(sectionLen - nameHeaderSize)
 			if _, err := r.Seek(remaining, io.SeekCurrent); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%w: seeking past custom section: %w", ErrMalformedWASM, err)
 			}
 		} else {
 			// Skip other sections
 			if _, err := r.Seek(int64(sectionLen), io.SeekCurrent); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("%w: seeking past section %d: %w", ErrMalformedWASM, sectionID, err)
 			}
 		}
 	}
@@ -237,7 +236,7 @@ func readVarUint32(r io.ByteReader) (uint32, error) {
 		}
 		shift += 7
 		if shift > 35 {
-			return 0, fmt.Errorf("varuint32 overflow")
+			return 0, fmt.Errorf("%w: varuint32 overflow", ErrMalformedWASM)
 		}
 	}
 	return result, nil
@@ -246,7 +245,7 @@ func readVarUint32(r io.ByteReader) (uint32, error) {
 // DecodeScValNamed decodes an ScVal using a named UDT type from the spec.
 func (cs *ContractSpec) DecodeScValNamed(val *xdr.ScVal, typeName string) (*Node, error) {
 	if val == nil {
-		return nil, fmt.Errorf("nil ScVal")
+		return nil, fmt.Errorf("%w: nil ScVal", ErrInvalidArgument)
 	}
 
 	if st, ok := cs.Structs[typeName]; ok {
@@ -266,7 +265,7 @@ func (cs *ContractSpec) DecodeScValNamed(val *xdr.ScVal, typeName string) (*Node
 func (cs *ContractSpec) DecodeInvocation(funcName string, args []xdr.ScVal) (*Node, error) {
 	fn, ok := cs.Functions[funcName]
 	if !ok {
-		return nil, fmt.Errorf("function %q not found in contract spec", funcName)
+		return nil, fmt.Errorf("%w: %q", ErrFunctionNotFound, funcName)
 	}
 
 	node := &Node{

@@ -1,7 +1,7 @@
 {
-  "source": "Stellar Mainnet (Soroban RPC: https://soroban-rpc.mainnet.stellar.gateway.fm)",
-  "captured": "2026-10-15",
-  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content. ConfigSettingEntry fixtures captured via getLedgerEntries RPC at ledger 64961092.",
+  "source": "Stellar Mainnet (Horizon: https://horizon.stellar.org)",
+  "captured": "2026-08-03",
+  "note": "Real captured mainnet XDR. Used by table-driven tests. Do not regenerate casually: tests assert on decoded content. Constructed fixtures are listed separately under 'constructed'.",
   "fixtures": {
     "tx_failed": {
       "tx_hash": "a6e87c3d8e2ca78e026bf165cf8c3c6423f62c6133c54217804940c32b13e1fe",
@@ -39,119 +39,49 @@
       "envelope_file": "tx_soroban.env.txt",
       "result_file": "tx_soroban.res.txt"
     },
-    "config_setting_0": {
-      "description": "ConfigSettingEntry: ContractMaxSizeBytes (131072 bytes)",
-      "ledger": 57941156,
-      "config_setting_id": "ConfigSettingContractMaxSizeBytes",
-      "file": "config_setting_0.txt"
+    "offer_entry": {
+      "tx_hash": null,
+      "description": "synthetic DEX offer entry: sell 7.0000000 USDC:GAQSE…UAIOK for native XLM at 7/3 (= 2.3333333), offer id 42, passive flag",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "offer_entry.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
     },
-    "config_setting_1": {
-      "description": "ConfigSettingEntry: ContractComputeV0",
-      "ledger": 60993066,
-      "config_setting_id": "ConfigSettingContractComputeV0",
-      "file": "config_setting_1.txt"
+    "price": {
+      "tx_hash": null,
+      "description": "synthetic price fraction 7/3 (= 2.3333333)",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "price.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
     },
-    "config_setting_2": {
-      "description": "ConfigSettingEntry: ContractLedgerCostV0",
-      "ledger": 60993066,
-      "config_setting_id": "ConfigSettingContractLedgerCostV0",
-      "file": "config_setting_2.txt"
+    "price_zero": {
+      "tx_hash": null,
+      "description": "synthetic malformed price 1/0 (zero denominator) used to exercise the degrading enricher path",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "price_zero.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
     },
-    "config_setting_3": {
-      "description": "ConfigSettingEntry: ContractHistoricalDataV0",
-      "ledger": 60993066,
-      "config_setting_id": "ConfigSettingContractHistoricalDataV0",
-      "file": "config_setting_3.txt"
-    },
-    "config_setting_4": {
-      "description": "ConfigSettingEntry: ContractEventsV0",
-      "ledger": 60993066,
-      "config_setting_id": "ConfigSettingContractEventsV0",
-      "file": "config_setting_4.txt"
-    },
-    "config_setting_5": {
-      "description": "ConfigSettingEntry: ContractBandwidthV0",
-      "ledger": 60993066,
-      "config_setting_id": "ConfigSettingContractBandwidthV0",
-      "file": "config_setting_5.txt"
-    },
-    "config_setting_6": {
-      "description": "ConfigSettingEntry: ContractCostParamsCpuInstructions (86 entries)",
-      "ledger": 62447231,
-      "config_setting_id": "ConfigSettingContractCostParamsCpuInstructions",
-      "file": "config_setting_6.txt"
-    },
-    "config_setting_7": {
-      "description": "ConfigSettingEntry: ContractCostParamsMemoryBytes (86 entries)",
-      "ledger": 62447231,
-      "config_setting_id": "ConfigSettingContractCostParamsMemoryBytes",
-      "file": "config_setting_7.txt"
-    },
-    "config_setting_8": {
-      "description": "ConfigSettingEntry: ContractDataKeySizeBytes (250 bytes)",
-      "ledger": 57941156,
-      "config_setting_id": "ConfigSettingContractDataKeySizeBytes",
-      "file": "config_setting_8.txt"
-    },
-    "config_setting_9": {
-      "description": "ConfigSettingEntry: ContractDataEntrySizeBytes (65536 bytes)",
-      "ledger": 57941156,
-      "config_setting_id": "ConfigSettingContractDataEntrySizeBytes",
-      "file": "config_setting_9.txt"
-    },
-    "config_setting_10": {
-      "description": "ConfigSettingEntry: StateArchivalSettings (TTLs: 180d/1d/120d)",
-      "ledger": 59516381,
-      "config_setting_id": "ConfigSettingStateArchival",
-      "file": "config_setting_10.txt"
-    },
-    "config_setting_11": {
-      "description": "ConfigSettingEntry: ContractExecutionLanes (max 2000 tx/ledger)",
-      "ledger": 60993066,
-      "config_setting_id": "ConfigSettingContractExecutionLanes",
-      "file": "config_setting_11.txt"
-    },
-    "config_setting_12": {
-      "description": "ConfigSettingEntry: LiveSorobanStateSizeWindow (30 samples)",
-      "ledger": 64961088,
-      "config_setting_id": "ConfigSettingLiveSorobanStateSizeWindow",
-      "file": "config_setting_12.txt"
-    },
-    "config_setting_13": {
-      "description": "ConfigSettingEntry: EvictionIterator",
-      "ledger": 64961092,
-      "config_setting_id": "ConfigSettingEvictionIterator",
-      "file": "config_setting_13.txt"
-    },
-    "config_setting_14": {
-      "description": "ConfigSettingEntry: ContractParallelComputeV0",
-      "ledger": 60993066,
-      "config_setting_id": "ConfigSettingContractParallelComputeV0",
-      "file": "config_setting_14.txt"
-    },
-    "config_setting_15": {
-      "description": "ConfigSettingEntry: ContractLedgerCostExtV0",
-      "ledger": 61484996,
-      "config_setting_id": "ConfigSettingContractLedgerCostExtV0",
-      "file": "config_setting_15.txt"
-    },
-    "config_setting_16": {
-      "description": "ConfigSettingEntry: ScpTiming (5000ms target close time)",
-      "ledger": 58762517,
-      "config_setting_id": "ConfigSettingScpTiming",
-      "file": "config_setting_16.txt"
-    },
-    "config_setting_17": {
-      "description": "ConfigSettingEntry: FrozenLedgerKeys (3 account keys)",
-      "ledger": 63073409,
-      "config_setting_id": "ConfigSettingFrozenLedgerKeys",
-      "file": "config_setting_17.txt"
-    },
-    "config_setting_19": {
-      "description": "ConfigSettingEntry: FreezeBypassTxs (empty)",
-      "ledger": 62447231,
-      "config_setting_id": "ConfigSettingFreezeBypassTxs",
-      "file": "config_setting_19.txt"
+    "ledger_entry_offer": {
+      "tx_hash": null,
+      "description": "synthetic ledger entry of type Offer carrying offer id 42, used to verify offers decode inside LedgerEntry.Data",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "ledger_entry_offer.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
     }
   },
   "synthetic_fixtures": {
@@ -277,6 +207,50 @@
       "asset_usdc": {
         "type": "Asset",
         "description": "USDC issued by GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN; its mainnet SAC id is CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75."
+      },
+      "data_entry_text": {
+        "type": "DataEntry",
+        "description": "JSON config value: valid printable UTF-8, so it must render as text (issue #17)."
+      },
+      "data_entry_binary": {
+        "type": "DataEntry",
+        "description": "PNG signature as the value: invalid UTF-8, so it must render as hex (issue #17)."
+      },
+      "account_entry_ext_v1": {
+        "type": "AccountEntry",
+        "description": "Liabilities of 150/25 XLM in the v1 extension; exercises the stroop amount notes and the liabilities discriminant note (issue #15)."
+      },
+      "account_entry_ext_v2": {
+        "type": "AccountEntry",
+        "description": "Two signers with one sponsored reserve (NumSponsored 1, NumSponsoring 2) (issue #15)."
+      },
+      "account_entry_ext_v3": {
+        "type": "AccountEntry",
+        "description": "V2 extension whose V3 carries SeqLedger 55278432 and SeqTime 1780000000 (issue #15)."
+      },
+      "contract_code": {
+        "type": "ContractCodeEntry",
+        "description": "Synthetic 699-byte WASM module with contractspecv0 (all six declaration kinds), contractenvmetav0 (host protocol 22) and contractmetav0 (rsver/rssdkver) custom sections (issue #10)."
+      },
+      "contract_code_v1": {
+        "type": "ContractCodeEntry",
+        "description": "ContractCodeEntry ext v1 with cost inputs; a bare module with no metadata sections, so Spec/EnvMeta/Meta are absent (issue #10)."
+      },
+      "survey_request": {
+        "type": "SignedTimeSlicedSurveyRequestMessage",
+        "description": "Surveyor requests the topology of one peer for ledger 55278432; the command type and peer encryption key are enriched (issue #20)."
+      },
+      "survey_response": {
+        "type": "SignedTimeSlicedSurveyResponseMessage",
+        "description": "Response carrying a 24-byte encrypted topology body for ledger 55278432 (issue #20)."
+      },
+      "survey_start": {
+        "type": "SignedTimeSlicedSurveyStartCollectingMessage",
+        "description": "Start-collecting command for ledger 55278432 (issue #20)."
+      },
+      "survey_stop": {
+        "type": "SignedTimeSlicedSurveyStopCollectingMessage",
+        "description": "Stop-collecting command; byte-identical to survey_start on the wire, so decode it with an explicit --type (issue #20)."
       }
     }
   }

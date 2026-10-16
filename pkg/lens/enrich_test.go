@@ -59,3 +59,68 @@ func TestEnrichSignature(t *testing.T) {
 		t.Errorf("raw value altered")
 	}
 }
+
+// The domain enrichers are registered against exact types, so routing one a
+// different value means a bug in registration. They must decline cleanly
+// rather than panic or invent a rendering.
+func TestDomainEnrichersRejectWrongType(t *testing.T) {
+	t.Parallel()
+
+	wrong := reflect.ValueOf("not an xdr value")
+	enrichers := map[string]Enricher{
+		"enrichPoolParameters":     enrichPoolParameters,
+		"enrichClaimPredicate":     enrichClaimPredicate,
+		"enrichClaimableBalanceID": enrichClaimableBalanceID,
+		"enrichContractID":         enrichContractID,
+		"enrichScAddress":          enrichScAddress,
+	}
+	for name, fn := range enrichers {
+		if _, _, ok := fn(wrong); ok {
+			t.Errorf("%s accepted a non-XDR value", name)
+		}
+	}
+}
+
+func TestClaimableBalanceIDRejectsUnknownType(t *testing.T) {
+	t.Parallel()
+
+	id := xdr.ClaimableBalanceId{Type: xdr.ClaimableBalanceIdType(99)}
+	if _, _, ok := enrichClaimableBalanceID(reflect.ValueOf(id)); ok {
+		t.Error("enrichClaimableBalanceID accepted an unknown id type")
+	}
+}
+
+func TestScAddressRejectsUnknownType(t *testing.T) {
+	t.Parallel()
+
+	addr := xdr.ScAddress{Type: xdr.ScAddressType(99)}
+	if _, _, ok := enrichScAddress(reflect.ValueOf(addr)); ok {
+		t.Error("enrichScAddress accepted an unknown address type")
+	}
+}
+
+func TestTrustLineFlagNote(t *testing.T) {
+	t.Parallel()
+
+	if _, ok := trustLineFlagNote(reflect.ValueOf(xdr.Uint32(0))); ok {
+		t.Error("trustLineFlagNote produced a note for an empty flag set")
+	}
+	if _, ok := trustLineFlagNote(reflect.ValueOf("x")); ok {
+		t.Error("trustLineFlagNote accepted a non-Uint32 value")
+	}
+}
+
+func TestClaimableBalanceFlagNote(t *testing.T) {
+	t.Parallel()
+
+	clawback := xdr.Uint32(xdr.ClaimableBalanceFlagsClaimableBalanceClawbackEnabledFlag)
+	if note, ok := claimableBalanceFlagNote(reflect.ValueOf(clawback)); !ok || note != "clawback enabled" {
+		t.Errorf("clawback note = %q, %v; want 'clawback enabled', true", note, ok)
+	}
+	if _, ok := claimableBalanceFlagNote(reflect.ValueOf(xdr.Uint32(0))); ok {
+		t.Error("claimableBalanceFlagNote produced a note for an empty flag set")
+	}
+	if _, ok := claimableBalanceFlagNote(reflect.ValueOf("x")); ok {
+		t.Error("claimableBalanceFlagNote accepted a non-Uint32 value")
+	}
+}

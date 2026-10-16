@@ -18,9 +18,9 @@ import (
 // ok=false leaves the value to the generic tree walker.
 //
 // Enrichers are the primary extension point of this package. To teach the
-// tool to render a new XDR type nicely, write an Enricher and register it in
-// defaultEnrichers — nothing else needs to change, and every output format
-// picks it up at once. See docs/architecture.md.
+// tool to render a new XDR type nicely, write an Enricher and register it
+// with registerEnricher — nothing else needs to change, and every output
+// format picks it up at once. See docs/architecture.md.
 type Enricher func(rv reflect.Value) (display string, raw any, ok bool)
 
 // enricherFor maps a concrete XDR type to its Enricher. It is a
@@ -39,6 +39,10 @@ var enricherFor = map[reflect.Type]Enricher{
 	reflect.TypeOf(xdr.Hash{}):             enrichHash,
 	reflect.TypeOf(xdr.PoolId{}):           enrichPoolID,
 	reflect.TypeOf(xdr.Signature{}):        enrichSignature,
+}
+
+func registerEnricher(t reflect.Type, fn Enricher) {
+	enricherFor[t] = fn
 }
 
 // enrich looks up and applies the Enricher registered for rv's type.
@@ -168,17 +172,11 @@ var amountFields = map[string]bool{
 	"Balance":          true,
 	"FeeCharged":       true,
 	"ClaimableBalance": true,
-	// ConfigSettingEntry fee/rent fields (all stroop-denominated Int64)
-	"FeeRatePerInstructionsIncrement": true,
-	"FeeDiskReadLedgerEntry":          true,
-	"FeeWriteLedgerEntry":             true,
-	"FeeDiskRead1Kb":                  true,
-	"RentFee1KbSorobanStateSizeLow":   true,
-	"RentFee1KbSorobanStateSizeHigh":  true,
-	"FeeHistorical1Kb":                true,
-	"FeeContractEvents1Kb":            true,
-	"FeeTxSize1Kb":                    true,
-	"FeeWrite1Kb":                     true,
+	"ReserveA":         true,
+	"ReserveB":         true,
+	"TotalPoolShares":  true,
+	"Buying":           true,
+	"Selling":          true,
 }
 
 // enrichAmountField applies stroop formatting when a field is known to carry
@@ -239,23 +237,34 @@ func enrichField(fieldName string, rv reflect.Value) (note string, ok bool) {
 	return fn(rv)
 }
 
-// fieldNotes maps a field name to a function that produces an additional
-// human-friendly note for that field. Unlike amountFields, these renderers
-// receive the full reflected value and can handle any type. Feature files
-// register their notes during init.
-var fieldNotes = map[string]func(reflect.Value) (string, bool){}
+// fieldNoteFn renders an extra Note for a struct field. Returning ok=false
+// leaves the field untouched.
+type fieldNoteFn func(rv reflect.Value) (note string, ok bool)
 
-// enrichField applies all field-name-based notes: stroop amounts (via
-// enrichAmountField) and any additional notes registered in fieldNotes.
-// It is called by the walker after the type-based enricher.
-func enrichField(fieldName string, rv reflect.Value) (string, bool) {
-	if note, ok := enrichAmountField(fieldName, rv); ok {
-		return note, true
+// fieldNotesByType maps a containing struct type to per-field note renderers. Like
+// amountFields it exists because XDR encodes semantically distinct concepts
+// with the same scalar type: TrustLineEntry.Flags and OfferEntry.Flags are
+// both xdr.Uint32 but only the former is a trust line flag set, so the
+// containing type is needed as well as the field name.
+var fieldNotesByType = map[reflect.Type]map[string]fieldNoteFn{}
+
+// registerFieldNote registers fn for one field of one struct type. Domain
+// files call it from init; see registerEnricher for why this is ordering-safe.
+func registerFieldNote(parent reflect.Type, field string, fn fieldNoteFn) {
+	if fieldNotesByType[parent] == nil {
+		fieldNotesByType[parent] = map[string]fieldNoteFn{}
 	}
-	if fn, ok := fieldNotes[fieldName]; ok {
-		return fn(rv)
+	fieldNotesByType[parent][field] = fn
+}
+
+// noteForField applies a registered field note, if any. A missing entry is
+// not an error: most fields have no note.
+func noteForField(parent reflect.Type, field string, rv reflect.Value) (string, bool) {
+	fn, found := fieldNotesByType[parent][field]
+	if !found {
+		return "", false
 	}
-	return "", false
+	return fn(rv)
 }
 
 // isEnumType reports whether t is a generated XDR enum. Enums carry a
