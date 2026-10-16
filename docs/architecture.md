@@ -478,6 +478,22 @@ Where a case cannot be captured — every classic operation type, memo variant a
 precondition shape — tests construct XDR with the SDK encoder and round-trip it
 through the real decode path, rather than reaching into internals.
 
+Decoder benchmarks live in
+[`pkg/lens/benchmarks_test.go`](../pkg/lens/benchmarks_test.go) and use only
+checked-in `testdata/` fixtures. Run them from the repository root with:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'Benchmark(DecodeCanonicalFixtures|DetectCanonicalFixtures|DecodeByProtocolVersion)$' -benchmem
+```
+
+The fixture benchmarks report decode and type-detection latency, allocations,
+and input throughput for representative transactions, ledger data and overlay
+messages. The protocol-version benchmark starts with the canonical Protocol 22
+ledger-header fixture and re-encodes its `LedgerVersion` as Protocols 20–23.
+Those cases deliberately keep the header's XDR shape and all other fields
+constant: they compare decoder cost across the version values, not historical
+wire-schema changes. No benchmark or library decode path makes network calls.
+
 The suite deliberately targets properties that would break the tool if violated:
 
 - detection stays unambiguous on real payloads (`TestDetectIsUnambiguousForRealPayloads`);
