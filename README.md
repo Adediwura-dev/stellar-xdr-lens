@@ -304,10 +304,11 @@ Pass `--type` when you need certainty.
 **Early but real.** v0.1 does what this README says, with tests over real captured
 mainnet XDR. The library API may still shift before v1.0 — it is not yet frozen.
 
-- Supports 54 XDR types out of the ~400 in the protocol, chosen to cover what
+- Supports 58 XDR types out of the ~400 in the protocol, chosen to cover what
   developers actually paste into a terminal: transactions, ledger entries, SCP,
-  overlay messages, history-archive sets and Soroban. Adding more is a one-line
-  change; see [docs/architecture.md](docs/architecture.md).
+  overlay messages (including time-sliced surveys), history-archive sets and
+  Soroban — including the interface spec embedded in a contract's WASM.
+  Adding more is a one-line change; see [docs/architecture.md](docs/architecture.md).
 - All 208 protocol result codes are explained.
 - No network access anywhere in the library or the tests.
 

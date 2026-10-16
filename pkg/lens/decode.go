@@ -95,6 +95,12 @@ var registry = []xdrType{
 	{"StellarMessage", func() any { return new(xdr.StellarMessage) }, 36},
 	{"Hello", func() any { return new(xdr.Hello) }, 35},
 	{"PeerAddress", func() any { return new(xdr.PeerAddress) }, 27},
+	{"SignedTimeSlicedSurveyRequestMessage", func() any { return new(xdr.SignedTimeSlicedSurveyRequestMessage) }, 26},
+	{"SignedTimeSlicedSurveyResponseMessage", func() any { return new(xdr.SignedTimeSlicedSurveyResponseMessage) }, 25},
+	{"SignedTimeSlicedSurveyStartCollectingMessage", func() any { return new(xdr.SignedTimeSlicedSurveyStartCollectingMessage) }, 24},
+	// Start and stop collect messages have identical field lists, so their
+	// encodings are identical; stop ranks lower and needs --type to win.
+	{"SignedTimeSlicedSurveyStopCollectingMessage", func() any { return new(xdr.SignedTimeSlicedSurveyStopCollectingMessage) }, 21},
 	{"DontHave", func() any { return new(xdr.DontHave) }, 23},
 	{"AuthCert", func() any { return new(xdr.AuthCert) }, 22},
 	{"Error", func() any { return new(xdr.Error) }, 3},
