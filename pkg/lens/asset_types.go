@@ -3,7 +3,6 @@ package lens
 import (
 	"errors"
 	"fmt"
-	"reflect"
 
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -114,45 +113,4 @@ func describeAsset(asset xdr.Asset, networkPassphrase string) (details *AssetDet
 	}
 	details.ContractID = contractID
 	return details, nil
-}
-
-func init() {
-	// A contract id is a 32-byte hash on the wire; the strkey C... address is
-	// the only form anyone recognises. Registering it here means every
-	// contract id anywhere in a decoded tree, not just on Assets, renders
-	// that way.
-	enricherFor[reflect.TypeOf(xdr.ContractId{})] = enrichContractID
-	// Soroban addresses switch between accounts, contracts and the other
-	// addressable ledger entries. The SDK's String method already resolves
-	// every arm to its strkey form.
-	enricherFor[reflect.TypeOf(xdr.ScAddress{})] = enrichScAddress
-}
-
-// enrichContractID renders a contract id as its strkey C... address.
-func enrichContractID(rv reflect.Value) (string, any, bool) {
-	id, ok := rv.Interface().(xdr.ContractId)
-	if !ok {
-		return "", nil, false
-	}
-	addr, err := strkey.Encode(strkey.VersionByteContract, id[:])
-	if err != nil {
-		return "", nil, false
-	}
-	return "", addr, true
-}
-
-// enrichScAddress renders a Soroban address as its strkey form: G... for an
-// account, C... for a contract, and the corresponding form for a muxed
-// account, claimable balance or liquidity pool. An unresolvable arm declines
-// and keeps the structural rendering.
-func enrichScAddress(rv reflect.Value) (string, any, bool) {
-	addr, ok := rv.Interface().(xdr.ScAddress)
-	if !ok {
-		return "", nil, false
-	}
-	display, err := addr.String()
-	if err != nil || display == "" {
-		return "", nil, false
-	}
-	return "", display, true
 }

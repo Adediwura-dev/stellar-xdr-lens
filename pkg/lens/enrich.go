@@ -41,6 +41,10 @@ var enricherFor = map[reflect.Type]Enricher{
 	reflect.TypeOf(xdr.Signature{}):        enrichSignature,
 }
 
+func registerEnricher(t reflect.Type, fn Enricher) {
+	enricherFor[t] = fn
+}
+
 // enrich looks up and applies the Enricher registered for rv's type.
 //
 // Generated XDR accessors dereference union arms without checking the
@@ -237,26 +241,26 @@ func enrichField(fieldName string, rv reflect.Value) (note string, ok bool) {
 // leaves the field untouched.
 type fieldNoteFn func(rv reflect.Value) (note string, ok bool)
 
-// fieldNotes maps a containing struct type to per-field note renderers. Like
+// fieldNotesByType maps a containing struct type to per-field note renderers. Like
 // amountFields it exists because XDR encodes semantically distinct concepts
 // with the same scalar type: TrustLineEntry.Flags and OfferEntry.Flags are
 // both xdr.Uint32 but only the former is a trust line flag set, so the
 // containing type is needed as well as the field name.
-var fieldNotes = map[reflect.Type]map[string]fieldNoteFn{}
+var fieldNotesByType = map[reflect.Type]map[string]fieldNoteFn{}
 
 // registerFieldNote registers fn for one field of one struct type. Domain
 // files call it from init; see registerEnricher for why this is ordering-safe.
 func registerFieldNote(parent reflect.Type, field string, fn fieldNoteFn) {
-	if fieldNotes[parent] == nil {
-		fieldNotes[parent] = map[string]fieldNoteFn{}
+	if fieldNotesByType[parent] == nil {
+		fieldNotesByType[parent] = map[string]fieldNoteFn{}
 	}
-	fieldNotes[parent][field] = fn
+	fieldNotesByType[parent][field] = fn
 }
 
 // noteForField applies a registered field note, if any. A missing entry is
 // not an error: most fields have no note.
 func noteForField(parent reflect.Type, field string, rv reflect.Value) (string, bool) {
-	fn, found := fieldNotes[parent][field]
+	fn, found := fieldNotesByType[parent][field]
 	if !found {
 		return "", false
 	}
