@@ -121,43 +121,24 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
-#### Ledger upgrade votes and protocol configuration
-
-`ConfigSettingEntry` (network configuration settings) and `UpgradeType` (protocol
-upgrade votes) are registered and enrich automatically.
+#### Alternative Formats and Interactive Explorer
 
 ```console
-$ lens decode --type ConfigSettingEntry "$(cat testdata/config_setting_10.txt)"
-ConfigSettingEntry
-├─ ConfigSettingId: ConfigSettingIdConfigSettingStateArchival
-└─ StateArchivalSettings
-   ├─ MaxEntryTtl: 3110400  ≈180.0 days (at 5s per ledger)
-   ├─ MinTemporaryTtl: 17280  ≈1.0 days (at 5s per ledger)
-   ├─ MinPersistentTtl: 2073600  ≈120.0 days (at 5s per ledger)
-   ├─ PersistentRentRateDenominator: 1215
-   ├─ TempRentRateDenominator: 2430
-   ├─ MaxEntriesToArchive: 1000
-   ├─ LiveSorobanStateSizeWindowSampleSize: 30
-   ├─ LiveSorobanStateSizeWindowSamplePeriod: 64  ≈5m20s (at 5s per ledger)
-   ├─ EvictionScanSize: 500000
-   └─ StartingEvictionScanLevel: 7
-```
+# Terse single-line summary suitable for grep and shell pipelines
+$ lens decode --summary --file envelope.xdr
+# or: lens decode --format summary --file envelope.xdr
 
-Fee and rent fields render as XLM with stroops in parentheses. TTL fields (ledger
-counts) render with an approximate wall-clock duration at the default 5s target
-close time.
+# SEP-0011 TxRep human-readable format
+$ lens decode --txrep --file envelope.xdr
+# or: lens decode --format txrep --file envelope.xdr
 
-Cost-model arrays (`ContractCostParams`) render structurally — each entry shows
-`ConstTerm` and `LinearTerm`. The array index corresponds to the
-`ContractCostType` enum ordinal.
+# Interactive terminal tree explorer (TUI)
+$ lens decode -i --file envelope.xdr
+# or use the dedicated command:
+$ lens explore --file envelope.xdr
 
-Frozen-keys arms (`FrozenLedgerKeys`, etc.) decode their opaque `EncodedLedgerKey`
-bytes into a one-line summary (e.g. `account key: GATDQL767ZM2JQTBEG4BQ5WKOQNGAGWZDUN4GYT2UINPEU3RT2UAMVZH`).
-
-```console
-$ lens decode --type UpgradeType "$(cat testdata/ledger_upgrade_version.txt)"
-UpgradeType
-└─ protocol version 21
+# Contract spec-aware ScVal decoding from contract WASM or spec XDR
+$ lens decode --spec contract.wasm --file invocation.xdr
 ```
 
 ### `lens diff` — what changed?
