@@ -19,7 +19,7 @@ base64 ──► detect ──► xdr decode ──► Node tree ──► enric
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 54 registered types at once,
+That is what lets a new output format work for all 58 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## Package layout
@@ -43,6 +43,10 @@ pkg/lens/              the library; this is the reusable surface
   bucket_entry.go      bucket list, tombstone and hot archive terminology
   scp.go               consensus node identity and pledge names
   state_archival.go    TTL expiry and eviction rendering
+  account_extensions.go liabilities, sponsorship counters and sequence-ledger notes
+  data_entry.go        account data values: printable text vs hex
+  survey.go            time-sliced survey command names and encrypted bodies
+  contract_code.go     WASM section parsing: contract spec, env meta and meta
   overlay.go           peer addresses, certificate keys, overlay message names
   tx_history.go        ledger-sequence field notes for history sets and batches
   asset_types.go       asset details and Stellar Asset Contract id derivation
@@ -212,6 +216,38 @@ func init() {
 }
 ```
 
+A note is only rendered on a scalar leaf. The tree and JSON formatters ignore
+`Node.Note` on struct and list nodes, so a note that should be visible has to
+sit on a child that renders as a scalar — `account_extensions.go` attaches the
+extension capability note to the union's discriminant child for exactly this
+reason.
+
+### Node hooks
+
+Some useful content is not an XDR field at all: a Soroban contract's interface
+lives in a WASM custom section inside the opaque `Code` byte array of a
+`ContractCodeEntry`. `nodeHooks` in [`node.go`](../pkg/lens/node.go) maps a
+concrete XDR type to a function that runs after the declared fields have been
+walked and may append derived children or annotate existing ones:
+
+```go
+func init() {
+	nodeHooks[reflect.TypeOf(xdr.ContractCodeEntry{})] = decorateContractCode
+}
+
+func decorateContractCode(n *Node, v any) {
+	entry := v.(xdr.ContractCodeEntry)
+	parsed, err := ParseContractCode(entry.Code)
+	// annotate the Code leaf and append Spec, EnvMeta and Meta children
+}
+```
+
+Hooks receive the concrete decoded value rather than a `reflect.Value`, so
+feature files stay free of reflection, and one that panics is treated as absent
+rather than being allowed to take the process down. Use a hook when the
+rendering depends on content buried inside a field; use the enricher registries
+when the type or field name is enough.
+
 ## Adding a formatter
 
 Implement `Formatter` in [`format/format.go`](../pkg/lens/format/format.go):
@@ -374,7 +410,8 @@ to the ledger. Tests never touch the network.
 
 For types that never appear as standalone Horizon payloads — SCP envelopes,
 bucket entries, ledger headers, TTL entries, overlay messages, history-archive
-sets and classic assets — `manifest.json` also lists synthetic fixtures:
+sets, classic assets, account extensions, data entries, contract code entries
+and survey messages — `manifest.json` also lists synthetic fixtures:
 deterministic payloads built with `xdr.MarshalBase64` from fixed hashes and
 sequence numbers. Each one is declared as such in the manifest, so provenance
 is never in doubt. Asset fixtures double as known-answer tests: the native and

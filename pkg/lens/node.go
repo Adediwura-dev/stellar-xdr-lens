@@ -136,6 +136,43 @@ func (n *Node) String() string {
 // pathological value producing an unbounded walk.
 const maxDepth = 200
 
+// nodeHooks maps a concrete XDR type to a function that appends derived
+// children to its struct node once the declared fields have been walked. It is
+// the extension point for content that is not itself an XDR field but is
+// embedded in one: a Soroban contract's WASM code section, for example. A hook
+// receives the concrete decoded value, not a reflect.Value, so feature files
+// stay free of reflection.
+//
+// Hooks are registered from feature init functions before any decoding
+// happens and the map is read-only afterwards, so it needs no locking.
+var nodeHooks = map[reflect.Type]func(*Node, any){}
+
+// runNodeHook invokes the hook registered for rv's type, if any. Hooks walk
+// untrusted input, so one that panics is treated as absent rather than being
+// allowed to take the process down.
+func runNodeHook(n *Node, rv reflect.Value) {
+	hook, found := nodeHooks[rv.Type()]
+	if !found {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			return
+		}
+	}()
+	hook(n, rv.Interface())
+}
+
+// nodeFor builds a Node tree for an arbitrary decoded value. It is the
+// entry point node hooks use to graft values they find inside a field, such
+// as the spec entries embedded in contract bytecode, onto the main tree.
+func nodeFor(name string, v any) *Node {
+	if v == nil {
+		return nil
+	}
+	return buildNode(name, reflect.ValueOf(v), 0)
+}
+
 // buildNode converts an arbitrary decoded XDR value into a neutral Node tree.
 //
 // This function, and the enricher lookup it calls, are the only places in the
@@ -201,6 +238,7 @@ func buildNode(name string, rv reflect.Value, depth int) *Node {
 			}
 			n.Children = append(n.Children, child)
 		}
+		runNodeHook(n, rv)
 		return n
 
 	case reflect.Slice, reflect.Array:
