@@ -103,6 +103,8 @@ var typeDocs = map[string]typeDoc{
 		"The WASM code of a deployed Soroban contract, with the hash it is keyed by."},
 	"ContractDataEntry": {CategoryLedgerEntry,
 		"One Soroban contract data entry: its key, value and storage durability."},
+	"ConfigSettingEntry": {CategoryLedgerEntry,
+		"A Soroban config setting entry: its ID, fee/rent parameters, and storage durability."},
 	"ContractEvent": {CategorySoroban,
 		"An event emitted by a Soroban contract."},
 	"DataEntry": {CategoryLedgerEntry,
