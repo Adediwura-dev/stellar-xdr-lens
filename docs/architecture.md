@@ -9,12 +9,20 @@ where to make the three changes contributors most often want to make:
 
 ## The pipeline
 
-Everything flows one way:
+Decoding and explaining flows one way:
 
 ```
 base64 ──► detect ──► xdr decode ──► Node tree ──► enrich ──► Formatter ──► output
               │            │             │                        │
         registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep │ csv
+```
+
+Encoding simplified JSON into XDR flows deterministically:
+
+```
+JSON spec ──► schema validate (strict) ──► type coerce ──► xdr build ──► base64 XDR
+                      │                         │               │
+                 validate.go                coerce.go      tx_builder.go / scval_encode.go
 ```
 
 The important property is that **only one stage knows about XDR**. Once a value
@@ -39,6 +47,7 @@ cmd/lens/              main; wires os.Args to internal/cli and maps errors to ex
 internal/cli/          cobra commands — deliberately thin
   root.go              command tree, global flags, explore (TUI) command
   decode.go            decode + types commands, formatting and spec decoding flags
+  encode.go            encode command for JSON -> base64 XDR
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
   meta_diff.go         transaction metadata balance-diff command
@@ -63,6 +72,10 @@ pkg/lens/              the library; this is the reusable surface
   overlay.go           peer addresses, certificate keys, overlay message names
   tx_history.go        ledger-sequence field notes for history sets and batches
   asset_types.go       asset details and Stellar Asset Contract id derivation
+  validate.go          strict schema validation for JSON templates
+  coerce.go            permissive type coercion & number parsing (stringified numbers, hex, assets)
+  scval_encode.go      ScVal constructor from intuitive JSON literals
+  tx_builder.go        TransactionEnvelope builder from JSON spec
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   reason_lookup.go     O(1) short code lookup table (ReasonByCode)

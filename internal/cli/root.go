@@ -83,6 +83,7 @@ unsigned transactions and works in CI.`,
 
 	root.AddCommand(
 		newDecodeCmd(g, stdout, stdin),
+		newEncodeCmd(g, stdout, stdin),
 		newExploreCmd(g, stdout, stdin),
 		newExplainCmd(g, stdout, stdin),
 		newDiffCmd(g, stdout, stdin),
