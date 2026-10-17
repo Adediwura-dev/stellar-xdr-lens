@@ -26,8 +26,8 @@ and lets the differ work without knowing what it is comparing.
 
 The `cmd/lens` package includes end-to-end subprocess tests that execute the
 built `lens` binary against the canonical `testdata/` fixtures. They cover the
-real command surface (`decode`, `explain`, and `diff`), use the same input
-resolution path as users do, and assert the observable CLI output. The suite is
+real command surface (`decode`, `explain`, `diff`, and `meta-diff`), use the
+same input resolution path as users do, and assert the observable CLI output. The suite is
 explicitly offline-first: it runs with the standard proxy variables cleared to
 ensure no network pathway is introduced by the command wrapper or default
 runtime environment.
@@ -41,6 +41,7 @@ internal/cli/          cobra commands — deliberately thin
   decode.go            decode + types commands, formatting and spec decoding flags
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
+  meta_diff.go         transaction metadata balance-diff command
   asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
   tui_tree.go          interactive terminal tree explorer (TUI)
@@ -72,7 +73,10 @@ pkg/lens/              the library; this is the reusable surface
   signature_explain.go Signature-threshold diagnosis (hint matching, missing weight)
   simulation_explain.go Simulation-failure root-cause decoder (footprint, CPU, fee)
   feebump_explain.go   Fee-bump inner-vs-outer failure separation
-  diff.go              structural path diff
+  diff.go              structural path diff and bounded opt-in LCS alignment
+  scval_diff.go        recursive ScVal comparison with canonical map-key matching
+  semantic_diff.go     exact wide-integer and type-aware semantic comparison
+  meta_diff.go         transaction metadata balance deltas (offline)
   canonical.go         deterministic canonical XDR validation (RFC 4506) and serialization
   encode_errors.go     malformed input diagnostics, line/column tracking and error pointers
   stream_parser.go     stream-oriented XDR reader and chunk parser (RFC 5531, length-prefixed, base64)
@@ -117,6 +121,31 @@ if errors.As(err, &kind) {
 Existing exported sentinels such as `ErrNoMatch`, `ErrUnknownType`,
 `ErrNotAsset`, and the WASM/spec errors remain available. Error classification
 is entirely local and does not add network access to library operations.
+
+## Structural, semantic, and metadata diffs
+
+`Diff(left, right)` keeps its original positional behavior for ordered lists.
+Call `DiffWithOptions` with `DiffOptions{AlignLists: true}` to use an LCS pass
+that reports unchanged insertions and removals without shifting later items.
+The aligner bounds its dynamic-programming table to $2^{20}$ cells and falls
+back to positional comparison above that limit.
+
+`DiffScVal(left, right)` recursively compares Soroban vectors and maps. Vector
+order remains significant; map entries are matched by the canonical XDR bytes
+of each key, so inserting a map entry does not cascade through later values.
+`DiffSemantic` (or `DiffOptions{Semantic: true}`) additionally represents
+ScVal `u128`, `i128`, `u256`, and `i256` values as exact decimal integers. The
+existing asset and address enrichers retain canonical asset identifiers and
+StrKeys. These behaviors are exposed by `lens diff --align` and
+`lens diff --semantic`, which can be combined.
+
+`DiffTransactionMetaBalances` accepts decoded `TransactionMeta` versions 0
+through 4 and returns deterministic deltas for account XLM balances, trustline
+balances, and claimable-balance amounts. A `STATE` entry supplies the before
+snapshot; create/remove changes use zero for the absent side. Metadata that
+does not include a baseline sets `BeforeKnown` false rather than inventing a
+balance. The CLI command `lens meta-diff` renders these records as text or
+JSON. It only inspects the supplied metadata and makes no network calls.
 
 ## Runnable Go examples
 

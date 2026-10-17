@@ -59,7 +59,10 @@ unsigned transactions and works in CI.`,
   lens decode --json "$XDR" | jq '.value.V1.Tx.Fee'
 
   # See what changed between two envelopes
-  lens diff a.xdr b.xdr`,
+	lens diff a.xdr b.xdr
+
+	# Summarize balance changes recorded in transaction metadata
+	lens meta-diff transaction-meta.xdr`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// Without args, print help rather than an error: a bare `lens` is a
@@ -83,6 +86,7 @@ unsigned transactions and works in CI.`,
 		newExploreCmd(g, stdout, stdin),
 		newExplainCmd(g, stdout, stdin),
 		newDiffCmd(g, stdout, stdin),
+		newMetaDiffCmd(g, stdout, stdin),
 		newAssetCmd(g, stdout, stdin),
 		newTypesCmd(stdout),
 		newVersionCmd(stdout),
