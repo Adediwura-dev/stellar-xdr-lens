@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,10 @@ import (
 func newDecodeCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
 	var (
 		asJSON      bool
+		asYAML      bool
+		isHex       bool
+		isMulti     bool
+		inspectWASM bool
 		asSummary   bool
 		asTxRep     bool
 		asCSV       bool
@@ -74,9 +79,36 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 				return runStream(stdout, g, firstArg(args), stdin, typeName, asJSON, compactOut, annotate, maxDepth, showTypes, canonical)
 			}
 
+			if isMulti {
+				var r io.Reader
+				if g.file != "" {
+					f, err := os.Open(g.file)
+					if err != nil {
+						return fmt.Errorf("opening %s: %w", g.file, err)
+					}
+					defer f.Close()
+					r = f
+				} else if firstArg(args) != "" && firstArg(args) != stdinMarker {
+					r = strings.NewReader(firstArg(args))
+				} else {
+					r = stdin
+				}
+
+				return runMultiStream(r, stdout, g, typeName, isHex, asJSON, asYAML, compactOut, annotate, maxDepth, showTypes)
+			}
+
 			payload, err := resolveInput(firstArg(args), g.file, stdin)
 			if err != nil {
 				return err
+			}
+
+			if isHex || strings.HasPrefix(payload, "0x") || strings.HasPrefix(payload, "0X") {
+				b64, convErr := lens.HexToBase64(payload)
+				if convErr == nil {
+					payload = b64
+				} else if isHex {
+					return fmt.Errorf("decoding hex input: %w", convErr)
+				}
 			}
 
 			if canonical {

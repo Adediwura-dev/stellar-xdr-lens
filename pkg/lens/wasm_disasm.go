@@ -16,8 +16,6 @@ var (
 	ErrInvalidWASMMagic = errors.New("invalid WebAssembly magic header")
 	// ErrUnsupportedWASMVersion is returned when the WASM version is not 1.
 	ErrUnsupportedWASMVersion = errors.New("unsupported WebAssembly version")
-	// ErrMalformedWASM is returned when the bytecode cannot be parsed.
-	ErrMalformedWASM = errors.New("malformed WebAssembly binary")
 	// ErrNoWASMFound is returned when no WebAssembly bytecode could be extracted from XDR.
 	ErrNoWASMFound = errors.New("no WebAssembly bytecode payload found in XDR")
 )
