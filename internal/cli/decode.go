@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +31,8 @@ func newDecodeCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comm
 		annotate    bool
 		listCands   bool
 		compactOut  bool
+		stream      bool
+		canonical   bool
 	)
 
 	cmd := &cobra.Command{
@@ -61,25 +65,13 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
   lens decode --interactive "$XDR"
   lens decode --type TransactionResult "$XDR"
   lens decode --candidates "AAAAAA=="
+  lens decode --stream --file records.xdr
+  lens decode --canonical "$XDR"
   echo "$XDR" | lens decode --depth 3`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if isMulti {
-				var r io.Reader
-				if g.file != "" {
-					f, err := os.Open(g.file)
-					if err != nil {
-						return fmt.Errorf("opening %s: %w", g.file, err)
-					}
-					defer f.Close()
-					r = f
-				} else if firstArg(args) != "" && firstArg(args) != stdinMarker {
-					r = strings.NewReader(firstArg(args))
-				} else {
-					r = stdin
-				}
-
-				return runMultiStream(r, stdout, g, typeName, isHex, asJSON, asYAML, compactOut, annotate, maxDepth, showTypes)
+			if stream {
+				return runStream(stdout, g, firstArg(args), stdin, typeName, asJSON, compactOut, annotate, maxDepth, showTypes, canonical)
 			}
 
 			payload, err := resolveInput(firstArg(args), g.file, stdin)
@@ -87,12 +79,19 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 				return err
 			}
 
-			if isHex || strings.HasPrefix(payload, "0x") || strings.HasPrefix(payload, "0X") {
-				b64, convErr := lens.HexToBase64(payload)
-				if convErr == nil {
-					payload = b64
-				} else if isHex {
-					return fmt.Errorf("decoding hex input: %w", convErr)
+			if canonical {
+				raw, decErr := base64.StdEncoding.DecodeString(payload)
+				if decErr != nil {
+					return fmt.Errorf("decoding base64: %w", decErr)
+				}
+				if typeName != "" {
+					if err := lens.ValidateTypeCanonicalXDR(raw, typeName); err != nil {
+						return fmt.Errorf("canonical validation failed: %w", err)
+					}
+				} else {
+					if err := lens.ValidateCanonicalXDR(raw); err != nil {
+						return fmt.Errorf("canonical validation failed: %w", err)
+					}
 				}
 			}
 
@@ -131,20 +130,32 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 			}
 
 			if interactive {
-				tui := NewTUITree(value, stdin, stdout, format.PaletteFor(stdout, g.color))
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
+				tui := NewTUITree(value, stdin, stdout, palette)
 				return tui.Run()
 			}
 
 			if asSummary || formatName == "summary" {
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
 				f := format.NewCompactFormatter(
-					format.WithCompactPalette(format.PaletteFor(stdout, g.color)),
+					format.WithCompactPalette(palette),
 				)
 				return f.Format(stdout, value)
 			}
 
 			if asTxRep || formatName == "txrep" {
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
 				f := format.NewTxRepFormatter(
-					format.WithTxRepPalette(format.PaletteFor(stdout, g.color)),
+					format.WithTxRepPalette(palette),
 					format.WithTxRepNetwork(network),
 				)
 				return f.Format(stdout, value)
@@ -166,8 +177,12 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 				return f.Format(stdout, value)
 			}
 
+			palette, err := paletteForOutput(stdout, g.color)
+			if err != nil {
+				return err
+			}
 			f := format.NewTreeFormatter(
-				format.WithPalette(format.PaletteFor(stdout, g.color)),
+				format.WithPalette(palette),
 				format.WithMaxDepth(maxDepth),
 				format.WithTypeNames(showTypes),
 			)
@@ -194,6 +209,8 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 	cmd.Flags().BoolVar(&showTypes, "show-types", false, "annotate tree nodes with their XDR type")
 	cmd.Flags().BoolVar(&listCands, "candidates", false,
 		"list every XDR type the input decodes as, best first")
+	cmd.Flags().BoolVar(&stream, "stream", false, "stream and decode framed XDR chunks (RFC 5531 or length-prefixed)")
+	cmd.Flags().BoolVar(&canonical, "canonical", false, "verify that input adheres strictly to canonical XDR serialization")
 
 	return cmd
 }
@@ -235,7 +252,11 @@ Use arrow keys or j/k to navigate, Enter or Space to toggle node expansion,
 				spec.ApplyToValue(value)
 			}
 
-			tui := NewTUITree(value, stdin, stdout, format.PaletteFor(stdout, g.color))
+			palette, err := paletteForOutput(stdout, g.color)
+			if err != nil {
+				return err
+			}
+			tui := NewTUITree(value, stdin, stdout, palette)
 			return tui.Run()
 		},
 	}
@@ -246,6 +267,75 @@ Use arrow keys or j/k to navigate, Enter or Space to toggle node expansion,
 		"path to contract WASM or ScSpecEntry file for spec-aware decoding")
 
 	return cmd
+}
+
+func runStream(stdout io.Writer, g *globalFlags, arg string, stdin io.Reader, typeName string, asJSON, compactOut, annotate bool, maxDepth int, showTypes, canonical bool) error {
+	var r io.Reader
+	if g.file != "" {
+		f, err := os.Open(g.file)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		r = f
+	} else if arg != "" && arg != stdinMarker {
+		r = strings.NewReader(arg)
+	} else {
+		r = stdin
+	}
+
+	parser := lens.NewStreamParser(r)
+	for {
+		raw, err := parser.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+
+		if canonical {
+			if typeName != "" {
+				if err := lens.ValidateTypeCanonicalXDR(raw, typeName); err != nil {
+					return fmt.Errorf("chunk [%d] canonical error: %w", parser.ChunkIndex()-1, err)
+				}
+			} else {
+				if err := lens.ValidateCanonicalXDR(raw); err != nil {
+					return fmt.Errorf("chunk [%d] canonical error: %w", parser.ChunkIndex()-1, err)
+				}
+			}
+		}
+
+		b64 := base64.StdEncoding.EncodeToString(raw)
+		val, err := decodeValue(b64, typeName)
+		if err != nil {
+			return fmt.Errorf("chunk [%d]: %w", parser.ChunkIndex()-1, err)
+		}
+
+		if asJSON {
+			indent := "  "
+			if compactOut {
+				indent = ""
+			}
+			f := format.NewJSONFormatter(
+				format.WithIndent(indent),
+				format.WithAnnotations(annotate),
+			)
+			if err := f.Format(stdout, val); err != nil {
+				return err
+			}
+			continue
+		}
+
+		f := format.NewTreeFormatter(
+			format.WithPalette(format.PaletteFor(stdout, g.color)),
+			format.WithMaxDepth(maxDepth),
+			format.WithTypeNames(showTypes),
+		)
+		if err := f.Format(stdout, val); err != nil {
+			return err
+		}
+	}
 }
 
 // decodeValue decodes a payload, honouring an explicit type when given.

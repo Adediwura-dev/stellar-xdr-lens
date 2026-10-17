@@ -8,23 +8,26 @@ Working and tested:
 
 - `decode` with automatic type detection, tree and stable JSON output
 - `explain` for envelopes, results, and the two paired together
-- `diff` with path-level structural comparison
+- `diff` with path-level structural comparison, opt-in LCS list alignment,
+  recursive Soroban map/vector comparison, and exact ScVal wide-integer values
+- `meta-diff` with offline account, trustline, and claimable-balance deltas
 - `asset`, deriving Stellar Asset Contract ids offline for any network
 - `types` with a machine-readable `--json` index of every registered type
-- 58 registered XDR types, including ledger headers, bucket entries, SCP
-  messages, overlay messages (time-sliced surveys included), history-archive
-  sets, account extensions, data entries and the state-archival types; all 208
-  protocol result codes explained
+- 63 registered XDR types, including ledger headers, bucket entries, contract
+  data (with its storage durability), SCP messages, overlay messages
+  (time-sliced surveys included), history-archive sets, account extensions,
+  data entries and the state-archival types; all 208 protocol result codes
+  explained
 - Input from arguments, files or stdin; exit codes suitable for CI
 - No network access anywhere in the library or tests
 
 Known limits, stated plainly:
 
-- **58 types, not ~400.** The registry covers what developers actually paste
+- **63 types, not ~400.** The registry covers what developers actually paste
   into a terminal. Anything else needs a one-line addition.
-- **Soroban values render structurally.** `ScVal` decodes and displays, but
-  without a contract spec `lens` cannot name a struct's fields or an enum's
-  variants — it shows the wire shape.
+- **Soroban values render structurally.** `ScVal` diffs recurse through maps
+  and vectors and normalize wide integers, but without a contract spec `lens`
+  cannot name a struct's fields or an enum's variants — it shows the wire shape.
 - **Detection is ambiguous for short values.** This is inherent to XDR, not a
   bug. `--candidates` and `--type` exist for it.
 - **The library API is not frozen.** Expect breaking changes to `pkg/lens`
@@ -54,13 +57,6 @@ close that loop. This is the single highest-value addition.
 The inverse of `decode`: JSON in, base64 XDR out. Useful for building test
 fixtures and for round-trip verification in CI. Straightforward given the
 existing registry, but needs care so the JSON contract stays symmetric.
-
-### Better `diff` for reordered lists
-
-Lists are compared positionally today, which is right for operations (index is
-meaningful) but noisy when a signature is inserted at the front. An opt-in
-`--align` mode using a longest-common-subsequence match would report one
-insertion instead of a cascade.
 
 ## Later, and less certain
 
