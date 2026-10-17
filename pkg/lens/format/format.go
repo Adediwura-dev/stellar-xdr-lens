@@ -80,15 +80,5 @@ func ShouldColor(w io.Writer) bool {
 // PaletteFor returns the colour palette appropriate for w, honouring an
 // explicit override. mode is one of "auto", "always" or "never".
 func PaletteFor(w io.Writer, mode string) Palette {
-	switch mode {
-	case "always":
-		return ColorPalette
-	case "never":
-		return NoColor
-	default:
-		if ShouldColor(w) {
-			return ColorPalette
-		}
-		return NoColor
-	}
+	return PaletteForTheme(w, mode, ColorPalette)
 }

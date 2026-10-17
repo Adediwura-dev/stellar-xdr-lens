@@ -15,10 +15,12 @@ import (
 
 func newDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
 	var (
-		typeName  string
-		asJSON    bool
-		exitDiff  bool
-		quietMode bool
+		typeName   string
+		asJSON     bool
+		exitDiff   bool
+		quietMode  bool
+		alignLists bool
+		semantic   bool
 	)
 
 	cmd := &cobra.Command{
@@ -35,6 +37,8 @@ mismatched hash.`,
 		Example: `  lens diff "$XDR_A" "$XDR_B"
   lens diff before.xdr after.xdr
   lens diff --type TransactionEnvelope a.xdr b.xdr
+	lens diff --align before.xdr after.xdr
+	lens diff --semantic before.xdr after.xdr
   lens diff --exit-code a.xdr b.xdr   # non-zero when they differ`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -47,7 +51,10 @@ mismatched hash.`,
 				return fmt.Errorf("reading second value: %w", err)
 			}
 
-			result, err := lens.DiffBase64(left, right, typeName)
+			result, err := lens.DiffBase64WithOptions(left, right, typeName, lens.DiffOptions{
+				AlignLists: alignLists,
+				Semantic:   semantic,
+			})
 			if err != nil {
 				return err
 			}
@@ -62,8 +69,12 @@ mismatched hash.`,
 					return fmt.Errorf("encoding diff: %w", err)
 				}
 			default:
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
 				f := format.NewDiffFormatter(
-					format.WithDiffPalette(format.PaletteFor(stdout, g.color)),
+					format.WithDiffPalette(palette),
 				)
 				if err := f.Format(stdout, result); err != nil {
 					return err
@@ -80,6 +91,10 @@ mismatched hash.`,
 	cmd.Flags().StringVarP(&typeName, "type", "t", "",
 		"decode both values as this XDR type instead of detecting each")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the diff as JSON")
+	cmd.Flags().BoolVar(&alignLists, "align", false,
+		"align list elements with LCS to reduce insertion and removal noise")
+	cmd.Flags().BoolVar(&semantic, "semantic", false,
+		"compare supported values semantically, including exact ScVal wide integers")
 	cmd.Flags().BoolVar(&exitDiff, "exit-code", false,
 		"exit with a non-zero status when the values differ")
 	cmd.Flags().BoolVarP(&quietMode, "quiet", "q", false,
