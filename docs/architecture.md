@@ -9,12 +9,20 @@ where to make the three changes contributors most often want to make:
 
 ## The pipeline
 
-Everything flows one way:
+Decoding and explaining flows one way:
 
 ```
 base64 ──► detect ──► xdr decode ──► Node tree ──► enrich ──► Formatter ──► output
               │            │             │                        │
         registry      stellar SDK    neutral IR            tree │ json │ text │ diff │ summary │ txrep │ csv
+```
+
+Encoding simplified JSON into XDR flows deterministically:
+
+```
+JSON spec ──► schema validate (strict) ──► type coerce ──► xdr build ──► base64 XDR
+                      │                         │               │
+                 validate.go                coerce.go      tx_builder.go / scval_encode.go
 ```
 
 The important property is that **only one stage knows about XDR**. Once a value
@@ -39,6 +47,7 @@ cmd/lens/              main; wires os.Args to internal/cli and maps errors to ex
 internal/cli/          cobra commands — deliberately thin
   root.go              command tree, global flags, explore (TUI) command
   decode.go            decode + types commands, formatting and spec decoding flags
+  encode.go            encode command for JSON -> base64 XDR
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
   meta_diff.go         transaction metadata balance-diff command
@@ -63,6 +72,10 @@ pkg/lens/              the library; this is the reusable surface
   overlay.go           peer addresses, certificate keys, overlay message names
   tx_history.go        ledger-sequence field notes for history sets and batches
   asset_types.go       asset details and Stellar Asset Contract id derivation
+  validate.go          strict schema validation for JSON templates
+  coerce.go            permissive type coercion & number parsing (stringified numbers, hex, assets)
+  scval_encode.go      ScVal constructor from intuitive JSON literals
+  tx_builder.go        TransactionEnvelope builder from JSON spec
   explain.go           Summary, Outcome, per-operation descriptions
   reason.go            all 208 result codes → plain English
   reason_lookup.go     O(1) short code lookup table (ReasonByCode)
@@ -350,11 +363,57 @@ ContractDataEntry` decodes a standalone blob, and an entry embedded in a
 ### Field-name enrichment
 
 Some renderings depend on the field name rather than the type. XDR models
-amounts, sequence numbers and offer ids all as `Int64`, so the only signal that
-a value is an amount is the field it sits in. `amountFields` in `enrich.go`
-lists the known amount fields; anything not listed stays a plain integer,
-because rendering a sequence number as `12345.0000000` would be worse than
-showing it raw.
+amounts, sequence numbers and offer ids with the same integer types, so the
+only signal that a value is an amount is the field it sits in. `amountFields`
+in `enrich.go` lists the known amount fields — both plain `Int64` fields and
+the `Uint32` union arms of a `LedgerUpgrade`, which arrive pointer-wrapped.
+Anything not listed stays a plain integer, because rendering a sequence number
+as `12345.0000000` would be worse than showing it raw.
+
+## Ledger upgrades and protocol votes
+
+Validators vote for ledger upgrades — protocol version bumps, base fee changes,
+base reserve changes — and the protocol carries those votes as opaque bytes:
+`StellarValue.upgrades` is "a vector of encoded `LedgerUpgrade` so that nodes
+can drop unknown steps during consensus". A decoder therefore has to try
+harder than usual. `enrichUpgradeType` in
+[`upgrades.go`](../pkg/lens/upgrades.go) unmarshals each `UpgradeType` as an
+`xdr.LedgerUpgrade` and requires the input to be consumed exactly; a vote that
+does not fit — including an upgrade newer than this build — declines and keeps
+its generic hex rendering.
+
+```
+$ lens decode --type StellarValue "$(cat testdata/stellar_value_votes.txt)"
+StellarValue
+├─ TxSetHash: [26 202 157 122 123 201 199 246 109 239 44 246 156 233 24 163 241 22 124 52 125 219 2 144 174 151 255 29 205 25 24 144]  1aca9d7a7bc9c7f66def2cf69ce918a3f1167c347ddb0290ae97ff1dcd191890
+├─ CloseTime: 1790000000  2026-09-21T14:13:20Z
+├─ Upgrades  [3]
+│  ├─ [0]: 0000000100000015  protocol version 21
+│  ├─ [1]: 0000000400989680  base reserve 10000000 stroops (1.0000000 XLM)
+│  └─ [2]: deadbeef
+└─ Ext
+   └─ V: StellarValueTypeStellarValueBasic
+```
+
+The hex payload stays the machine value and the decoded vote becomes the note,
+so `--json` output remains byte-exact while the tree names the vote.
+
+`LedgerUpgrade` is registered as a type in its own right, so a single vote can
+be decoded directly — which matters because the common arms are only eight
+bytes:
+
+```
+$ lens decode --type LedgerUpgrade "$(cat testdata/ledger_upgrade_base_reserve.txt)"
+LedgerUpgrade
+├─ Type: LedgerUpgradeTypeLedgerUpgradeBaseReserve
+└─ NewBaseReserve: 10000000  1.0000000 (stroops: 10000000)
+```
+
+That eight-byte shape hides one inherent ambiguity worth stating: the wire
+encoding of the base reserve arm is byte-identical to an `ScVal` i32, and any
+eight bytes are also a valid `Price`. Detection ranks `ScVal` first for such
+payloads; `--type LedgerUpgrade` pins the interpretation. Votes nested in a
+`StellarValue` or `LedgerHeader` are unambiguous.
 
 `fieldNotes` is the same idea for anything that is not an amount — a hint
 attached to a field rendered alongside it. `LedgerVersion: 22` becomes

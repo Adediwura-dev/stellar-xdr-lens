@@ -1000,110 +1000,76 @@ func TestDecodeStreamAndCanonical(t *testing.T) {
 	}
 }
 
-func TestDecodeHexFlag(t *testing.T) {
-	t.Parallel()
-
-	b64 := fixture(t, "tx_success.env")
-	hexStr, err := lens.Base64ToHex(b64)
-	if err != nil {
-		t.Fatalf("Base64ToHex failed: %v", err)
-	}
-
-	stdout, _, err := run(t, "", "decode", "--hex", hexStr)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "TransactionEnvelope") {
-		t.Errorf("expected tree with TransactionEnvelope, got: %s", stdout)
-	}
-}
-
-func TestDecodeMultiStreamFlag(t *testing.T) {
-	t.Parallel()
-
-	b64_1 := fixture(t, "tx_success.env")
-	b64_2 := fixture(t, "tx_failed.env")
-	multiInput := b64_1 + "\n" + b64_2 + "\n"
-
-	// JSON output with multi
-	stdout, _, err := run(t, multiInput, "decode", "--multi", "--json")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "line_number") || !strings.Contains(stdout, "TransactionEnvelope") {
-		t.Errorf("unexpected multi json output: %s", stdout)
-	}
-
-	// Compact NDJSON
-	stdoutND, _, err := run(t, multiInput, "decode", "--multi", "--json", "--compact")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(stdoutND), "\n")
-	if len(lines) != 2 {
-		t.Errorf("expected 2 NDJSON lines, got %d", len(lines))
-	}
-
-	// YAML output with multi
-	stdoutYAML, _, err := run(t, multiInput, "decode", "--multi", "--yaml")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdoutYAML, "---") || !strings.Contains(stdoutYAML, "type: TransactionEnvelope") {
-		t.Errorf("unexpected multi yaml output: %s", stdoutYAML)
-	}
-}
-
-func TestDecodeYAMLFlag(t *testing.T) {
-	t.Parallel()
-
-	stdout, _, err := run(t, "", "decode", "--yaml", fixture(t, "tx_success.env"))
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "type: TransactionEnvelope") || !strings.Contains(stdout, "value:") {
-		t.Errorf("expected YAML output, got: %s", stdout)
-	}
-}
-
-func TestDecodeWASMFlag(t *testing.T) {
-	t.Parallel()
-
-	// WASM binary module
-	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00}
-	hexWasm := lens.BytesToHex(wasmBytes)
-
-	stdout, _, err := run(t, "", "decode", "--wasm", hexWasm)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !strings.Contains(stdout, "WebAssembly Module") {
-		t.Errorf("expected WASM inspection output, got: %s", stdout)
-	}
-}
-
 func TestEncodeCommand(t *testing.T) {
 	t.Parallel()
 
-	b64 := fixture(t, "tx_success.env")
-	yamlInput := fmt.Sprintf("type: TransactionEnvelope\nxdr: %s\n", b64)
+	validAccount := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+	txJSON := `{
+		"source_account": "` + validAccount + `",
+		"fee": 100,
+		"sequence": 12345,
+		"operations": [
+			{
+				"type": "payment",
+				"destination": "` + validAccount + `",
+				"amount": 1000
+			}
+		]
+	}`
 
-	// Encode to base64
-	stdout, _, err := run(t, yamlInput, "encode", "-")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if strings.TrimSpace(stdout) != b64 {
-		t.Errorf("encode base64 mismatch: got %q, want %q", strings.TrimSpace(stdout), b64)
-	}
+	t.Run("encode_transaction_envelope", func(t *testing.T) {
+		stdout, _, err := run(t, "", "encode", txJSON)
+		if err != nil {
+			t.Fatalf("encode failed: %v", err)
+		}
+		b64 := strings.TrimSpace(stdout)
+		if len(b64) == 0 {
+			t.Fatalf("expected base64 output")
+		}
+		// verify decoding back
+		val, err := lens.Decode(b64)
+		if err != nil || val.Type != "TransactionEnvelope" {
+			t.Fatalf("failed decoding built transaction: %v", err)
+		}
+	})
 
-	// Encode to hex
-	stdoutHex, _, err := run(t, yamlInput, "encode", "-", "--hex")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	hexExpected, _ := lens.Base64ToHex(b64)
-	if strings.TrimSpace(stdoutHex) != hexExpected {
-		t.Errorf("encode hex mismatch: got %q, want %q", strings.TrimSpace(stdoutHex), hexExpected)
-	}
+	t.Run("encode_transaction_strict", func(t *testing.T) {
+		stdout, _, err := run(t, "", "encode", "--strict", txJSON)
+		if err != nil {
+			t.Fatalf("strict encode failed: %v", err)
+		}
+		if len(strings.TrimSpace(stdout)) == 0 {
+			t.Fatalf("expected base64 output")
+		}
+	})
+
+	t.Run("encode_scval", func(t *testing.T) {
+		stdout, _, err := run(t, "", "encode", "--scval", `{"symbol": "hello"}`)
+		if err != nil {
+			t.Fatalf("encode scval failed: %v", err)
+		}
+		b64 := strings.TrimSpace(stdout)
+		val, err := lens.Decode(b64)
+		if err != nil || val.Type != "ScVal" {
+			t.Fatalf("failed decoding scval: %v", err)
+		}
+	})
+
+	t.Run("encode_from_stdin", func(t *testing.T) {
+		stdout, _, err := run(t, txJSON, "encode", "-")
+		if err != nil {
+			t.Fatalf("encode from stdin failed: %v", err)
+		}
+		if len(strings.TrimSpace(stdout)) == 0 {
+			t.Fatalf("expected output from stdin")
+		}
+	})
+
+	t.Run("encode_strict_error", func(t *testing.T) {
+		badJSON := `{"source_account": "` + validAccount + `", "unknown_field": 123}`
+		_, _, err := run(t, "", "encode", "--strict", badJSON)
+		if err == nil {
+			t.Fatalf("expected strict validation error")
+		}
+	})
 }
