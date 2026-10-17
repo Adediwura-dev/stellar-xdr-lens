@@ -70,6 +70,16 @@ func TestDecodeCommand(t *testing.T) {
 			wantContain: []string{"TransactionResult", "TransactionResultCode"},
 		},
 		{
+			name:        "contract data instance storage",
+			args:        []string{"decode", "--type", "ContractDataEntry", fixture(t, "contract_data_instance")},
+			wantContain: []string{"ContractDataEntry", "instance storage key", "Durability: persistent", "Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3"},
+		},
+		{
+			name:        "contract data temporary storage",
+			args:        []string{"decode", "--type", "ContractDataEntry", fixture(t, "contract_data_temporary")},
+			wantContain: []string{"Durability: temporary", "Sym: SEEN"},
+		},
+		{
 			name:        "ledger header",
 			args:        []string{"decode", "--type", "LedgerHeader", fixture(t, "ledger_header")},
 			wantContain: []string{"LedgerHeader", "protocol 22", "104591297310.9999952", "0.5000000 (stroops: 5000000)"},
@@ -166,6 +176,28 @@ func TestDecodeJSONIsPipeable(t *testing.T) {
 	}
 }
 
+func TestDecodeUsesEnvironmentTheme(t *testing.T) {
+	t.Setenv("LENS_THEME", "light")
+	t.Setenv("LENS_THEME_LIGHT_KEY", "38;5;39")
+
+	stdout, _, err := run(t, "", "decode", "--color", "always", fixture(t, "tx_success.env"))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(stdout, "\x1b[38;5;39m") {
+		t.Error("decode output did not use the environment-configured theme")
+	}
+}
+
+func TestDecodeReportsInvalidEnvironmentTheme(t *testing.T) {
+	t.Setenv("LENS_THEME", "unknown")
+
+	_, _, err := run(t, "", "decode", fixture(t, "tx_success.env"))
+	if err == nil || !strings.Contains(err.Error(), "LENS_THEME") {
+		t.Fatalf("Execute() error = %v, want invalid LENS_THEME error", err)
+	}
+}
+
 func TestExplainCommand(t *testing.T) {
 	t.Parallel()
 
@@ -199,6 +231,19 @@ func TestExplainCommand(t *testing.T) {
 				"invoke_host_function",
 				"trapped",
 				"Outcome",
+			},
+		},
+		{
+			name: "paired markdown report",
+			args: []string{
+				"explain", fixture(t, "tx_failed.env"),
+				"--result", fixture(t, "tx_failed.res"), "--markdown",
+			},
+			wantContain: []string{
+				"| Transaction | Details |",
+				"| Status | Failed |",
+				"| Operation | Source | Description | Result | Status | Hint |",
+				"invoke_host_function_trapped",
 			},
 		},
 		{
@@ -850,4 +895,36 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 			t.Errorf("unexpected interactive output: %s", stdout)
 		}
 	})
+}
+
+func TestDecodeStreamAndCanonical(t *testing.T) {
+	t.Parallel()
+
+	rawFixture := fixture(t, "tx_success.env")
+
+	// 1. Decode with --canonical flag
+	stdout, stderr, err := run(t, "", "decode", "--canonical", rawFixture)
+	if err != nil {
+		t.Fatalf("expected --canonical to succeed on real fixture: %v, stderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "TransactionEnvelope") {
+		t.Errorf("stdout missing TransactionEnvelope: %s", stdout)
+	}
+
+	// 2. Decode with --canonical failure
+	badCanonical := rawFixture + "===" // corrupt padding
+	_, _, err = run(t, "", "decode", "--canonical", badCanonical)
+	if err == nil {
+		t.Errorf("expected error on non-canonical input")
+	}
+
+	// 3. Decode with --stream base64 lines
+	streamInput := rawFixture + "\n" + rawFixture + "\n"
+	stdoutStream, stderrStream, err := run(t, streamInput, "decode", "--stream", "--json", "-")
+	if err != nil {
+		t.Fatalf("expected --stream to succeed: %v, stderr: %s", err, stderrStream)
+	}
+	if strings.Count(stdoutStream, "TransactionEnvelope") < 2 {
+		t.Errorf("expected at least 2 occurrences in stream output, got: %s", stdoutStream)
+	}
 }

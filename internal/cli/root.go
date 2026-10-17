@@ -10,6 +10,8 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
+
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens/format"
 )
 
 // Version is the build version, overridden at release time via ldflags:
@@ -72,7 +74,7 @@ unsigned transactions and works in CI.`,
 	root.SetIn(stdin)
 
 	root.PersistentFlags().StringVar(&g.color, "color", "auto",
-		`when to colourise output: "auto", "always" or "never"`)
+		`when to colourise output: "auto", "always" or "never" (LENS_THEME selects light or dark colours)`)
 	root.PersistentFlags().StringVarP(&g.file, "file", "f", "",
 		"read the XDR payload from a file instead of an argument")
 
@@ -86,6 +88,14 @@ unsigned transactions and works in CI.`,
 		newVersionCmd(stdout),
 	)
 	return root
+}
+
+func paletteForOutput(w io.Writer, mode string) (format.Palette, error) {
+	palette, err := format.ThemeFromEnv()
+	if err != nil {
+		return format.Palette{}, err
+	}
+	return format.PaletteForTheme(w, mode, palette), nil
 }
 
 func newVersionCmd(stdout io.Writer) *cobra.Command {
