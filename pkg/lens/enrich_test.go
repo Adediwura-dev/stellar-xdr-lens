@@ -201,6 +201,13 @@ func TestEnrichContractExecutableDeclinesMalformed(t *testing.T) {
 		"unknown type":         {Type: xdr.ContractExecutableType(99)},
 		"missing wasm hash":    {Type: xdr.ContractExecutableTypeContractExecutableWasm},
 		"missing external ref": {Type: xdr.ContractExecutableTypeContractExecutableExternalRef},
+		"unknown owner type": {
+			Type: xdr.ContractExecutableTypeContractExecutableExternalRef,
+			ExternalRef: &xdr.ContractExecutableExternalRef{
+				ExecutableOwner: xdr.ScAddress{Type: xdr.ScAddressType(99)},
+				Tag:             "x",
+			},
+		},
 	}
 	for name, exec := range cases {
 		if _, _, ok := enrichContractExecutable(reflect.ValueOf(exec)); ok {
