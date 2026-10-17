@@ -171,6 +171,8 @@ var amountFields = map[string]bool{
 	"MinAmountB":       true,
 	"Balance":          true,
 	"FeeCharged":       true,
+	"NewBaseFee":       true,
+	"NewBaseReserve":   true,
 	"ClaimableBalance": true,
 	"ReserveA":         true,
 	"ReserveB":         true,
