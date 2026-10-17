@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/network"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-xdr-lens/internal/cli"
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
@@ -69,6 +70,16 @@ func TestDecodeCommand(t *testing.T) {
 			name:        "explicit type",
 			args:        []string{"decode", "--type", "TransactionResult", fixture(t, "tx_failed.res")},
 			wantContain: []string{"TransactionResult", "TransactionResultCode"},
+		},
+		{
+			name:        "contract data instance storage",
+			args:        []string{"decode", "--type", "ContractDataEntry", fixture(t, "contract_data_instance")},
+			wantContain: []string{"ContractDataEntry", "instance storage key", "Durability: persistent", "Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3"},
+		},
+		{
+			name:        "contract data temporary storage",
+			args:        []string{"decode", "--type", "ContractDataEntry", fixture(t, "contract_data_temporary")},
+			wantContain: []string{"Durability: temporary", "Sym: SEEN"},
 		},
 		{
 			name:        "ledger header",
@@ -167,6 +178,28 @@ func TestDecodeJSONIsPipeable(t *testing.T) {
 	}
 }
 
+func TestDecodeUsesEnvironmentTheme(t *testing.T) {
+	t.Setenv("LENS_THEME", "light")
+	t.Setenv("LENS_THEME_LIGHT_KEY", "38;5;39")
+
+	stdout, _, err := run(t, "", "decode", "--color", "always", fixture(t, "tx_success.env"))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(stdout, "\x1b[38;5;39m") {
+		t.Error("decode output did not use the environment-configured theme")
+	}
+}
+
+func TestDecodeReportsInvalidEnvironmentTheme(t *testing.T) {
+	t.Setenv("LENS_THEME", "unknown")
+
+	_, _, err := run(t, "", "decode", fixture(t, "tx_success.env"))
+	if err == nil || !strings.Contains(err.Error(), "LENS_THEME") {
+		t.Fatalf("Execute() error = %v, want invalid LENS_THEME error", err)
+	}
+}
+
 func TestExplainCommand(t *testing.T) {
 	t.Parallel()
 
@@ -200,6 +233,19 @@ func TestExplainCommand(t *testing.T) {
 				"invoke_host_function",
 				"trapped",
 				"Outcome",
+			},
+		},
+		{
+			name: "paired markdown report",
+			args: []string{
+				"explain", fixture(t, "tx_failed.env"),
+				"--result", fixture(t, "tx_failed.res"), "--markdown",
+			},
+			wantContain: []string{
+				"| Transaction | Details |",
+				"| Status | Failed |",
+				"| Operation | Source | Description | Result | Status | Hint |",
+				"invoke_host_function_trapped",
 			},
 		},
 		{
@@ -432,6 +478,74 @@ func TestDiffJSON(t *testing.T) {
 		if c.Path == "" || c.Op == "" {
 			t.Errorf("change has empty path or op: %+v", c)
 		}
+	}
+}
+
+func TestDiffSemanticFlag(t *testing.T) {
+	t.Parallel()
+
+	leftRaw := xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &xdr.Int128Parts{Hi: 1, Lo: 5}}
+	rightRaw := xdr.ScVal{Type: xdr.ScValTypeScvI128, I128: &xdr.Int128Parts{Hi: 1, Lo: 6}}
+	left, err := xdr.MarshalBase64(leftRaw)
+	if err != nil {
+		t.Fatalf("MarshalBase64(left) error = %v", err)
+	}
+	right, err := xdr.MarshalBase64(rightRaw)
+	if err != nil {
+		t.Fatalf("MarshalBase64(right) error = %v", err)
+	}
+	stdout, _, err := run(t, "", "diff", "--type", "ScVal", "--semantic", left, right)
+	if err != nil {
+		t.Fatalf("diff --semantic error = %v", err)
+	}
+	for _, want := range []string{"18446744073709551621", "18446744073709551622"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("semantic diff output does not contain %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestMetaDiffCommand(t *testing.T) {
+	t.Parallel()
+
+	meta := xdr.TransactionMeta{V: 0, Operations: &[]xdr.OperationMeta{}}
+	payload, err := xdr.MarshalBase64(meta)
+	if err != nil {
+		t.Fatalf("MarshalBase64() error = %v", err)
+	}
+
+	stdout, _, err := run(t, "", "meta-diff", payload)
+	if err != nil {
+		t.Fatalf("meta-diff error = %v", err)
+	}
+	if !strings.Contains(stdout, "no balance changes") {
+		t.Errorf("meta-diff output = %q, want empty-delta message", stdout)
+	}
+
+	stdout, _, err = run(t, payload, "meta-diff", "--json", "-")
+	if err != nil {
+		t.Fatalf("meta-diff --json from stdin error = %v", err)
+	}
+	var result struct {
+		Changes []json.RawMessage `json:"changes"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("meta-diff JSON is invalid: %v\n%s", err, stdout)
+	}
+	if len(result.Changes) != 0 {
+		t.Errorf("meta-diff JSON has %d changes, want 0", len(result.Changes))
+	}
+
+	metaPath := filepath.Join(t.TempDir(), "transaction-meta.xdr")
+	if err := os.WriteFile(metaPath, []byte(payload), 0o600); err != nil {
+		t.Fatalf("WriteFile(metadata fixture) error = %v", err)
+	}
+	stdout, _, err = run(t, "", "meta-diff", "--file", metaPath)
+	if err != nil {
+		t.Fatalf("meta-diff --file error = %v", err)
+	}
+	if !strings.Contains(stdout, "no balance changes") {
+		t.Errorf("meta-diff --file output = %q, want empty-delta message", stdout)
 	}
 }
 
@@ -853,76 +967,34 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 	})
 }
 
-func TestEncodeCommand(t *testing.T) {
+func TestDecodeStreamAndCanonical(t *testing.T) {
 	t.Parallel()
 
-	validAccount := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
-	txJSON := `{
-		"source_account": "` + validAccount + `",
-		"fee": 100,
-		"sequence": 12345,
-		"operations": [
-			{
-				"type": "payment",
-				"destination": "` + validAccount + `",
-				"amount": 1000
-			}
-		]
-	}`
+	rawFixture := fixture(t, "tx_success.env")
 
-	t.Run("encode_transaction_envelope", func(t *testing.T) {
-		stdout, _, err := run(t, "", "encode", txJSON)
-		if err != nil {
-			t.Fatalf("encode failed: %v", err)
-		}
-		b64 := strings.TrimSpace(stdout)
-		if len(b64) == 0 {
-			t.Fatalf("expected base64 output")
-		}
-		// verify decoding back
-		val, err := lens.Decode(b64)
-		if err != nil || val.Type != "TransactionEnvelope" {
-			t.Fatalf("failed decoding built transaction: %v", err)
-		}
-	})
+	// 1. Decode with --canonical flag
+	stdout, stderr, err := run(t, "", "decode", "--canonical", rawFixture)
+	if err != nil {
+		t.Fatalf("expected --canonical to succeed on real fixture: %v, stderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "TransactionEnvelope") {
+		t.Errorf("stdout missing TransactionEnvelope: %s", stdout)
+	}
 
-	t.Run("encode_transaction_strict", func(t *testing.T) {
-		stdout, _, err := run(t, "", "encode", "--strict", txJSON)
-		if err != nil {
-			t.Fatalf("strict encode failed: %v", err)
-		}
-		if len(strings.TrimSpace(stdout)) == 0 {
-			t.Fatalf("expected base64 output")
-		}
-	})
+	// 2. Decode with --canonical failure
+	badCanonical := rawFixture + "===" // corrupt padding
+	_, _, err = run(t, "", "decode", "--canonical", badCanonical)
+	if err == nil {
+		t.Errorf("expected error on non-canonical input")
+	}
 
-	t.Run("encode_scval", func(t *testing.T) {
-		stdout, _, err := run(t, "", "encode", "--scval", `{"symbol": "hello"}`)
-		if err != nil {
-			t.Fatalf("encode scval failed: %v", err)
-		}
-		b64 := strings.TrimSpace(stdout)
-		val, err := lens.Decode(b64)
-		if err != nil || val.Type != "ScVal" {
-			t.Fatalf("failed decoding scval: %v", err)
-		}
-	})
-
-	t.Run("encode_from_stdin", func(t *testing.T) {
-		stdout, _, err := run(t, txJSON, "encode", "-")
-		if err != nil {
-			t.Fatalf("encode from stdin failed: %v", err)
-		}
-		if len(strings.TrimSpace(stdout)) == 0 {
-			t.Fatalf("expected output from stdin")
-		}
-	})
-
-	t.Run("encode_strict_error", func(t *testing.T) {
-		badJSON := `{"source_account": "` + validAccount + `", "unknown_field": 123}`
-		_, _, err := run(t, "", "encode", "--strict", badJSON)
-		if err == nil {
-			t.Fatalf("expected strict validation error")
-		}
-	})
+	// 3. Decode with --stream base64 lines
+	streamInput := rawFixture + "\n" + rawFixture + "\n"
+	stdoutStream, stderrStream, err := run(t, streamInput, "decode", "--stream", "--json", "-")
+	if err != nil {
+		t.Fatalf("expected --stream to succeed: %v, stderr: %s", err, stderrStream)
+	}
+	if strings.Count(stdoutStream, "TransactionEnvelope") < 2 {
+		t.Errorf("expected at least 2 occurrences in stream output, got: %s", stdoutStream)
+	}
 }

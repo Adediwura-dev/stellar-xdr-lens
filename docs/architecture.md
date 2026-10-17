@@ -27,15 +27,15 @@ JSON spec ──► schema validate (strict) ──► type coerce ──► xdr
 
 The important property is that **only one stage knows about XDR**. Once a value
 becomes a `Node` tree, nothing downstream imports `xdr` or uses reflection.
-That is what lets a new output format work for all 58 registered types at once,
+That is what lets a new output format work for all 63 registered types at once,
 and lets the differ work without knowing what it is comparing.
 
 ## End-to-end CLI coverage
 
 The `cmd/lens` package includes end-to-end subprocess tests that execute the
 built `lens` binary against the canonical `testdata/` fixtures. They cover the
-real command surface (`decode`, `explain`, and `diff`), use the same input
-resolution path as users do, and assert the observable CLI output. The suite is
+real command surface (`decode`, `explain`, `diff`, and `meta-diff`), use the
+same input resolution path as users do, and assert the observable CLI output. The suite is
 explicitly offline-first: it runs with the standard proxy variables cleared to
 ensure no network pathway is introduced by the command wrapper or default
 runtime environment.
@@ -50,6 +50,7 @@ internal/cli/          cobra commands — deliberately thin
   encode.go            encode command for JSON -> base64 XDR
   explain.go           explain command, exit-code plumbing
   diff.go              diff command
+  meta_diff.go         transaction metadata balance-diff command
   asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
   tui_tree.go          interactive terminal tree explorer (TUI)
@@ -59,6 +60,7 @@ pkg/lens/              the library; this is the reusable surface
   registry_index.go    introspection: RegistryIndex, categories, min sizes
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
+  contract_data.go     contract data storage: durability and special storage keys
   ledger_header.go     ledger-header field notes and protocol parameters
   bucket_entry.go      bucket list, tombstone and hot archive terminology
   scp.go               consensus node identity and pledge names
@@ -80,10 +82,21 @@ pkg/lens/              the library; this is the reusable surface
   protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
   op_isolator.go       Multi-operation failure isolator (pre-op vs execution pinpointing)
   trap_reasons.go      Soroban trapped host function diagnostic reason decoder
-  diff.go              structural path diff
+  balance_explain.go   Insufficient-balance math (liabilities, reserve, shortfall)
+  signature_explain.go Signature-threshold diagnosis (hint matching, missing weight)
+  simulation_explain.go Simulation-failure root-cause decoder (footprint, CPU, fee)
+  feebump_explain.go   Fee-bump inner-vs-outer failure separation
+  diff.go              structural path diff and bounded opt-in LCS alignment
+  scval_diff.go        recursive ScVal comparison with canonical map-key matching
+  semantic_diff.go     exact wide-integer and type-aware semantic comparison
+  meta_diff.go         transaction metadata balance deltas (offline)
+  canonical.go         deterministic canonical XDR validation (RFC 4506) and serialization
+  encode_errors.go     malformed input diagnostics, line/column tracking and error pointers
+  stream_parser.go     stream-oriented XDR reader and chunk parser (RFC 5531, length-prefixed, base64)
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
+    theme.go           environment-selected light/dark ANSI palettes
     tree.go            colourised tree
     json.go            stable JSON
     text.go            explain summaries
@@ -91,6 +104,7 @@ pkg/lens/              the library; this is the reusable surface
     summary.go         compact single-line summary (grep/pipeline friendly)
     txrep.go           SEP-0011 human-readable TxRep format
     csv.go             flat CSV export for batch ledger envelopes
+    markdown.go        GitHub-flavored Markdown transaction reports
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -120,6 +134,31 @@ if errors.As(err, &kind) {
 Existing exported sentinels such as `ErrNoMatch`, `ErrUnknownType`,
 `ErrNotAsset`, and the WASM/spec errors remain available. Error classification
 is entirely local and does not add network access to library operations.
+
+## Structural, semantic, and metadata diffs
+
+`Diff(left, right)` keeps its original positional behavior for ordered lists.
+Call `DiffWithOptions` with `DiffOptions{AlignLists: true}` to use an LCS pass
+that reports unchanged insertions and removals without shifting later items.
+The aligner bounds its dynamic-programming table to $2^{20}$ cells and falls
+back to positional comparison above that limit.
+
+`DiffScVal(left, right)` recursively compares Soroban vectors and maps. Vector
+order remains significant; map entries are matched by the canonical XDR bytes
+of each key, so inserting a map entry does not cascade through later values.
+`DiffSemantic` (or `DiffOptions{Semantic: true}`) additionally represents
+ScVal `u128`, `i128`, `u256`, and `i256` values as exact decimal integers. The
+existing asset and address enrichers retain canonical asset identifiers and
+StrKeys. These behaviors are exposed by `lens diff --align` and
+`lens diff --semantic`, which can be combined.
+
+`DiffTransactionMetaBalances` accepts decoded `TransactionMeta` versions 0
+through 4 and returns deterministic deltas for account XLM balances, trustline
+balances, and claimable-balance amounts. A `STATE` entry supplies the before
+snapshot; create/remove changes use zero for the absent side. Metadata that
+does not include a baseline sets `BeforeKnown` false rather than inventing a
+balance. The CLI command `lens meta-diff` renders these records as text or
+JSON. It only inspects the supplied metadata and makes no network calls.
 
 ## Runnable Go examples
 
@@ -275,6 +314,52 @@ afterwards, so it needs no locking.
   stroops, its price as a fraction, and its flags. An offer embedded in a
   `LedgerEntry` decodes the same way at `Data.Offer`.
 
+### Contract data and storage levels
+
+`pkg/lens/contract_data.go` decodes Soroban contract data and makes the three
+storage levels distinguishable in the output:
+
+- `xdr.ContractDataDurability` renders as `persistent` or `temporary` — the
+  durability recorded on the wire — instead of the
+  `ContractDataDurabilityPersistent` constant name.
+- `xdr.ScAddress` renders as its strkey form (`C...` for a contract address,
+  `G...` for an account address) instead of a discriminant plus a raw 32-byte
+  hash. That enricher lives in `diagnostic_events.go`, so contract addresses
+  are readable wherever a tree carries one, not only inside contract data.
+- The special `ScVal` ledger keys render by name: the contract instance key
+  becomes `instance storage key`, and the nonce key becomes `nonce key: 5`,
+  keeping the nonce that callers need. Every other `ScVal` keeps the structural
+  rendering that stays machine-readable without a contract spec.
+
+Instance storage is recorded with persistent durability and can only be
+recognised by its key, so the named instance key is what separates it from an
+ordinary persistent entry:
+
+| Storage level | What the output shows |
+|---|---|
+| instance | `Key: instance storage key` (durability is `persistent` on the wire) |
+| persistent | `Durability: persistent` with an ordinary `ScVal` key |
+| temporary | `Durability: temporary` |
+
+```console
+$ lens decode --type ContractDataEntry --depth 3 "$INSTANCE"
+ContractDataEntry
+├─ Ext
+│  └─ V: 0
+├─ Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3
+├─ Key: instance storage key
+├─ Durability: persistent
+└─ Val
+   ├─ Type: ScValTypeScvContractInstance
+   └─ Instance
+      └─ Executable
+         ... 1 more level(s) hidden
+```
+
+`ContractDataEntry` is registered (priority 5), so `lens decode --type
+ContractDataEntry` decodes a standalone blob, and an entry embedded in a
+`LedgerEntry` decodes the same way at `Data.ContractData`.
+
 ### Field-name enrichment
 
 Some renderings depend on the field name rather than the type. XDR models
@@ -342,9 +427,17 @@ for every registered type immediately and needs no XDR knowledge. Follow the
 existing files' functional-options pattern (`WithPalette`, `WithIndent`) for
 configuration.
 
-Colour is handled centrally: call `format.PaletteFor(w, mode)`, which honours
-`--color`, the [`NO_COLOR`](https://no-color.org) convention, and whether the
-writer is a terminal. Never write escape sequences directly.
+Colour is handled centrally: the CLI uses `format.ThemeFromEnv` and
+`format.PaletteForTheme(w, mode, palette)`. `LENS_THEME=dark|light` selects a
+scheme (dark is the default), and per-role values such as
+`LENS_THEME_DARK_KEY=38;5;39` customize its ANSI SGR colours. Supported roles
+are `KEY`, `TYPE`, `STR`, `NUM`, `NOTE`, `DIM`, `ADD`, `REMOVE`, and `CHANGE`;
+set a role variable to an empty value to disable that colour. Values contain
+only semicolon-separated SGR integers from 0 to 255, without escape prefixes.
+The palette helper honours `--color`, the
+[`NO_COLOR`](https://no-color.org) convention, and whether the writer is a
+terminal. Invalid theme configuration is reported as an error. Never write
+escape sequences directly.
 
 ## Adding a result code explanation
 
@@ -481,6 +574,90 @@ diagnostic events to extract:
 
 The CLI exposes this via `lens explain --meta <path-or-base64>`.
 
+## Insufficient-balance and liabilities math
+
+`tx_insufficient_balance`, `payment_underfunded` and their siblings mean
+"the math did not fit", not "the account is empty": selling liabilities lock
+part of the balance and the base reserve must stay untouched.
+
+[`balance_explain.go`](../pkg/lens/balance_explain.go) computes the exact
+shortfall offline from a ledger entry plus a base reserve:
+
+- `AccountSellingLiabilities` / `AccountBuyingLiabilities` read the V1
+  liabilities extension (zero when absent).
+- `ReserveRequirement` implements
+  `(2 + numSubEntries + numSponsoring - numSponsored) * baseReserve`, with
+  `AccountReserveRequirement` pulling the counters from the V2 extension.
+- `DiagnoseBalance(entry, baseReserve, amountToSpend)` returns the available
+  balance, the shortfall in stroops and XLM, and a funding hint; a
+  `baseReserve` of 0 selects `DefaultBaseReserve` (0.5 XLM).
+- `DiagnoseTrustlineSpend` covers non-native balances, where only selling
+  liabilities reduce the spendable amount.
+
+Verified against the `account_entry_ext_v1/v2` and `trustline_entry_v1`
+fixtures; runnable examples live in `pkg/lens/examples_test.go` style tests
+alongside the unit suite.
+
+## Signature-threshold diagnosis
+
+`tx_bad_auth` and `op_bad_auth` mean "not enough signer weight", but the
+result code never says which signer is missing.
+
+[`signature_explain.go`](../pkg/lens/signature_explain.go) compares the
+envelope's `DecoratedSignature` hints against the account's signer set:
+
+- `OperationThresholdLevel` maps each operation to `low` (allow trust, set
+  trust-line flags, bump sequence, claim claimable balance), `high` (account
+  merge, set options) or `medium` (everything else).
+- `SignerHint` derives the 4-byte hint stellar-core uses (last four bytes of
+  the key), so matching needs no transaction hash and no network.
+- `DiagnoseSignatures(entry, sigs, threshold)` sums the weight of matched
+  signers, counts unknown signatures separately, and names the missing
+  signers; `DiagnoseTransactionSignatures` picks the threshold from the first
+  operation automatically.
+
+## Simulation-failure root cause
+
+`simulateTransaction` failures arrive as RPC error strings, not XDR result
+codes: "missing footprint key", "CPU budget exceeded", "insufficient
+refundable fee" and friends.
+
+[`simulation_explain.go`](../pkg/lens/simulation_explain.go) classifies those
+strings offline into a stable `SimulationKind` (`missing_footprint`,
+`cpu_exceeded`, `memory_exceeded`, `insufficient_fee`, `archived_entry`,
+`auth_missing`, `contract_trapped`, `invalid_input`, `unknown`):
+
+- `DiagnoseSimulationError(msg)` does case-insensitive substring matching and
+  never fails on unrecognised text (it yields `unknown`).
+- `DiagnoseSimulationResponse(resp)` prefers structured fields when present:
+  explicit `MissingKeys`, CPU/memory used-vs-limit counters, and the
+  recommended `MinResourceFee` are folded into the summary and hint.
+- `DiagnoseMissingFootprint` and `DiagnoseResourceExhaustion` cover callers
+  that already extracted keys or budgets numerically.
+
+`SimulationResponse` mirrors the RPC JSON names so callers can unmarshal a
+captured response directly; lens never fetches it.
+
+## Fee-bump inner-vs-outer separation
+
+A fee-bump result carries two verdicts: the outer wrapper's and the inner
+transaction's. Fixing the wrong half wastes a rebuild.
+
+[`feebump_explain.go`](../pkg/lens/feebump_explain.go) separates them:
+
+- `DiagnoseFeeBump(env, res)` reports `Stage` as `inner` (wrapper valid, inner
+  failed — fee still charged to the fee-bump source), `outer` (wrapper
+  rejected before the inner ran — inner codes are not the cause), `none`
+  (both applied) or `not_fee_bump` for classic transactions.
+- The diagnosis records both short codes, both plain-English reasons, the fee
+  source and inner source addresses, the fee charged, and the failing inner
+  operation indexes, plus a `DiagnosticReport()` for CLI-style output.
+- `DiagnoseFeeBumpFromValues` accepts decoded `*lens.Value`s, matching the
+  `ExplainPair` calling convention.
+
+Verified against the canonical `tx_failed` (inner failure), `tx_soroban`
+(inner success) and `tx_success` (non-fee-bump) fixtures.
+
 ## Testing approach
 
 Fixtures in `testdata/` are **real captured mainnet transactions**, with
@@ -583,6 +760,22 @@ cost, what it did, and whether it succeeded" — needs.
 Reachable from the CLI as `lens decode --csv` (or `--format csv`); see the
 [README](../README.md#csv-export) for the column list.
 
+## Markdown transaction reports (`pkg/lens/format/markdown.go`)
+
+`MarkdownFormatter` renders a `lens.Summary` as GitHub-flavored Markdown: a
+transaction details table followed by an operation table containing each
+operation's description, result, status, and hint. `Format` accepts a decoded
+transaction envelope or result; `FormatSummary` accepts a summary, including
+the paired summary from `lens.ExplainPair`.
+
+Table cells escape Markdown pipes and convert embedded line breaks to `<br>`,
+so memos, operation descriptions, and protocol hints do not break the table.
+The formatter only reads the summary and writes to the supplied writer; it
+makes no network calls and does not use the environment or clock.
+
+The CLI exposes paired transaction reports as `lens explain --markdown`; see
+the [README](../README.md#lens-explain--why-did-this-fail) for usage.
+
 ## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
 
 `TUITree` provides a curses-like interactive navigation experience within standard ANSI terminals for exploring deeply nested XDR structures.
@@ -609,31 +802,36 @@ Soroban smart contracts encode arguments, return types, storage entries, and eve
   - Function Invocations (`ScSpecFunctionV0`): Resolves function names and parameter lists in `InvokeHostFunctionOp`.
 - Usable via `--spec <spec.xdr|contract.wasm>` in `lens decode`.
 
-## JSON to XDR Encoding Architecture
+## Streaming XDR Architecture (`stream_parser.go`)
 
-The JSON-to-XDR subsystem (`pkg/lens/validate.go`, `pkg/lens/coerce.go`, `pkg/lens/scval_encode.go`, `pkg/lens/tx_builder.go`) enables offline authoring and synthesis of Stellar transactions and Soroban contract values from human-ergonomic JSON specifications.
+Parsing large ledger histories or bulk transaction archives requires stream processing without buffering entire archives in memory:
 
-### Strict Schema Validation (`validate.go`)
-- Zero-dependency schema validation engine reporting all violations across the entire JSON tree.
-- Uses `errors.Is` and `errors.As` compatible `ValidationError` containing explicit JSON path traces (e.g. `operations[0].amount`).
-- In strict mode, unknown properties are flagged to catch silent configuration typos.
+```
+Framed Stream ──► StreamParser (bufio.Reader) ──► Record Chunk ──► Decode / Unmarshal
+                     │
+         Auto-Detect Framing
+         ├── RFC 5531 Record Marking (4-byte header, bit 31 final-frag flag)
+         ├── Length-Prefixed Framing (4-byte big-endian uint32 prefix)
+         └── Base64 Lines Framing (newline-delimited)
+```
 
-### Permissive Type Coercion (`coerce.go`)
-- **Numbers**: Coerces integers, floats, stringified numbers (`"10000000"`), and hex-formatted numbers (`"0x05f5e100"`). Underscores in strings are stripped cleanly.
-- **Amounts**: Coerces decimal XLM amounts (e.g. `"10.5"` XLM to `105000000` stroops) or raw integer stroops.
-- **Addresses & Keys**: Handles standard Ed25519 public keys (`G...`), Muxed Accounts (`M...` or `{address, id}` objects), and Soroban contract addresses (`C...`).
-- **Assets**: Parses canonical string representations (`"native"`, `"XLM"`, `"USDC:GBRP..."`) as well as asset objects.
-- **Prices**: Parses `"n/d"` fraction strings, floats, integers, or `{n, d}` numerator/denominator maps.
+- **Chunked Reassembly**: Multi-fragment RFC 5531 records are streamed fragment-by-fragment and assembled directly into target records.
+- **Strict Bounded Memory**: `WithMaxRecordSize` protects against unbounded memory allocations and OOM crashes from malicious or corrupt streams.
+- **Zero Allocations Drain**: `Drain()` calculates stream metrics without storing historical chunks.
 
-### Soroban ScVal Constructor (`scval_encode.go`)
-Ergonomic constructor creating `xdr.ScVal` values from intuitive JSON literals:
-- Primitives: booleans, integers (`i32`, `u32`), strings (`string` or `symbol`), and null (`void`).
-- Tagged objects: typed wrappers such as `{"i64": 100}`, `{"u128": "340282366920938463463374607431768211455"}`, `{"contract_id": "C..."}`, `{"symbol": "transfer"}`.
-- Maps & Vectors: arrays map to `xdr.ScVec`, maps to `xdr.ScMap` with automatic sorting of keys.
+## Canonical XDR Serialization (`canonical.go`)
 
-### Transaction Envelope Builder (`tx_builder.go`)
-Constructs standard Stellar `xdr.TransactionEnvelope` (V1, V0, or FeeBump):
-- Resolves classic operations (`payment`, `create_account`, `change_trust`, `manage_data`, `manage_buy_offer`, `manage_sell_offer`, etc.) and Soroban operations (`invoke_host_function`, `extend_footprint_ttl`, `restore_footprint`).
-- Translates preconditions (time bounds, ledger bounds, sequence bounds, extra signers) into `PreconditionsV2`.
-- Strict offline guarantee: zero network calls in any builder or encoding path.
+Adheres strictly to RFC 4506 deterministic serialization:
+
+- **4-Byte Word Alignment**: All records and variable-length segments must align to 4-byte boundaries.
+- **Zero Padding Enforcement**: Trailing padding bytes $(4 - (N \pmod 4)) \pmod 4$ in opaque arrays and strings must strictly be `0x00`. Non-zero padding bytes are detected and rejected as non-canonical leaks (`ErrNonCanonicalPadding`).
+- **Canonical Re-Encoding Verification**: Decodes input as registered XDR types, re-marshals canonically with SDK encoders, and asserts bit-for-bit equivalence, flagging trailing junk (`ErrTrailingGarbage`).
+
+## Malformed Input Diagnostics & Error Pointers (`encode_errors.go`)
+
+When JSON inputs fail syntax validation or schema parsing, `lens` computes exact line and column pointers:
+
+- **Path Tracking**: Resolves dot-and-bracket paths (e.g. `operations[0].amount`) to token byte offsets.
+- **Visual Caret Indicators**: Generates source code snippets with surrounding line context and aligned caret indicators (`^~~~`).
+- **Error Chaining**: Diagnostic errors wrap base causes with full compatibility for `errors.Is` and `errors.As`.
 

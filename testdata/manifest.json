@@ -82,6 +82,50 @@
       "result_file": null,
       "synthetic": true,
       "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
+    },
+    "contract_data_persistent": {
+      "tx_hash": null,
+      "description": "synthetic persistent-storage contract data entry keyed by a COUNTER symbol",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "contract_data_persistent.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
+    },
+    "contract_data_temporary": {
+      "tx_hash": null,
+      "description": "synthetic temporary-storage contract data entry keyed by a SEEN symbol",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "contract_data_temporary.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
+    },
+    "contract_data_instance": {
+      "tx_hash": null,
+      "description": "synthetic instance-storage contract data entry whose key is the special ledger key contract instance ScVal",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "contract_data_instance.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
+    },
+    "ledger_entry_contract_data": {
+      "tx_hash": null,
+      "description": "synthetic ledger entry of type ContractData carrying the persistent entry, used to verify contract data decodes inside LedgerEntry.Data",
+      "successful": true,
+      "operation_count": 0,
+      "fee_bump": false,
+      "envelope_file": "ledger_entry_contract_data.txt",
+      "result_file": null,
+      "synthetic": true,
+      "note": "SDK-constructed and round-tripped through xdr.MarshalBase64; no mainnet provenance"
     }
   },
   "synthetic_fixtures": {

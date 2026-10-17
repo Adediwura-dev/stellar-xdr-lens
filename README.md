@@ -59,6 +59,25 @@ go build ./cmd/lens
 Everything runs offline. `lens` makes no network calls, which makes it safe on
 unsigned transactions and deterministic in CI.
 
+#### Terminal colors
+
+Human-readable terminal output uses the dark color theme by default. Set
+`LENS_THEME=light` for a palette suited to light terminal backgrounds; set it
+to `dark` to select the default palette explicitly. Customize individual ANSI
+styles with `LENS_THEME_DARK_KEY`, `LENS_THEME_LIGHT_ADD`, and the equivalent
+`KEY`, `TYPE`, `STR`, `NUM`, `NOTE`, `DIM`, `ADD`, `REMOVE`, and `CHANGE`
+variables. Values are SGR parameters without escape characters, for example:
+
+```sh
+LENS_THEME=dark LENS_THEME_DARK_KEY='38;5;39' lens decode "$XDR"
+```
+
+Set a style variable to an empty string to disable that style. `--color auto`
+continues to color only terminal output, while `--color always` and
+`--color never` explicitly enable or disable colors. Invalid theme values or
+style parameters produce an error. `NO_COLOR` remains honored in automatic
+mode.
+
 ## Contributor validation
 
 The CLI is exercised by subprocess tests in `cmd/lens/e2e_test.go` against the
@@ -105,6 +124,18 @@ Outcome
 All 208 protocol result codes have a written explanation. Use `--fail-on-error`
 to exit non-zero when the transaction failed, which makes this usable as a CI gate.
 
+For a GitHub-flavored Markdown report with transaction details and one row per
+operation, add `--markdown`:
+
+```console
+$ lens explain --file envelope.xdr --result-file result.xdr --markdown
+```
+
+The output contains a transaction-details table and an operations table with
+each operation's description, result, status, and hint. It is deterministic and
+offline, and can be redirected into an issue, pull request, or other Markdown
+document.
+
 ### `lens decode` — read the structure
 
 ```console
@@ -131,6 +162,30 @@ TransactionEnvelope
 
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
+
+`lens decode --type ContractDataEntry` decodes Soroban contract data and names
+its storage level. `persistent` and `temporary` come from the wire durability;
+instance storage keeps persistent durability on the wire and is recognised by
+its special key:
+
+```console
+$ lens decode --type ContractDataEntry "$TEMP"
+ContractDataEntry
+├─ Ext
+│  └─ V: 0
+├─ Contract: CDFP5OV6AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQTCQKRMFYYDENBWGZ3
+├─ Key
+│  ├─ Type: ScValTypeScvSymbol
+│  └─ Sym: SEEN
+├─ Durability: temporary
+└─ Val
+   ├─ Type: ScValTypeScvBool
+   └─ B: true
+```
+
+For an instance entry the same fields render as `Key: instance storage key`
+with `Durability: persistent`, which is what separates instance storage from an
+ordinary persistent entry.
 
 #### Alternative Formats and Interactive Explorer
 
@@ -197,6 +252,16 @@ if err := f.FormatSummaries(os.Stdout, summaries); err != nil {
 switches the field delimiter — the column order, and the names scripts address
 by position, are pinned by tests and are a breaking change to alter.
 
+#### Streaming and Canonical Validation
+
+```console
+# Stream framed XDR records (RFC 5531 or length-prefixed) without buffering the whole file
+$ lens decode --stream --file ledger_archive.xdr
+
+# Verify that XDR input adheres strictly to canonical RFC 4506 encoding (no padding leaks)
+$ lens decode --canonical "$XDR"
+```
+
 ### `lens diff` — what changed?
 
 ```console
@@ -218,6 +283,32 @@ TransactionResult
 ```
 
 Use `--exit-code` to exit non-zero when the values differ, like `diff(1)`.
+The default compares ordered lists by index. Use `--align` to opt into LCS
+matching for unchanged list elements when insertions or removals would cause a
+cascade of positional changes. `--semantic` compares ScVal wide integers as
+exact decimal values and matches recursive map entries by their canonical
+XDR keys. These options can be combined:
+
+```console
+$ lens diff --align --semantic before.xdr after.xdr
+```
+
+### `lens meta-diff` — how did ledger balances change?
+
+Transaction metadata carries ledger-entry state and changes. `meta-diff`
+pairs those snapshots locally and reports account XLM, trustline, and
+claimable-balance changes without contacting a ledger or RPC endpoint:
+
+```console
+$ lens meta-diff transaction-meta.xdr
+G... XLM: 10.0000000 XLM -> 12.5000000 XLM (+2.5000000 XLM)
+```
+
+Use `--json` for machine-readable output. Balances are represented as signed
+64-bit ledger units (`stroops` for XLM); `beforeKnown` is false when metadata
+contains an after-value without its prior state. Created and removed entries
+use zero on the absent side when the corresponding metadata record makes that
+baseline known.
 
 ### `lens asset` — derive a Stellar Asset Contract id
 
@@ -380,6 +471,31 @@ func main() {
 
 See the [API reference](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens)
 and [docs/architecture.md](docs/architecture.md).
+
+### Failure diagnostics library
+
+Beyond `ExplainPair`, `pkg/lens` ships four offline diagnostics for the
+failures developers hit most often. All take decoded XDR (or captured RPC
+text) and make no network calls; existing CLI flags and output formats are
+unchanged.
+
+```go
+// 1. Insufficient balance: available = balance - selling liabilities - reserve.
+bal, _ := lens.DiagnoseBalance(accountEntry, lens.DefaultBaseReserve, spendStroops)
+fmt.Println(bal.Summary) // names the exact shortfall in stroops and XLM.
+
+// 2. Missing signatures: which signer weights are still needed.
+sig, _ := lens.DiagnoseTransactionSignatures(envelope, accountEntry)
+fmt.Println(sig.Summary) // "supply weight 1 but threshold 2 requires 1 more..."
+
+// 3. Simulation root cause: footprint, CPU/memory, fee, archived, auth, trap.
+sim, _ := lens.DiagnoseSimulationResponse(&lens.SimulationResponse{Error: rpcErr})
+fmt.Println(sim.Kind, sim.Hint) // e.g. missing_footprint + "use the footprint it returns..."
+
+// 4. Fee-bump: did the outer wrapper or the inner transaction fail?
+fb, _ := lens.DiagnoseFeeBump(envelope, result)
+fmt.Println(fb.Stage, fb.Summary) // inner vs outer, with fee-charged accounting.
+```
 
 ### Error handling
 
