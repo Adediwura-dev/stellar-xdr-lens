@@ -17,6 +17,9 @@ func newDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comman
 	var (
 		typeName         string
 		asJSON           bool
+		jsonPatch        bool
+		unified          bool
+		sideBySide       bool
 		exitDiff         bool
 		quietMode        bool
 		alignLists       bool
@@ -24,6 +27,10 @@ func newDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comman
 		unorderedSigners bool
 		statsOnly        bool
 		footprintMode    bool
+		includePaths     []string
+		excludePaths     []string
+		context          int
+		sideWidth        int
 	)
 
 	cmd := &cobra.Command{
@@ -44,18 +51,46 @@ Three modes change what is compared rather than how it is printed:
                        multisets, so reordering them is not a difference;
   --footprint          compare the Soroban ledger footprints of two
                        envelopes (or SorobanTransactionData) as sets;
-  --stats              print only the statistical summary of the diff.`,
+  --stats              print only the statistical summary of the diff.
+
+--include-paths and --exclude-paths narrow which changed paths are reported.
+A pattern is a dot-separated field path; * and ? are glob metacharacters within
+a segment, ** spans segments, and a pattern also matches everything beneath it.
+Excludes win over includes. For example, ignoring the noise of a rebuild:
+
+  lens diff --exclude-paths Signatures,SeqNum before.xdr after.xdr
+
+Three output formats render the difference for other tools:
+
+  --json-patch   an RFC 6902 JSON Patch (add/remove/replace operations);
+  --unified      a standard unified diff for code review comments;
+  --side-by-side a colourised two-column terminal view.
+
+These are mutually exclusive with each other and with --json/--stats.`,
 		Example: `  lens diff "$XDR_A" "$XDR_B"
   lens diff before.xdr after.xdr
   lens diff --type TransactionEnvelope a.xdr b.xdr
   lens diff --align before.xdr after.xdr
   lens diff --semantic before.xdr after.xdr
   lens diff --unordered-signers a.xdr b.xdr
+  lens diff --include-paths Result.Code a.xdr b.xdr
+  lens diff --exclude-paths Signatures,SeqNum a.xdr b.xdr
   lens diff --footprint before.env.xdr after.env.xdr
+  lens diff --json-patch a.xdr b.xdr
+  lens diff --unified a.xdr b.xdr
+  lens diff --side-by-side a.xdr b.xdr
   lens diff --stats before.xdr after.xdr
   lens diff --exit-code a.xdr b.xdr   # non-zero when they differ`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateDiffModes(asJSON, statsOnly, jsonPatch, unified, sideBySide, footprintMode); err != nil {
+				return err
+			}
+			if footprintMode && (len(includePaths) > 0 || len(excludePaths) > 0) {
+				return fmt.Errorf("%w: --include-paths and --exclude-paths do not apply to --footprint",
+					lens.ErrInvalidArgument)
+			}
+
 			left, err := readOperand(args[0], stdin)
 			if err != nil {
 				return fmt.Errorf("reading first value: %w", err)
@@ -69,10 +104,16 @@ Three modes change what is compared rather than how it is printed:
 				return runFootprintDiff(stdout, left, right, asJSON, quietMode, exitDiff)
 			}
 
+			filter, err := lens.NewPathFilter(includePaths, excludePaths)
+			if err != nil {
+				return err
+			}
+
 			result, err := lens.DiffBase64WithOptions(left, right, typeName, lens.DiffOptions{
 				AlignLists:       alignLists,
 				Semantic:         semantic,
 				UnorderedSigners: unorderedSigners,
+				Filter:           filter,
 			})
 			if err != nil {
 				return err
@@ -91,6 +132,59 @@ Three modes change what is compared rather than how it is printed:
 					}
 				} else {
 					fmt.Fprintln(stdout, stats.String())
+				}
+			case jsonPatch:
+				leftValue, err := decodeValue(left, typeName)
+				if err != nil {
+					return fmt.Errorf("decoding first value: %w", err)
+				}
+				rightValue, err := decodeValue(right, typeName)
+				if err != nil {
+					return fmt.Errorf("decoding second value: %w", err)
+				}
+				f := format.NewJSONPatchFormatter(
+					format.WithJSONPatchSources(leftValue, rightValue),
+				)
+				if err := f.Format(stdout, result); err != nil {
+					return err
+				}
+			case unified:
+				leftValue, err := decodeValue(left, typeName)
+				if err != nil {
+					return fmt.Errorf("decoding first value: %w", err)
+				}
+				rightValue, err := decodeValue(right, typeName)
+				if err != nil {
+					return fmt.Errorf("decoding second value: %w", err)
+				}
+				f := format.NewUnifiedFormatter(
+					format.WithUnifiedContext(context),
+					format.WithUnifiedFilter(filter),
+				)
+				if err := f.Format(stdout, leftValue, rightValue); err != nil {
+					return err
+				}
+			case sideBySide:
+				leftValue, err := decodeValue(left, typeName)
+				if err != nil {
+					return fmt.Errorf("decoding first value: %w", err)
+				}
+				rightValue, err := decodeValue(right, typeName)
+				if err != nil {
+					return fmt.Errorf("decoding second value: %w", err)
+				}
+				palette, err := paletteForOutput(stdout, g.color)
+				if err != nil {
+					return err
+				}
+				f := format.NewSideBySideFormatter(
+					format.WithSideBySidePalette(palette),
+					format.WithSideBySideContext(context),
+					format.WithSideBySideWidth(sideWidth),
+					format.WithSideBySideFilter(filter),
+				)
+				if err := f.Format(stdout, leftValue, rightValue); err != nil {
+					return err
 				}
 			case asJSON:
 				enc := json.NewEncoder(stdout)
@@ -121,6 +215,15 @@ Three modes change what is compared rather than how it is printed:
 	cmd.Flags().StringVarP(&typeName, "type", "t", "",
 		"decode both values as this XDR type instead of detecting each")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the diff as JSON")
+	cmd.Flags().BoolVar(&jsonPatch, "json-patch", false, "emit an RFC 6902 JSON Patch of the difference")
+	cmd.Flags().BoolVar(&unified, "unified", false, "emit a standard unified diff")
+	cmd.Flags().BoolVar(&sideBySide, "side-by-side", false, "emit a colourised two-column diff")
+	cmd.Flags().StringArrayVar(&includePaths, "include-paths", nil,
+		"only report changes matching these path patterns (comma-separated, repeatable)")
+	cmd.Flags().StringArrayVar(&excludePaths, "exclude-paths", nil,
+		"ignore changes matching these path patterns (comma-separated, repeatable)")
+	cmd.Flags().IntVar(&context, "context", 3, "context lines for --unified and --side-by-side")
+	cmd.Flags().IntVar(&sideWidth, "side-by-side-width", 160, "total column width for --side-by-side")
 	cmd.Flags().BoolVar(&alignLists, "align", false,
 		"align list elements with LCS to reduce insertion and removal noise")
 	cmd.Flags().BoolVar(&semantic, "semantic", false,
@@ -137,6 +240,28 @@ Three modes change what is compared rather than how it is printed:
 		"print nothing; report the answer only through the exit code")
 
 	return cmd
+}
+
+// validateDiffModes rejects combinations of output modes that would otherwise
+// silently pick one. --stats --json is a single mode (the JSON statistics), so
+// it is allowed.
+func validateDiffModes(asJSON, statsOnly, jsonPatch, unified, sideBySide, footprint bool) error {
+	modes := 0
+	if asJSON || statsOnly {
+		modes++
+	}
+	for _, on := range []bool{jsonPatch, unified, sideBySide} {
+		if on {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return fmt.Errorf("%w: choose one of --json/--stats, --json-patch, --unified or --side-by-side", lens.ErrInvalidArgument)
+	}
+	if footprint && (jsonPatch || unified || sideBySide) {
+		return fmt.Errorf("%w: --footprint cannot be combined with --json-patch, --unified or --side-by-side", lens.ErrInvalidArgument)
+	}
+	return nil
 }
 
 // runFootprintDiff decodes both operands and reports the set difference

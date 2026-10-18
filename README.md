@@ -315,6 +315,47 @@ TransactionResult
 and offline. It has a stable JSON form (`--stats --json`) with the total, the
 per-kind counts, the per-section breakdown and the deepest changed path.
 
+`--include-paths` and `--exclude-paths` narrow which changed paths are reported,
+which is how a rebuilt envelope's sequence number and signatures stop drowning
+out the change you care about. A pattern is a dot-separated field path; `*` and
+`?` are glob metacharacters within a segment, `**` spans segments, and a pattern
+also matches everything beneath it. Excludes win over includes.
+
+```console
+# Ignore the noise of a rebuild and report only what really changed
+$ lens diff --exclude-paths Signatures,SeqNum before.xdr after.xdr
+
+# Report only the top-level result code and the fee charged
+$ lens diff --include-paths Result.Code,FeeCharged before.res after.res
+```
+
+Three formats render the difference for other tools. Each is mutually exclusive
+with the others and with `--json`/`--stats`.
+
+```console
+# An RFC 6902 JSON Patch of the difference, ready for any JSON Patch consumer
+$ lens diff --json-patch before.xdr after.xdr
+[
+  {"op": "replace", "path": "/Result/Code", "value": "TransactionResultCodeTxFailed"},
+  {"op": "remove", "path": "/Result/InnerResultPair/Result/Result/Results/0/Tr/InvokeHostFunctionResult/Success"}
+]
+
+# A standard unified diff, suitable for posting as a pull-request review comment
+$ lens diff --unified before.xdr after.xdr
+--- a/TransactionResult
++++ b/TransactionResult
+@@ -1,6 +1,6 @@
+ . = TransactionResult
+-FeeCharged = 35438 (0.0035438 (stroops: 35438))
++FeeCharged = 13355 (0.0013355 (stroops: 13355))
+
+# A colourised two-column terminal view, removed on the left, added on the right
+$ lens diff --side-by-side before.xdr after.xdr
+```
+
+Use `--context N` to bound the context lines for `--unified` and `--side-by-side`
+(default 3), and `--side-by-side-width N` to set the total column width.
+
 ### `lens result-diff` — align an envelope with its result
 
 `lens diff` compares like with like. `result-diff` compares a transaction with
@@ -521,6 +562,13 @@ signature collections as unordered multisets; `lens.DiffFootprints` computes
 the read-only and read-write set differences of two Soroban footprints; and
 `lens.DiffEnvelopeResult` aligns an envelope with its result, operation by
 operation. None of them fetches or decodes anything beyond the values passed in.
+
+The output formatters are reusable too. `format.NewJSONPatchFormatter` and
+`format.NewUnifiedFormatter` turn a diff into an RFC 6902 patch or a unified
+diff, and `format.NewSideBySideFormatter` produces the two-column view. A
+`lens.NewPathFilter(include, exclude)` narrows any of them to the paths you care
+about, either through `DiffOptions.Filter` before the diff or the formatter's
+filter option afterwards.
 
 See the [API reference](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens)
 and [docs/architecture.md](docs/architecture.md).

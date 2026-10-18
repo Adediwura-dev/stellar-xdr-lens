@@ -204,3 +204,103 @@ func TestResultDiffJSONAndExitCode(t *testing.T) {
 		t.Errorf("result-diff --exit-code on a clean pair exit = %d, want 0 (err=%v)", code, err)
 	}
 }
+
+func TestDiffJSONPatchFlag(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := run(t, "", "diff", "--json-patch",
+		fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+	if err != nil {
+		t.Fatalf("diff --json-patch error = %v", err)
+	}
+	var ops []struct {
+		Op    string `json:"op"`
+		Path  string `json:"path"`
+		Value any    `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &ops); err != nil {
+		t.Fatalf("--json-patch output is not a JSON array: %v\n%s", err, stdout)
+	}
+	if len(ops) == 0 {
+		t.Fatal("--json-patch emitted no operations")
+	}
+	found := false
+	for _, op := range ops {
+		if op.Path == "/Result/Code" && op.Op == "replace" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("--json-patch has no replace for /Result/Code:\n%s", stdout)
+	}
+}
+
+func TestDiffUnifiedFlag(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := run(t, "", "diff", "--unified",
+		fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+	if err != nil {
+		t.Fatalf("diff --unified error = %v", err)
+	}
+	for _, want := range []string{"--- a/TransactionResult", "+++ b/TransactionResult", "@@ -"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("--unified output does not contain %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestDiffSideBySideFlag(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := run(t, "", "diff", "--side-by-side", "--color", "never",
+		fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+	if err != nil {
+		t.Fatalf("diff --side-by-side error = %v", err)
+	}
+	if !strings.Contains(stdout, "|") || !strings.Contains(stdout, "FeeCharged") {
+		t.Errorf("--side-by-side output is missing columns or changes:\n%s", stdout)
+	}
+}
+
+func TestDiffPathFilters(t *testing.T) {
+	t.Parallel()
+
+	excluded, _, err := run(t, "", "diff", "--exclude-paths", "Result.Code",
+		fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+	if err != nil {
+		t.Fatalf("diff --exclude-paths error = %v", err)
+	}
+	// The top-level Result.Code change must be gone, but its deeper namesake
+	// (Result.InnerResultPair.Result.Result.Code) must remain.
+	if strings.Contains(excluded, "TxFeeBumpInnerFailed") {
+		t.Errorf("--exclude-paths Result.Code still reported the top-level code:\n%s", excluded)
+	}
+	if !strings.Contains(excluded, "TransactionResultCodeTxFailed") {
+		t.Errorf("--exclude-paths dropped unrelated changes:\n%s", excluded)
+	}
+
+	included, _, err := run(t, "", "diff", "--include-paths", "FeeCharged",
+		fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+	if err != nil {
+		t.Fatalf("diff --include-paths error = %v", err)
+	}
+	if !strings.Contains(included, "FeeCharged") || strings.Contains(included, "TransactionResultCodeTxFailed") {
+		t.Errorf("--include-paths FeeCharged output is wrong:\n%s", included)
+	}
+}
+
+func TestDiffModeValidation(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"diff", "--json", "--unified"},
+		{"diff", "--json-patch", "--side-by-side"},
+		{"diff", "--stats", "--json-patch"},
+	} {
+		full := append(args, fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+		if _, _, err := run(t, "", full...); err == nil {
+			t.Errorf("%v error = nil, want a mode-conflict error", args)
+		}
+	}
+}
