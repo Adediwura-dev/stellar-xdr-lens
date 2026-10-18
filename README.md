@@ -293,6 +293,51 @@ XDR keys. These options can be combined:
 $ lens diff --align --semantic before.xdr after.xdr
 ```
 
+Three modes compare the values differently rather than printing them
+differently:
+
+```console
+# Signatures and signers are sets, not sequences: reordering them is not a diff
+$ lens diff --unordered-signers before.xdr after.xdr
+
+# Set-theoretic (Venn) difference of two Soroban ledger footprints
+$ lens diff --footprint before.env.xdr after.env.xdr
+
+# Just the statistics: how many changes, of what kind, in which section
+$ lens diff --stats before.xdr after.xdr
+TransactionResult
+6 change(s): 5 modified, 1 removed
+  FeeCharged: 1
+  Result: 5
+```
+
+`--stats` derives everything from an existing diff, so it stays deterministic
+and offline. It has a stable JSON form (`--stats --json`) with the total, the
+per-kind counts, the per-section breakdown and the deepest changed path.
+
+### `lens result-diff` — align an envelope with its result
+
+`lens diff` compares like with like. `result-diff` compares a transaction with
+the result it produced, pairing each operation with the operation result at the
+same index and naming every place they disagree:
+
+```console
+$ lens result-diff envelope.xdr result.xdr
+tx_fee_bump_inner_failed
+  The fee-bump wrapper was valid, but the inner transaction it paid for failed.
+  inner: tx_failed
+Operations (1)
+  ✗ [0] invoke_host_function — call harvest on contract CBGSB…KKY3 with 2 argument(s)
+      invoke_host_function_trapped: The contract trapped: it panicked, or explicitly returned an error.
+      → This is a failure inside the contract itself, not a protocol-level rejection. Run the call through simulation and read the diagnostic events to find the contract-level cause.
+```
+
+It reports mismatched operation and result types, operations that have no result
+of their own, results with no matching operation, and each failed operation's
+result code in plain English. `--json` emits the alignment as camelCase JSON and
+`--exit-code` exits non-zero when the two disagree. Everything is computed from
+the two supplied blobs; no network call is made.
+
 ### `lens meta-diff` — how did ledger balances change?
 
 Transaction metadata carries ledger-entry state and changes. `meta-diff`
@@ -468,6 +513,14 @@ func main() {
 	}
 }
 ```
+
+The diff helpers compose with the same decoded values. `lens.SummarizeDiff`
+turns a `*lens.DiffResult` into counts and per-section statistics;
+`lens.DiffSigners` and `lens.DiffDecoratedSignatures` compare signer and
+signature collections as unordered multisets; `lens.DiffFootprints` computes
+the read-only and read-write set differences of two Soroban footprints; and
+`lens.DiffEnvelopeResult` aligns an envelope with its result, operation by
+operation. None of them fetches or decodes anything beyond the values passed in.
 
 See the [API reference](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens)
 and [docs/architecture.md](docs/architecture.md).
