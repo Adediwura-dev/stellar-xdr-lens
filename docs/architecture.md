@@ -93,6 +93,10 @@ pkg/lens/              the library; this is the reusable surface
   diff.go              structural path diff and bounded opt-in LCS alignment
   scval_diff.go        recursive ScVal comparison with canonical map-key matching
   semantic_diff.go     exact wide-integer and type-aware semantic comparison
+  diff_stats.go        statistical summary of a diff: counts, sections, depth
+  signer_diff.go       unordered signer/signature multiset comparison
+  footprint_diff.go    Soroban footprint set-theoretic (Venn) diff
+  envelope_result_diff.go  aligned envelope/result operation pairing
   meta_diff.go         transaction metadata balance deltas (offline)
   canonical.go         deterministic canonical XDR validation (RFC 4506) and serialization
   encode_errors.go     malformed input diagnostics, line/column tracking and error pointers
@@ -163,6 +167,63 @@ snapshot; create/remove changes use zero for the absent side. Metadata that
 does not include a baseline sets `BeforeKnown` false rather than inventing a
 balance. The CLI command `lens meta-diff` renders these records as text or
 JSON. It only inspects the supplied metadata and makes no network calls.
+
+## Statistical diff summaries
+
+`diff_stats.go` turns a `DiffResult` into a `DiffStats`: the total number of
+changes, a breakdown into modified, added, removed and type-changed paths, the
+changes grouped by their top-level path section, and the deepest changed path.
+`SummarizeDiff` accepts a `*DiffResult` and `SummarizeChanges` accepts a raw
+`[]Change`. Both produce deterministic output; sections are emitted in
+first-appearance order and the deepest path breaks ties by first occurrence.
+
+`DiffStats` is additive: it derives everything from an existing diff and runs
+no new decoding, so it adds no network path. The CLI exposes it as
+`lens diff --stats`, which prints `DiffStats.String()` or, with `--json`, the
+tagged JSON form.
+
+## Unordered signer and signature diffs
+
+Signatures and signers are sets, not sequences: a transaction signed by the
+same keys is the same transaction whatever order the signatures appear in.
+`signer_diff.go` compares these collections as multisets, matching duplicates
+by count, through `DiffSignerKeys`, `DiffSigners` and `DiffDecoratedSignatures`.
+Identity uses each element's canonical XDR encoding, so a reordered set is
+equal, a weight change is one removal plus one addition, and a genuine
+insertion or removal is reported as exactly that.
+
+The structural differ integrates the same behaviour through
+`DiffOptions.UnorderedSigners`: with it set, list fields named `Signatures`,
+`Signers` or `ExtraSigners` are compared as multisets and every other list
+stays positional. The CLI enables it with `lens diff --unordered-signers`.
+
+## Soroban footprint set diffs
+
+`footprint_diff.go` computes the read-only and read-write set differences
+between two Soroban ledger footprints. Keys are identified by their canonical
+XDR encoding and rendered with `ledgerKeySummary`, so the output names accounts,
+trustlines and contract data keys rather than opaque bytes. `DiffFootprintKeys`
+works on raw `[]LedgerKey`; `DiffFootprints` and `DiffSorobanFootprints` handle
+whole footprints and `SorobanTransactionData`; `FootprintFromEnvelope` and
+`FootprintFromValue` extract a footprint from a V1 or fee-bump envelope or a
+standalone data value. The CLI enables it with `lens diff --footprint`, which
+also accepts `--json`.
+
+## Envelope/result alignment
+
+`envelope_result_diff.go` is the pairwise counterpart to `ExplainPair`. Given a
+`TransactionEnvelope` and its `TransactionResult` it pairs every operation with
+the operation result at the same index and reports mismatched operation and
+result types, operations with no result of their own, results with no matching
+operation, and each failed operation's plain-English result code.
+`DiffEnvelopeResult`, `DiffEnvelopeResultValues` and
+`DiffEnvelopeResultBase64` cover the concrete, `Value` and base64 entry points.
+
+The result carries the aligned entries plus a `DiffResult` view
+(`DiffResult()`), a `DiffStats` view (`Summarize()`), a readable report
+(`String()`) and an aligned two-way `Node` tree (`Tree()`) that places each
+operation's subtree beside its result's. The CLI command `lens result-diff`
+renders the report, or the JSON form with `--json`.
 
 ## Runnable Go examples
 

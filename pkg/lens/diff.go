@@ -99,6 +99,11 @@ type DiffOptions struct {
 	// Semantic compares supported ScVal integers as exact decimal values and
 	// pairs ScVal map entries by canonical key instead of list position.
 	Semantic bool
+	// UnorderedSigners compares signature and signer collections as unordered
+	// multisets, so reordering them is not reported as a difference. Only the
+	// fields the protocol defines as sets (Signatures, Signers and
+	// ExtraSigners) are affected; every other list stays positional.
+	UnorderedSigners bool
 }
 
 // Equal reports whether the two values were structurally identical.
@@ -180,7 +185,11 @@ func diffNodesWithOptions(a, b *Node, path string, out *[]Change, options DiffOp
 		}
 
 	case KindList:
-		diffListsWithOptions(a, b, path, out, options)
+		if options.UnorderedSigners && isSignerCollection(signerCollectionName(path, a, b)) {
+			diffMultisetLists(a, b, path, out)
+		} else {
+			diffListsWithOptions(a, b, path, out, options)
+		}
 
 	case KindStruct:
 		diffStructsWithOptions(a, b, path, out, options)
