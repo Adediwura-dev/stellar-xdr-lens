@@ -2,6 +2,7 @@ package lens_test
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -25,35 +26,24 @@ func TestDecodeLedgerUpgradeFixtures(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		fixture   string
-		wantArm   string
-		wantField string
-		wantValue uint64
-		wantNote  string
+		name     string
+		fixture  string
+		wantNote string
 	}{
 		{
-			name:      "protocol version bump",
-			fixture:   "ledger_upgrade_version",
-			wantArm:   "LedgerUpgradeTypeLedgerUpgradeVersion",
-			wantField: "NewLedgerVersion",
-			wantValue: 21,
+			name:     "protocol version bump",
+			fixture:  "ledger_upgrade_version",
+			wantNote: "protocol version 21",
 		},
 		{
-			name:      "base fee change",
-			fixture:   "ledger_upgrade_base_fee",
-			wantArm:   "LedgerUpgradeTypeLedgerUpgradeBaseFee",
-			wantField: "NewBaseFee",
-			wantValue: 1000,
-			wantNote:  "0.0001000 (stroops: 1000)",
+			name:     "base fee change",
+			fixture:  "ledger_upgrade_base_fee",
+			wantNote: "base fee 0.0001000 XLM (1000 stroops)",
 		},
 		{
-			name:      "base reserve change",
-			fixture:   "ledger_upgrade_base_reserve",
-			wantArm:   "LedgerUpgradeTypeLedgerUpgradeBaseReserve",
-			wantField: "NewBaseReserve",
-			wantValue: 10000000,
-			wantNote:  "1.0000000 (stroops: 10000000)",
+			name:     "base reserve change",
+			fixture:  "ledger_upgrade_base_reserve",
+			wantNote: "base reserve 1.0000000 XLM (10000000 stroops)",
 		},
 	}
 
@@ -66,22 +56,17 @@ func TestDecodeLedgerUpgradeFixtures(t *testing.T) {
 				t.Fatalf("DecodeAs() error = %v", err)
 			}
 
-			// A decoded union shows the selected arm and nothing else.
-			if len(v.Node.Children) != 2 {
-				t.Fatalf("children = %d, want exactly Type plus one arm", len(v.Node.Children))
+			// A LedgerUpgrade is collapsed to a single rendered scalar: the
+			// note names the proposed parameter, while the raw union remains
+			// available as the machine value.
+			if v.Node.Kind != lens.KindScalar {
+				t.Fatalf("Kind = %v, want a scalar rendering", v.Node.Kind)
 			}
-			if got := fmt.Sprint(v.Node.Child("Type").Value); got != tc.wantArm {
-				t.Errorf("Type = %q, want %q", got, tc.wantArm)
+			if _, ok := v.Node.Value.(xdr.LedgerUpgrade); !ok {
+				t.Errorf("Value = %T, want the decoded LedgerUpgrade", v.Node.Value)
 			}
-			arm := v.Node.Child(tc.wantField)
-			if arm == nil {
-				t.Fatalf("missing %s node", tc.wantField)
-			}
-			if got := fmt.Sprint(arm.Value); got != fmt.Sprint(tc.wantValue) {
-				t.Errorf("%s = %s, want %d", tc.wantField, got, tc.wantValue)
-			}
-			if arm.Note != tc.wantNote {
-				t.Errorf("%s note = %q, want %q", tc.wantField, arm.Note, tc.wantNote)
+			if v.Node.Note != tc.wantNote {
+				t.Errorf("note = %q, want %q", v.Node.Note, tc.wantNote)
 			}
 		})
 	}
@@ -109,7 +94,7 @@ func TestDecodeStellarValueUpgradeVotes(t *testing.T) {
 		wantNote  string
 	}{
 		{0, "0000000100000015", "protocol version 21"},
-		{1, "0000000400989680", "base reserve 10000000 stroops (1.0000000 XLM)"},
+		{1, "0000000400989680", "base reserve 1.0000000 XLM (10000000 stroops)"},
 		// An upgrade unknown to this build keeps its hex form and gains no
 		// note, which is the protocol's whole point of opaque upgrade votes.
 		{2, "deadbeef", ""},
@@ -117,7 +102,13 @@ func TestDecodeStellarValueUpgradeVotes(t *testing.T) {
 
 	for _, tc := range tests {
 		vote := upgrades.Children[tc.index]
-		if got := fmt.Sprint(vote.Value); got != tc.wantValue {
+		// Decoded votes keep their bytes as the machine value; a vote this
+		// build cannot parse stays a generic hex string.
+		got := fmt.Sprint(vote.Value)
+		if raw, ok := vote.Value.(xdr.UpgradeType); ok {
+			got = hex.EncodeToString(raw)
+		}
+		if got != tc.wantValue {
 			t.Errorf("Upgrades[%d] value = %s, want %s", tc.index, got, tc.wantValue)
 		}
 		if vote.Note != tc.wantNote {
@@ -177,10 +168,10 @@ func TestDecodeStellarValueEveryUpgradeArm(t *testing.T) {
 
 	wantNotes := []string{
 		"max tx set size 1000",
-		"ledger flags 1",
-		"config upgrade set: contract CBL662UMC7LD7G7WN5NU3YSFO64UC7FZNNZ6IGT5GZALNS3P2HVVGKVG," +
-			" content hash db3ade040d0aa30bb0adcea47f4032b48f64345cbc178789e8801780b6d4256c",
-		"max Soroban tx set size 42",
+		"flags disable_liquidity_pool_trading",
+		"config upgrade CBL662UMC7LD7G7WN5NU3YSFO64UC7FZNNZ6IGT5GZALNS3P2HVVGKVG" +
+			" (content db3ade040d0aa30bb0adcea47f4032b48f64345cbc178789e8801780b6d4256c)",
+		"max soroban tx set size 42",
 	}
 	for i, want := range wantNotes {
 		if got := upgrades.Children[i].Note; got != want {
