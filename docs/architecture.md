@@ -91,6 +91,7 @@ pkg/lens/              the library; this is the reusable surface
   sponsorship_explain.go sponsorship result and begin/end sequence diagnosis
   upgrade_explain.go   protocol-version boundary correlation for failed results
   diff.go              structural path diff and bounded opt-in LCS alignment
+  diff_filter.go       include/exclude path filtering for structural diffs
   scval_diff.go        recursive ScVal comparison with canonical map-key matching
   semantic_diff.go     exact wide-integer and type-aware semantic comparison
   diff_stats.go        statistical summary of a diff: counts, sections, depth
@@ -113,6 +114,10 @@ pkg/lens/              the library; this is the reusable surface
     txrep.go           SEP-0011 human-readable TxRep format
     csv.go             flat CSV export for batch ledger envelopes
     markdown.go        GitHub-flavored Markdown transaction reports
+    linediff.go        shared line alignment for unified and side-by-side diffs
+    unified.go         standard unified diff for CI review comments
+    json_patch.go      RFC 6902 JSON Patch output
+    side_by_side.go    colourised two-column terminal diff
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -181,6 +186,60 @@ first-appearance order and the deepest path breaks ties by first occurrence.
 no new decoding, so it adds no network path. The CLI exposes it as
 `lens diff --stats`, which prints `DiffStats.String()` or, with `--json`, the
 tagged JSON form.
+
+## Path filters for structural diffs
+
+Not every field is worth reporting. A rebuilt transaction changes its sequence
+number and signatures but should otherwise be identical, and those two paths
+drown out the change a reviewer actually wants to see.
+
+`diff_filter.go` narrows a diff to the paths a caller cares about.
+`NewPathFilter(include, exclude)` builds a validated `PathFilter` from
+dot-separated field patterns. Within a segment the shell glob metacharacters
+`*`, `?` and `[...]` apply, a segment of `**` spans any number of segments, and
+a pattern also matches everything beneath it, so `V1.Tx` selects the whole
+transaction subtree. An empty include set selects everything, and excludes
+always win over includes. Malformed patterns wrap `ErrInvalidArgument`.
+
+The filter is applied to the finished change list, so it never changes how the
+values are compared — it only narrows the output. `DiffOptions.Filter`
+integrates it with `DiffWithOptions`; `FilterChanges` and `DiffResult.Filter`
+are the standalone entry points. Because filtering happens last, a diff whose
+only changes are excluded reports as equal, which is what makes
+`lens diff --exclude-paths ... --exit-code` a usable CI gate. The CLI exposes
+it as `--include-paths` and `--exclude-paths` (comma-separated and
+repeatable), and the format-side `WithUnifiedFilter`/`WithSideBySideFilter`
+options apply the same selection to the line-based output.
+
+## Unified, JSON Patch and side-by-side diff output
+
+Three formatters turn a structural difference into a shape another tool or a
+reviewer can consume. All three are deterministic and make no network calls.
+
+- `format/unified.go` emits a standard unified diff (`---`/`+++` headers and
+  `@@` hunks with context). It is what a pull-request comment bot or a
+  `patch`-style consumer expects, so a structural change can be attached to a
+  review verbatim. Identical values produce no output, matching diff(1).
+- `format/json_patch.go` emits an RFC 6902 JSON Patch: an array of `add`,
+  `remove` and `replace` operations addressed by RFC 6901 JSON Pointers
+  relative to the decoded value. When the two decoded values are supplied with
+  `WithJSONPatchSources`, each operation carries the full JSON subtree from the
+  tree, so the patch is directly applicable; without them the scalar recorded
+  on the change is used.
+- `format/side_by_side.go` emits a colourised two-column view, pairing each
+  removed line with the added line that replaced it. Columns are padded before
+  colour is applied, so ANSI escapes never disturb the layout, and the palette
+  comes from the same environment-selected theme as the other terminal output.
+
+`format/linediff.go` provides the shared engine: it flattens a decoded value
+into a deterministic one-line-per-node stream and aligns two streams with an
+LCS pass whose dynamic-programming table is bounded to $2^{20}$ cells, falling
+back to a wholesale replacement above that. The same bounded-alignment
+discipline as the structural differ applies, so untrusted XDR cannot make the
+terminal formatters allocate without limit. Hunks are built by the standard
+context-merging algorithm. The CLI exposes the formats as `diff --unified`,
+`diff --json-patch` and `diff --side-by-side`; the three are mutually exclusive
+with each other and with `--json`/`--stats`.
 
 ## Unordered signer and signature diffs
 
