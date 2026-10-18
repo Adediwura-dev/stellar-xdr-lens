@@ -548,7 +548,7 @@ base reserve changes — and the protocol carries those votes as opaque bytes:
 `StellarValue.upgrades` is "a vector of encoded `LedgerUpgrade` so that nodes
 can drop unknown steps during consensus". A decoder therefore has to try
 harder than usual. `enrichUpgradeType` in
-[`upgrades.go`](../pkg/lens/upgrades.go) unmarshals each `UpgradeType` as an
+[`ledger_header.go`](../pkg/lens/ledger_header.go) unmarshals each `UpgradeType` as an
 `xdr.LedgerUpgrade` and requires the input to be consumed exactly; a vote that
 does not fit — including an upgrade newer than this build — declines and keeps
 its generic hex rendering.
@@ -560,7 +560,7 @@ StellarValue
 ├─ CloseTime: 1790000000  2026-09-21T14:13:20Z
 ├─ Upgrades  [3]
 │  ├─ [0]: 0000000100000015  protocol version 21
-│  ├─ [1]: 0000000400989680  base reserve 10000000 stroops (1.0000000 XLM)
+│  ├─ [1]: 0000000400989680  base reserve 1.0000000 XLM (10000000 stroops)
 │  └─ [2]: deadbeef
 └─ Ext
    └─ V: StellarValueTypeStellarValueBasic
@@ -720,13 +720,18 @@ The rest of `explain.go` uses the concrete SDK types, because
 envelopes. Using them is both clearer and more correct than re-deriving that
 logic from the tree.
 
-## ManageData failure diagnostics
+## Operation-specific failure diagnostics
 
-A `manage_data` result code says what went wrong but not which entry it was
-about: the entry key lives only in the envelope, not in the result. When an
-envelope is paired with its result, `attachResult` therefore receives the
+A result code says what went wrong but not necessarily which argument it was
+about: the entry key for `manage_data`, or the asset and claimants for
+`create_claimable_balance`, live only in the envelope, not in the result. When
+an envelope is paired with its result, `attachResult` therefore receives the
 envelope's operation list and calls `withOperationContext`, which resolves the
-argument-specific detail and stores it on `Reason.Context`:
+argument-specific detail and stores it on `Reason.Context`.
+
+### ManageData
+
+A `manage_data` failure names the entry key and the rule it violated:
 
 | Result code | Context resolved from the envelope |
 | --- | --- |
@@ -740,7 +745,27 @@ existing consumer keep working unchanged; `--json` simply gains an optional
 `context` field, and the text and Markdown formatters print it beside the
 operation result.
 
-The reserve figure is a documented constant, not a network lookup: lens is
+### Create claimable balance
+
+A `create_claimable_balance` failure names the asset, amount, source account
+and claimants the operation was about. The checks mirror stellar-core's
+`doCheckValid` and `doApply`:
+
+| Result code | Context resolved from the envelope |
+| --- | --- |
+| `create_claimable_balance_malformed` | The offending rule: non-positive amount, empty claimant list, duplicate destination, or the claimant whose predicate is invalid |
+| `create_claimable_balance_low_reserve` | The claimants and the exact native reserve the balance locks: **(2 + claimant count) × 0.5 XLM** |
+| `create_claimable_balance_no_trust` | The asset and the source account that must open a trustline with `change-trust` |
+| `create_claimable_balance_not_authorized` | The asset and the source account whose trustline the issuer must authorise |
+| `create_claimable_balance_underfunded` | The amount, asset and claimants, and whether the shortfall is spendable XLM or a trustline balance |
+
+`ClaimableBalanceReserve(claimantCount)` exposes the same formula as stroops,
+for callers that want the figure without formatting a `Summary`. Claimants do
+not need a trustline to be named on the balance; they need one when they claim
+it, so the context separates the creator's trustline requirement from the
+claimant's.
+
+The reserve figures are documented constants, not network lookups: lens is
 offline-first and never queries ledger parameters, so 0.5 XLM (the public
 network default) is stated explicitly rather than derived at runtime.
 

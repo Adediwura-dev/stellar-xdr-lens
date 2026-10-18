@@ -137,6 +137,13 @@ $ lens explain --file envelope.xdr --result-file result.xdr
       → Each data entry is a subentry and locks 0.5 XLM of base reserve. Free up reserve or remove another entry, then retry.
 ```
 
+For `create_claimable_balance` failures the same context line names the asset,
+the amount, the source account and the claimants, and for
+`create_claimable_balance_low_reserve` it computes the native reserve the
+balance locks: two base reserves for the entry plus one per claimant, at
+0.5 XLM each. This distinguishes a missing creator trustline from a claimant
+who cannot receive the asset, and it is computed entirely from the envelope.
+
 The same detail appears as `context` in `--json` output and in the Markdown
 result cell, and it is resolved entirely from the decoded envelope — no network
 call is made.
