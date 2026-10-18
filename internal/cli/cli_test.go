@@ -3,7 +3,6 @@ package cli_test
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
