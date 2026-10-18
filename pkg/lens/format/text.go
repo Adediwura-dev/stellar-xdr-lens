@@ -134,6 +134,9 @@ func (f *SummaryFormatter) operation(b *strings.Builder, op lens.OpSummary) {
 	}
 	if op.Result != nil && !op.Result.Success {
 		fmt.Fprintf(b, "      %s%s%s: %s\n", p.Remove, op.Result.Code, p.Reset, op.Result.Summary)
+		if op.Result.Context != "" {
+			fmt.Fprintf(b, "      %s%s%s\n", p.Dim, op.Result.Context, p.Reset)
+		}
 		if f.verbose {
 			fmt.Fprintf(b, "      %s%s%s\n", p.Dim, op.Result.Constant, p.Reset)
 		}

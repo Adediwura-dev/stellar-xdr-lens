@@ -17,6 +17,12 @@ type Reason struct {
 	// Hint suggests what to do about it. It is empty when the code is a
 	// success, or when no general advice applies.
 	Hint string `json:"hint,omitempty"`
+	// Context carries argument-specific detail resolved from the envelope,
+	// when the result code alone is not enough to diagnose the failure. For
+	// manage_data it names the entry key and, for low-reserve failures, the
+	// reserve that entry needs. It is empty when no envelope was supplied or
+	// the code has no argument-dependent detail.
+	Context string `json:"context,omitempty"`
 	// Success reports whether this code represents a successful outcome.
 	Success bool `json:"success"`
 }
@@ -362,11 +368,14 @@ var reasons = map[string]reasonText{
 	"ManageDataResultCodeManageDataNotSupportedYet": bad(
 		"This network version does not support data entries.", ""),
 	"ManageDataResultCodeManageDataNameNotFound": bad(
-		"The data entry to delete does not exist.", ""),
+		"The data entry to delete does not exist.",
+		"Deleting requires the entry to exist. Check the key, or set the entry instead of deleting it."),
 	"ManageDataResultCodeManageDataLowReserve": bad(
-		"The account cannot meet the reserve required for another data entry.", ""),
+		"The account cannot meet the reserve required for another data entry.",
+		"Each data entry is a subentry and locks 0.5 XLM of base reserve. Free up reserve or remove another entry, then retry."),
 	"ManageDataResultCodeManageDataInvalidName": bad(
-		"The data entry name was not valid.", ""),
+		"The data entry name was not valid.",
+		"Data entry names must be 1-64 bytes; an empty or over-long name is rejected before the entry is touched."),
 
 	// ---- Bump sequence ----------------------------------------------------
 	"BumpSequenceResultCodeBumpSequenceSuccess": ok("The sequence number was bumped."),

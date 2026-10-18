@@ -720,6 +720,30 @@ The rest of `explain.go` uses the concrete SDK types, because
 envelopes. Using them is both clearer and more correct than re-deriving that
 logic from the tree.
 
+## ManageData failure diagnostics
+
+A `manage_data` result code says what went wrong but not which entry it was
+about: the entry key lives only in the envelope, not in the result. When an
+envelope is paired with its result, `attachResult` therefore receives the
+envelope's operation list and calls `withOperationContext`, which resolves the
+argument-specific detail and stores it on `Reason.Context`:
+
+| Result code | Context resolved from the envelope |
+| --- | --- |
+| `manage_data_low_reserve` | The entry key, plus the base reserve that one more subentry locks: **0.5 XLM per subentry** |
+| `manage_data_name_not_found` | The key the delete targeted, and that nothing exists under it |
+| `manage_data_invalid_name` | The rejected name and the 1–64 byte rule |
+
+Context is additive. `ExplainCode` still returns the same static `Reason` from
+the table in `reason.go`, so result-only explanations, `ReasonByCode` and every
+existing consumer keep working unchanged; `--json` simply gains an optional
+`context` field, and the text and Markdown formatters print it beside the
+operation result.
+
+The reserve figure is a documented constant, not a network lookup: lens is
+offline-first and never queries ledger parameters, so 0.5 XLM (the public
+network default) is stated explicitly rather than derived at runtime.
+
 ## Reason lookup table (ReasonByCode)
 
 Downstream consumers (such as `focus` and automated diagnostic linters) frequently

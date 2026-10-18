@@ -141,7 +141,7 @@ func explainEnvelope(env *xdr.TransactionEnvelope, res *xdr.TransactionResult) (
 	}
 
 	s.Kind = "transaction"
-	if err := attachResult(s, res); err != nil {
+	if err := attachResult(s, res, env.Operations()); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -152,7 +152,8 @@ func explainEnvelope(env *xdr.TransactionEnvelope, res *xdr.TransactionResult) (
 // the outcome is populated.
 func explainResult(res *xdr.TransactionResult) (*Summary, error) {
 	s := &Summary{Kind: "transaction_result"}
-	if err := attachResult(s, res); err != nil {
+	// There is no envelope, so argument-specific context cannot be resolved.
+	if err := attachResult(s, res, nil); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -160,7 +161,11 @@ func explainResult(res *xdr.TransactionResult) (*Summary, error) {
 
 // attachResult resolves a TransactionResult into an Outcome and pairs each
 // operation result with its operation.
-func attachResult(s *Summary, res *xdr.TransactionResult) error {
+//
+// ops is the envelope's operation list, or nil when only a result was given.
+// It is used to resolve argument-specific diagnostics that the result code
+// cannot carry on its own, such as the manage_data entry key.
+func attachResult(s *Summary, res *xdr.TransactionResult, ops []xdr.Operation) error {
 	s.FeeCharged = int64(res.FeeCharged)
 
 	code, err := resultCodeName(res)
@@ -183,6 +188,9 @@ func attachResult(s *Summary, res *xdr.TransactionResult) error {
 	if ok {
 		for i, opRes := range opResults {
 			reason := explainOperationResult(opRes)
+			if i < len(ops) {
+				reason = withOperationContext(reason, ops[i])
+			}
 			if !reason.Success {
 				outcome.FailedOps = append(outcome.FailedOps, i)
 			}
@@ -261,6 +269,43 @@ func innerResultCodeName(res *xdr.TransactionResult) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// manageDataReservePerEntry is the base reserve each data entry locks on the
+// public network. Lens is offline-first and never queries network parameters,
+// so this is the well-known default rather than a live value.
+const manageDataReservePerEntry = "0.5 XLM"
+
+// withOperationContext adds argument-specific detail to a result code when the
+// envelope carries enough information to produce it.
+//
+// A manage_data result code says what went wrong but not which entry it was
+// about. The entry key lives only in the envelope, so it is resolved here and
+// attached to the Reason rather than folded into the static reason table,
+// which has no access to the operation.
+func withOperationContext(r Reason, op xdr.Operation) Reason {
+	if op.Body.Type != xdr.OperationTypeManageData {
+		return r
+	}
+	md, ok := op.Body.GetManageDataOp()
+	if !ok {
+		return r
+	}
+	key := string(md.DataName)
+
+	switch r.Constant {
+	case "ManageDataResultCodeManageDataNameNotFound":
+		r.Context = fmt.Sprintf(
+			"the account has no data entry named %q, so there is nothing to delete; it may already have been removed.", key)
+	case "ManageDataResultCodeManageDataLowReserve":
+		r.Context = fmt.Sprintf(
+			"data entry %q adds one subentry, and each subentry locks %s of reserve; the account cannot lock another %s.",
+			key, manageDataReservePerEntry, manageDataReservePerEntry)
+	case "ManageDataResultCodeManageDataInvalidName":
+		r.Context = fmt.Sprintf(
+			"the data entry name %q is not valid: names must be 1-64 bytes, and an empty name cannot be set or deleted.", key)
+	}
+	return r
 }
 
 func envelopeHeadline(s *Summary) string {
@@ -422,10 +467,11 @@ func describeOperation(op xdr.Operation) string {
 		if !ok {
 			break
 		}
+		dataName := string(o.DataName)
 		if o.DataValue == nil {
-			return fmt.Sprintf("delete data entry %q", string(o.DataName))
+			return fmt.Sprintf("delete data entry %q", dataName)
 		}
-		return fmt.Sprintf("set data entry %q (%d bytes)", string(o.DataName), len(*o.DataValue))
+		return fmt.Sprintf("set data entry %q (%d bytes)", dataName, len(*o.DataValue))
 
 	case xdr.OperationTypeSetOptions:
 		o, ok := body.GetSetOptionsOp()

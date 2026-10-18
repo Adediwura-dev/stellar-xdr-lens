@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
 
@@ -352,5 +354,361 @@ func TestExplainCodeNeverRestatesTheConstant(t *testing.T) {
 		if strings.EqualFold(strings.ReplaceAll(got.Summary, " ", ""), got.Code) {
 			t.Errorf("ExplainCode(%q).Summary merely restates the code", c)
 		}
+	}
+}
+
+// manageDataEnvelope builds a one-operation envelope for a manage_data set
+// (value non-nil) or delete (value nil).
+func manageDataEnvelope(t *testing.T, key string, value *xdr.DataValue) *xdr.TransactionEnvelope {
+	t.Helper()
+	return &xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: mustMuxed(t, testSource),
+				Fee:           xdr.Uint32(100),
+				SeqNum:        xdr.SequenceNumber(12345),
+				Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+				Operations: []xdr.Operation{{
+					Body: xdr.OperationBody{
+						Type:         xdr.OperationTypeManageData,
+						ManageDataOp: &xdr.ManageDataOp{DataName: xdr.String64(key), DataValue: value},
+					},
+				}},
+			},
+		},
+	}
+}
+
+// manageDataFailureResult builds a failed transaction result whose single
+// manage_data operation produced code.
+func manageDataFailureResult(code xdr.ManageDataResultCode) *xdr.TransactionResult {
+	results := []xdr.OperationResult{{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type:             xdr.OperationTypeManageData,
+			ManageDataResult: &xdr.ManageDataResult{Code: code},
+		},
+	}}
+	return &xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxFailed,
+			Results: &results,
+		},
+	}
+}
+
+func explainSyntheticPair(t *testing.T, env, res any) *lens.Summary {
+	t.Helper()
+	envVal, err := lens.Decode(mustMarshal(t, env))
+	if err != nil {
+		t.Fatalf("Decode(envelope) error = %v", err)
+	}
+	resVal, err := lens.Decode(mustMarshal(t, res))
+	if err != nil {
+		t.Fatalf("Decode(result) error = %v", err)
+	}
+	got, err := lens.ExplainPair(envVal, resVal)
+	if err != nil {
+		t.Fatalf("ExplainPair() error = %v", err)
+	}
+	return got
+}
+
+// TestExplainManageDataFailureContext covers the diagnostics that a result
+// code alone cannot carry: the entry key from the envelope, and the reserve a
+// new subentry locks.
+func TestExplainManageDataFailureContext(t *testing.T) {
+	t.Parallel()
+
+	setValue := xdr.DataValue([]byte("enabled"))
+
+	tests := []struct {
+		name        string
+		code        xdr.ManageDataResultCode
+		value       *xdr.DataValue
+		wantCode    string
+		wantContext []string
+		wantHint    string
+	}{
+		{
+			name:        "low reserve names the key and the 0.5 XLM subentry reserve",
+			code:        xdr.ManageDataResultCodeManageDataLowReserve,
+			value:       &setValue,
+			wantCode:    "manage_data_low_reserve",
+			wantContext: []string{`"erc20:config"`, "0.5 XLM", "subentry", "reserve"},
+			wantHint:    "0.5 XLM",
+		},
+		{
+			name:        "name not found names the entry being deleted",
+			code:        xdr.ManageDataResultCodeManageDataNameNotFound,
+			value:       nil,
+			wantCode:    "manage_data_name_not_found",
+			wantContext: []string{`"erc20:config"`, "nothing to delete"},
+		},
+		{
+			name:        "invalid name states the 1-64 byte limit",
+			code:        xdr.ManageDataResultCodeManageDataInvalidName,
+			value:       &setValue,
+			wantCode:    "manage_data_invalid_name",
+			wantContext: []string{`"erc20:config"`, "1-64 bytes"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := manageDataEnvelope(t, "erc20:config", tc.value)
+			got := explainSyntheticPair(t, env, manageDataFailureResult(tc.code))
+
+			if len(got.Operations) != 1 {
+				t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+			}
+			op := got.Operations[0]
+			if op.Type != "manage_data" {
+				t.Fatalf("Operations[0].Type = %q, want manage_data", op.Type)
+			}
+			if op.Result == nil {
+				t.Fatal("Operations[0].Result is nil")
+			}
+			if op.Result.Code != tc.wantCode {
+				t.Errorf("Result.Code = %q, want %q", op.Result.Code, tc.wantCode)
+			}
+			if op.Result.Context == "" {
+				t.Fatal("Result.Context is empty, want entry-key diagnostics from the envelope")
+			}
+			for _, want := range tc.wantContext {
+				if !strings.Contains(op.Result.Context, want) {
+					t.Errorf("Result.Context = %q, want it to contain %q", op.Result.Context, want)
+				}
+			}
+			if tc.wantHint != "" && !strings.Contains(op.Result.Hint, tc.wantHint) {
+				t.Errorf("Result.Hint = %q, want it to contain %q", op.Result.Hint, tc.wantHint)
+			}
+
+			// The headline is the first thing a developer reads, so it must
+			// already name the entry the failure was about.
+			if !strings.Contains(got.Headline, "erc20:config") {
+				t.Errorf("Headline = %q, want it to name the entry key", got.Headline)
+			}
+		})
+	}
+}
+
+// TestExplainManageDataResultOnlyHasNoContext pins the offline-first contract:
+// without an envelope the key simply is not available, and lens must not invent
+// one.
+func TestExplainManageDataResultOnlyHasNoContext(t *testing.T) {
+	t.Parallel()
+
+	resVal, err := lens.Decode(mustMarshal(t, manageDataFailureResult(xdr.ManageDataResultCodeManageDataLowReserve)))
+	if err != nil {
+		t.Fatalf("Decode(result) error = %v", err)
+	}
+	got, err := lens.Explain(resVal)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+	if len(got.Operations) != 1 || got.Operations[0].Result == nil {
+		t.Fatalf("Operations = %+v, want one operation with a result", got.Operations)
+	}
+	if got.Operations[0].Result.Context != "" {
+		t.Errorf("Result.Context = %q, want empty without an envelope", got.Operations[0].Result.Context)
+	}
+}
+
+// TestExplainSecondaryDescriptions covers the describeOperation branches that
+// the common fixtures do not exercise: optional set-options fields, the
+// non-invoke Soroban host functions, and the v2 precondition extras.
+func TestExplainSecondaryDescriptions(t *testing.T) {
+	t.Parallel()
+
+	native := xdr.Asset{Type: xdr.AssetTypeAssetTypeNative}
+	hash := xdr.Hash{0x01}
+
+	tests := []struct {
+		name        string
+		op          xdr.Operation
+		cond        xdr.Preconditions
+		wantDetails []string
+		wantPrecond []string
+	}{
+		{
+			name: "set options with every field",
+			op: xdr.Operation{Body: xdr.OperationBody{
+				Type: xdr.OperationTypeSetOptions,
+				SetOptionsOp: &xdr.SetOptionsOp{
+					InflationDest: ptr(mustAccountID(t, testDest)),
+					ClearFlags:    ptr(xdr.Uint32(1)),
+					SetFlags:      ptr(xdr.Uint32(2)),
+					MasterWeight:  ptr(xdr.Uint32(3)),
+					LowThreshold:  ptr(xdr.Uint32(1)),
+					MedThreshold:  ptr(xdr.Uint32(2)),
+					HighThreshold: ptr(xdr.Uint32(3)),
+					HomeDomain:    ptr(xdr.String32("example.org")),
+				},
+			}},
+			wantDetails: []string{
+				"set inflation destination", "clear flags 1", "set flags 2",
+				"master weight 3", "low threshold 1", "medium threshold 2",
+				"high threshold 3", "home domain example.org",
+			},
+		},
+		{
+			name: "set options with no changes",
+			op: xdr.Operation{Body: xdr.OperationBody{
+				Type:         xdr.OperationTypeSetOptions,
+				SetOptionsOp: &xdr.SetOptionsOp{},
+			}},
+			wantDetails: []string{"set options (no changes)"},
+		},
+		{
+			name: "create contract host function",
+			op: xdr.Operation{Body: xdr.OperationBody{
+				Type: xdr.OperationTypeInvokeHostFunction,
+				InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
+					HostFunction: xdr.HostFunction{
+						Type: xdr.HostFunctionTypeHostFunctionTypeCreateContract,
+						CreateContract: &xdr.CreateContractArgs{
+							ContractIdPreimage: xdr.ContractIdPreimage{
+								Type:      xdr.ContractIdPreimageTypeContractIdPreimageFromAsset,
+								FromAsset: &native,
+							},
+							Executable: xdr.ContractExecutable{
+								Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+								WasmHash: &hash,
+							},
+						},
+					},
+				},
+			}},
+			wantDetails: []string{"create a contract instance"},
+		},
+		{
+			name: "upload contract wasm host function",
+			op: xdr.Operation{Body: xdr.OperationBody{
+				Type: xdr.OperationTypeInvokeHostFunction,
+				InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{
+					HostFunction: xdr.HostFunction{
+						Type: xdr.HostFunctionTypeHostFunctionTypeUploadContractWasm,
+						Wasm: &[]byte{0x00, 0x61},
+					},
+				},
+			}},
+			wantDetails: []string{"upload contract wasm (2 bytes)"},
+		},
+		{
+			name: "v2 preconditions extras",
+			op: xdr.Operation{Body: xdr.OperationBody{
+				Type:           xdr.OperationTypeBumpSequence,
+				BumpSequenceOp: &xdr.BumpSequenceOp{BumpTo: 1},
+			}},
+			cond: xdr.Preconditions{
+				Type: xdr.PreconditionTypePrecondV2,
+				V2: &xdr.PreconditionsV2{
+					LedgerBounds:    &xdr.LedgerBounds{MinLedger: 10, MaxLedger: 20},
+					MinSeqNum:       ptr(xdr.SequenceNumber(5)),
+					MinSeqAge:       xdr.Duration(60),
+					MinSeqLedgerGap: xdr.Uint32(2),
+					ExtraSigners: []xdr.SignerKey{{
+						Type:    xdr.SignerKeyTypeSignerKeyTypeEd25519,
+						Ed25519: &xdr.Uint256{0x01},
+					}},
+				},
+			},
+			wantPrecond: []string{
+				"ledger bounds 10..20",
+				"minimum sequence number 5",
+				"minimum sequence age 60s",
+				"minimum sequence ledger gap 2",
+				"1 extra signer(s) required",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cond := tc.cond
+			if cond.Type == xdr.PreconditionTypePrecondNone && cond.V2 == nil {
+				cond = noCond()
+			}
+			v, err := lens.DecodeAs(buildEnvelope(t, noMemo(), cond, tc.op), "TransactionEnvelope")
+			if err != nil {
+				t.Fatalf("DecodeAs() error = %v", err)
+			}
+			got, err := lens.Explain(v)
+			if err != nil {
+				t.Fatalf("Explain() error = %v", err)
+			}
+
+			if len(got.Operations) != 1 {
+				t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+			}
+			for _, want := range tc.wantDetails {
+				if !strings.Contains(got.Operations[0].Detail, want) {
+					t.Errorf("Detail = %q, want it to contain %q", got.Operations[0].Detail, want)
+				}
+			}
+			preconds := strings.Join(got.Preconds, "; ")
+			for _, want := range tc.wantPrecond {
+				if !strings.Contains(preconds, want) {
+					t.Errorf("Preconds = %q, want it to contain %q", preconds, want)
+				}
+			}
+		})
+	}
+}
+
+// TestExplainFailureContextIsOperationSpecific guards the switch that attaches
+// manage_data context: other operation types must be left untouched.
+func TestExplainFailureContextIsOperationSpecific(t *testing.T) {
+	t.Parallel()
+
+	env := &xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: mustMuxed(t, testSource),
+				Fee:           xdr.Uint32(100),
+				SeqNum:        xdr.SequenceNumber(12345),
+				Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+				Operations: []xdr.Operation{{
+					Body: xdr.OperationBody{
+						Type: xdr.OperationTypePayment,
+						PaymentOp: &xdr.PaymentOp{
+							Destination: mustMuxed(t, testSource),
+							Asset:       xdr.Asset{Type: xdr.AssetTypeAssetTypeNative},
+							Amount:      1,
+						},
+					},
+				}},
+			},
+		},
+	}
+	results := []xdr.OperationResult{{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type:          xdr.OperationTypePayment,
+			PaymentResult: &xdr.PaymentResult{Code: xdr.PaymentResultCodePaymentUnderfunded},
+		},
+	}}
+	res := &xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxFailed,
+			Results: &results,
+		},
+	}
+
+	got := explainSyntheticPair(t, env, res)
+	if len(got.Operations) != 1 || got.Operations[0].Result == nil {
+		t.Fatalf("Operations = %+v, want one operation with a result", got.Operations)
+	}
+	if got.Operations[0].Result.Context != "" {
+		t.Errorf("Result.Context = %q, want empty for a payment failure", got.Operations[0].Result.Context)
 	}
 }
