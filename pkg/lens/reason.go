@@ -452,15 +452,20 @@ var reasons = map[string]reasonText{
 	// ---- Trustline flags --------------------------------------------------
 	"SetTrustLineFlagsResultCodeSetTrustLineFlagsSuccess": ok("The trustline flags were updated."),
 	"SetTrustLineFlagsResultCodeSetTrustLineFlagsMalformed": bad(
-		"The flag change was structurally invalid.", ""),
+		"The flag change was structurally invalid.",
+		"Verify the asset is not native XLM and the issuer matches the operating account."),
 	"SetTrustLineFlagsResultCodeSetTrustLineFlagsNoTrustLine": bad(
-		"The target account has no trustline for this asset.", ""),
+		"The target account has no trustline for this asset.",
+		"The trustor must create a trustline via change_trust before flags can be updated."),
 	"SetTrustLineFlagsResultCodeSetTrustLineFlagsCantRevoke": bad(
-		"Authorisation cannot be revoked because the issuer is not auth-revocable.", ""),
+		"Authorisation cannot be revoked because the issuer is not auth-revocable.",
+		"The issuer account must have AUTH_REVOCABLE_FLAG set to revoke authorization on trustlines."),
 	"SetTrustLineFlagsResultCodeSetTrustLineFlagsInvalidState": bad(
-		"The requested combination of trustline flags is not valid.", ""),
+		"The requested combination of trustline flags is not valid.",
+		"Check that you are not setting and clearing conflicting flags simultaneously."),
 	"SetTrustLineFlagsResultCodeSetTrustLineFlagsLowReserve": bad(
-		"The change would take an account below its minimum reserve.", ""),
+		"The change would take an account below its minimum reserve.",
+		"Fund the account with additional XLM to satisfy the base reserve requirements."),
 
 	// ---- Liquidity pools --------------------------------------------------
 	"LiquidityPoolDepositResultCodeLiquidityPoolDepositSuccess": ok("The deposit was made."),

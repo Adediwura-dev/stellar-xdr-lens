@@ -346,6 +346,9 @@ $ lens diff --unordered-signers before.xdr after.xdr
 # Set-theoretic (Venn) difference of two Soroban ledger footprints
 $ lens diff --footprint before.env.xdr after.env.xdr
 
+# Ignore minor numeric noise (e.g. sequence numbers, timestamps, base fees) within a delta
+$ lens diff --diff-threshold 10 before.xdr after.xdr
+
 # Just the statistics: how many changes, of what kind, in which section
 $ lens diff --stats before.xdr after.xdr
 TransactionResult
@@ -353,6 +356,8 @@ TransactionResult
   FeeCharged: 1
   Result: 5
 ```
+
+`lens diff` also automatically normalizes binary data (such as Base64 vs Hex hashes and signatures), eliminating spurious diff lines when representations differ only by string encoding.
 
 `--stats` derives everything from an existing diff, so it stays deterministic
 and offline. It has a stable JSON form (`--stats --json`) with the total, the

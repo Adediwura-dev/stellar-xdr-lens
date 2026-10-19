@@ -31,6 +31,7 @@ func newDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comman
 		excludePaths     []string
 		context          int
 		sideWidth        int
+		diffThreshold    float64
 	)
 
 	cmd := &cobra.Command{
@@ -80,9 +81,13 @@ These are mutually exclusive with each other and with --json/--stats.`,
   lens diff --unified a.xdr b.xdr
   lens diff --side-by-side a.xdr b.xdr
   lens diff --stats before.xdr after.xdr
+  lens diff --diff-threshold 5 before.xdr after.xdr
   lens diff --exit-code a.xdr b.xdr   # non-zero when they differ`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if diffThreshold < 0 {
+				return fmt.Errorf("%w: --diff-threshold must be non-negative", lens.ErrInvalidArgument)
+			}
 			if err := validateDiffModes(asJSON, statsOnly, jsonPatch, unified, sideBySide, footprintMode); err != nil {
 				return err
 			}
@@ -114,6 +119,7 @@ These are mutually exclusive with each other and with --json/--stats.`,
 				Semantic:         semantic,
 				UnorderedSigners: unorderedSigners,
 				Filter:           filter,
+				Threshold:        diffThreshold,
 			})
 			if err != nil {
 				return err
@@ -234,6 +240,8 @@ These are mutually exclusive with each other and with --json/--stats.`,
 		"compare the Soroban ledger footprints of the two values as sets")
 	cmd.Flags().BoolVar(&statsOnly, "stats", false,
 		"print only the statistical summary of the diff")
+	cmd.Flags().Float64Var(&diffThreshold, "diff-threshold", 0,
+		"ignore scalar numeric differences below the given delta")
 	cmd.Flags().BoolVar(&exitDiff, "exit-code", false,
 		"exit with a non-zero status when the values differ")
 	cmd.Flags().BoolVarP(&quietMode, "quiet", "q", false,
