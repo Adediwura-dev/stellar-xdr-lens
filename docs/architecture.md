@@ -65,6 +65,7 @@ pkg/lens/              the library; this is the reusable surface
   bucket_entry.go      bucket list, tombstone and hot archive terminology
   scp.go               consensus node identity and pledge names
   state_archival.go    TTL expiry and eviction rendering
+  trustline.go           trustline flag names and liability amount fields
   account_extensions.go liabilities, sponsorship counters and sequence-ledger notes
   signer_thresholds.go  account threshold triplet, locked master, signer capacity
   data_entry.go        account data values: printable text vs hex
