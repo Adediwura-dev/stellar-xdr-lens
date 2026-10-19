@@ -52,8 +52,10 @@ func init() {
 	// Upgrade votes arrive as opaque UpgradeType blobs inside the SCP value.
 	// Each one is a serialized LedgerUpgrade; when it decodes, the note names
 	// the proposed parameter change and the raw bytes stay machine-readable.
+	// Register only the UpgradeType enricher so that decoding a raw
+	// LedgerUpgrade (DecodeAs "LedgerUpgrade") still exposes the union
+	// structure (Type plus arm) rather than collapsing it to a scalar note.
 	registerEnricher(reflect.TypeOf(xdr.UpgradeType{}), enrichUpgradeType)
-	registerEnricher(reflect.TypeOf(xdr.LedgerUpgrade{}), enrichLedgerUpgrade)
 }
 
 // protocolVersionNote renders a protocol version field as "protocol N", which
@@ -109,10 +111,19 @@ func enrichUpgradeType(rv reflect.Value) (string, any, bool) {
 		return "", nil, false
 	}
 	var upgrade xdr.LedgerUpgrade
-	if err := upgrade.UnmarshalBinary(raw); err != nil {
+	if err := xdr.SafeUnmarshal(raw, &upgrade); err != nil {
 		return "", nil, false
 	}
-	return describeLedgerUpgrade(&upgrade), raw, true
+	// Use the succinct ledgerUpgradeSummary for human-facing notes so that
+	// decoded StellarValue Upgrades read as compact parameter descriptions
+	// (e.g. "ledger flags 1"). Return the vote bytes as a hex string for
+	// Node.Value so list elements render as hex; callers that need the
+	// original blob can access the decoded container via the Value.Raw
+	// (the Value.Raw pointer returned by DecodeAs).
+	if note, ok := ledgerUpgradeSummary(upgrade); ok {
+		return note, hex.EncodeToString(raw), true
+	}
+	return "", nil, false
 }
 
 // enrichLedgerUpgrade renders an already-decoded LedgerUpgrade the same way
@@ -137,8 +148,8 @@ func describeLedgerUpgrade(u *xdr.LedgerUpgrade) string {
 		}
 	case xdr.LedgerUpgradeTypeLedgerUpgradeBaseFee:
 		if v, ok := u.GetNewBaseFee(); ok {
-			return "base fee " + amount.String(xdr.Int64(int64(v))) +
-				" XLM (" + strconv.FormatUint(uint64(v), 10) + " stroops)"
+			return fmt.Sprintf("base fee %s XLM (%d stroops)",
+				amount.String(xdr.Int64(int64(v))), v)
 		}
 	case xdr.LedgerUpgradeTypeLedgerUpgradeMaxTxSetSize:
 		if v, ok := u.GetNewMaxTxSetSize(); ok {
@@ -146,8 +157,8 @@ func describeLedgerUpgrade(u *xdr.LedgerUpgrade) string {
 		}
 	case xdr.LedgerUpgradeTypeLedgerUpgradeBaseReserve:
 		if v, ok := u.GetNewBaseReserve(); ok {
-			return "base reserve " + amount.String(xdr.Int64(int64(v))) +
-				" XLM (" + strconv.FormatUint(uint64(v), 10) + " stroops)"
+			return fmt.Sprintf("base reserve %s XLM (%d stroops)",
+				amount.String(xdr.Int64(int64(v))), v)
 		}
 	case xdr.LedgerUpgradeTypeLedgerUpgradeFlags:
 		if v, ok := u.GetNewFlags(); ok {
@@ -166,8 +177,10 @@ func describeLedgerUpgrade(u *xdr.LedgerUpgrade) string {
 			if err != nil {
 				id = hex.EncodeToString(k.ContractId[:])
 			}
-			return fmt.Sprintf("config upgrade %s (content %s)",
-				id, hex.EncodeToString(k.ContentHash[:]))
+			// Match the phrasing used elsewhere: "config upgrade set: contract X,
+			// content hash Y" so fixtures and human output stay consistent.
+			return fmt.Sprintf("config upgrade set: contract %s, content hash %s",
+					id, hex.EncodeToString(k.ContentHash[:]))
 		}
 	}
 	name := strings.TrimPrefix(u.Type.String(), "LedgerUpgradeTypeLedgerUpgrade")

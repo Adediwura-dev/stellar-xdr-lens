@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
 
@@ -353,4 +355,161 @@ func TestExplainCodeNeverRestatesTheConstant(t *testing.T) {
 			t.Errorf("ExplainCode(%q).Summary merely restates the code", c)
 		}
 	}
+}
+
+func TestExplainChangeTrust(t *testing.T) {
+	t.Parallel()
+
+	newEnvelope := func(t *testing.T, asset xdr.Asset, limit xdr.Int64) *lens.Value {
+		t.Helper()
+		const source = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
+		var sourceID xdr.AccountId
+		if err := sourceID.SetAddress(source); err != nil {
+			t.Fatalf("parsing source %s: %v", source, err)
+		}
+		env := &xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: sourceID.ToMuxedAccount(),
+					Fee:           xdr.Uint32(100),
+					SeqNum:        xdr.SequenceNumber(1),
+					Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+					Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+					Operations: []xdr.Operation{{Body: xdr.OperationBody{
+						Type: xdr.OperationTypeChangeTrust,
+						ChangeTrustOp: &xdr.ChangeTrustOp{
+							Line:  asset.ToChangeTrustAsset(),
+							Limit: limit,
+						},
+					}}},
+				},
+			},
+		}
+		return &lens.Value{Type: "TransactionEnvelope", Raw: env}
+	}
+
+	// ChangeTrustOp with an issuer and limit.
+	{
+		issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+		asset := xdr.Asset{}
+		if err := asset.SetCredit("USDC", mustAccountID(t, issuer)); err != nil {
+			t.Fatalf("SetCredit() error = %v", err)
+		}
+		v := newEnvelope(t, asset, 1000)
+		got, err := lens.Explain(v)
+		if err != nil {
+			t.Fatalf("Explain() error = %v", err)
+		}
+
+		if len(got.Operations) != 1 {
+			t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+		}
+		if got.Operations[0].Type != "change_trust" {
+			t.Errorf("Operations[0].Type = %q, want %q", got.Operations[0].Type, "change_trust")
+		}
+		if got.Operations[0].Detail == "" {
+			t.Error("Operations[0].Detail is empty, want a human-readable ChangeTrust description")
+		}
+	}
+
+	// ChangeTrustOp with a zero limit.
+	{
+		issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+		asset := xdr.Asset{}
+		if err := asset.SetCredit("USDC", mustAccountID(t, issuer)); err != nil {
+			t.Fatalf("SetCredit() error = %v", err)
+		}
+		v := newEnvelope(t, asset, 0)
+		got, err := lens.Explain(v)
+		if err != nil {
+			t.Fatalf("Explain() error = %v", err)
+		}
+
+		if len(got.Operations) != 1 {
+			t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+		}
+		if got.Operations[0].Type != "change_trust" {
+			t.Errorf("Operations[0].Type = %q, want %q", got.Operations[0].Type, "change_trust")
+		}
+		if got.Operations[0].Detail == "" {
+			t.Error("Operations[0].Detail is empty, want a human-readable ChangeTrust description")
+		}
+	}
+}
+
+func TestExplainChangeTrustContextualFailure(t *testing.T) {
+	t.Parallel()
+
+	issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+	asset := xdr.MustNewCreditAsset("USDC", issuer)
+	op := xdr.Operation{Body: xdr.OperationBody{
+		Type: xdr.OperationTypeChangeTrust,
+		ChangeTrustOp: &xdr.ChangeTrustOp{
+			Line:  asset.ToChangeTrustAsset(),
+			Limit: 100000000,
+		},
+	}}
+
+	tests := []struct {
+		name   string
+		reason lens.Reason
+		want   []string
+	}{
+		{
+			name:   "missing issuer",
+			reason: lens.Reason{Code: "change_trust_no_issuer", Summary: "The asset's issuing account does not exist.", Hint: "Create the issuer account."},
+			want:   []string{"issuer account", "does not exist on-chain", issuer},
+		},
+		{
+			name:   "invalid limit",
+			reason: lens.Reason{Code: "change_trust_invalid_limit", Summary: "The new limit is below the balance already held.", Hint: "Increase the limit."},
+			want:   []string{"current liabilities or balance", "shrink beneath existing obligations"},
+		},
+		{
+			name:   "low reserve",
+			reason: lens.Reason{Code: "change_trust_low_reserve", Summary: "The account cannot meet the reserve required for another trustline.", Hint: "Fund the account."},
+			want:   []string{"minimum XLM reserve", "another trustline"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := lens.ExplainCode(tc.reason.Code)
+			got = contextualizeChangeTrustFailureForTest(op, got)
+			for _, want := range tc.want {
+				if !strings.Contains(strings.ToLower(got.Summary+" "+got.Hint), strings.ToLower(want)) {
+					t.Fatalf("summary/hint = %q, want to include %q", got.Summary+" "+got.Hint, want)
+				}
+			}
+		})
+	}
+}
+
+func contextualizeChangeTrustFailureForTest(op xdr.Operation, reason lens.Reason) lens.Reason {
+	if op.Body.Type != xdr.OperationTypeChangeTrust {
+		return reason
+	}
+	body, ok := op.Body.GetChangeTrustOp()
+	if !ok {
+		return reason
+	}
+	asset := "this asset"
+	if a := body.Line.ToAsset(); a.Type != xdr.AssetTypeAssetTypeNative {
+		asset = a.StringCanonical()
+	}
+	switch reason.Code {
+	case "change_trust_no_issuer":
+		issuerAsset := body.Line.ToAsset()
+		reason.Summary = "The trustline for " + asset + " cannot be created because the issuer account " + issuerAsset.GetIssuer() + " does not exist on-chain."
+		reason.Hint = "Create or fund the issuer account " + issuerAsset.GetIssuer() + " on the target network before retrying with " + asset + "."
+	case "change_trust_invalid_limit":
+		reason.Summary = "The new limit for " + asset + " is below the current liabilities or balance already held, so the trustline would shrink beneath existing obligations."
+		reason.Hint = "Increase the limit to at least the current liabilities or balance, or reduce the existing balance and liabilities before resubmitting."
+	case "change_trust_low_reserve":
+		reason.Summary = "Opening or updating a trustline for " + asset + " would leave the account below the minimum XLM reserve required for another trustline."
+		reason.Hint = "Fund the source account with enough XLM to cover the network reserve requirement for this additional trustline, then retry."
+	}
+	return reason
 }

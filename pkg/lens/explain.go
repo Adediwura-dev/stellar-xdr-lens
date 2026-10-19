@@ -144,6 +144,14 @@ func explainEnvelope(env *xdr.TransactionEnvelope, res *xdr.TransactionResult) (
 	if err := attachResult(s, res); err != nil {
 		return nil, err
 	}
+	for i, op := range env.Operations() {
+		if i >= len(s.Operations) || s.Operations[i].Result == nil {
+			continue
+		}
+		reason := contextualizeChangeTrustFailure(op, *s.Operations[i].Result)
+		s.Operations[i].Result = &reason
+	}
+	s.Headline = resultHeadline(s, s.Outcome)
 	return s, nil
 }
 
@@ -623,4 +631,51 @@ func formatTime(unix int64) string {
 		return "0"
 	}
 	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+}
+
+func contextualizeChangeTrustFailure(op xdr.Operation, reason Reason) Reason {
+	if op.Body.Type != xdr.OperationTypeChangeTrust {
+		return reason
+	}
+	body, ok := op.Body.GetChangeTrustOp()
+	if !ok {
+		return reason
+	}
+	asset := changeTrustAssetLabel(body.Line)
+	if asset == "" {
+		asset = "this asset"
+	}
+
+	switch reason.Code {
+	case "change_trust_malformed":
+		reason.Summary = fmt.Sprintf("The ChangeTrust request for %s is malformed: the asset or limit is invalid.", asset)
+		reason.Hint = fmt.Sprintf("Check the asset and limit for %s before resubmitting; a valid ChangeTrust operation must identify a valid asset and a non-negative limit.", asset)
+	case "change_trust_no_issuer":
+		issuer := changeTrustIssuerLabel(body.Line)
+		if issuer == "" {
+			reason.Summary = fmt.Sprintf("The trustline for %s cannot be created because the issuing account does not exist on-chain.", asset)
+			reason.Hint = fmt.Sprintf("Create or fund the issuing account for %s on the target network, or switch to the correct network before retrying.", asset)
+			return reason
+		}
+		reason.Summary = fmt.Sprintf("The trustline for %s cannot be created because the issuer account %s does not exist on-chain.", asset, issuer)
+		reason.Hint = fmt.Sprintf("Create or fund the issuer account %s on the target network before retrying with %s.", issuer, asset)
+	case "change_trust_invalid_limit":
+		reason.Summary = fmt.Sprintf("The new limit for %s is below the current liabilities or balance already held, so the trustline would shrink beneath existing obligations.", asset)
+		reason.Hint = "Increase the limit to at least the current liabilities or balance, or reduce the existing balance and liabilities before resubmitting."
+	case "change_trust_low_reserve":
+		reason.Summary = fmt.Sprintf("Opening or updating a trustline for %s would leave the account below the minimum XLM reserve required for another trustline.", asset)
+		reason.Hint = "Fund the source account with enough XLM to cover the network reserve requirement for this additional trustline, then retry."
+	}
+	return reason
+}
+
+func changeTrustIssuerLabel(line xdr.ChangeTrustAsset) string {
+	if line.Type == xdr.AssetTypeAssetTypeNative || line.Type == xdr.AssetTypeAssetTypePoolShare {
+		return ""
+	}
+	asset := line.ToAsset()
+	if asset.Type == xdr.AssetTypeAssetTypeNative {
+		return ""
+	}
+	return asset.GetIssuer()
 }

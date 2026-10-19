@@ -1,6 +1,7 @@
 package lens
 
 import (
+	"encoding/hex"
 	"reflect"
 	"testing"
 
@@ -21,8 +22,8 @@ func TestEnrichUpgradeTypeRendersVotes(t *testing.T) {
 	if display != "protocol version 21" {
 		t.Errorf("display = %q, want %q", display, "protocol version 21")
 	}
-	if raw != "0000000100000015" {
-		t.Errorf("raw = %v, want the vote bytes in hex", raw)
+	if got, ok := raw.(string); !ok || got != hex.EncodeToString(versionVote) {
+		t.Errorf("raw = %v, want hex string of original vote bytes", raw)
 	}
 }
 
