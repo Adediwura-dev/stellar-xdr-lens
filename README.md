@@ -163,6 +163,24 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
+Claimable balances render their predicate trees as boolean expressions instead
+of nested union arms, and the balance id carries its claimant count and asset:
+
+```console
+$ lens decode --type ClaimableBalanceEntry "$BALANCE"
+ClaimableBalanceEntry
+├─ BalanceId: BAAEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQQSBM  3 claimants; asset USDC:GA2J…FHVAW
+├─ Claimants  [3]
+│  ├─ [0]
+│  │  └─ V0
+│  │     ├─ Destination: GAPB7YMUQ6MPQ23PTFDNBZP7HGGTZPI2DT5JJURUOIXNPLGHW2O3WYXZ
+│  │     └─ Predicate: before 2025-01-01T00:00:00Z
+│  └─ [2]
+│     └─ V0
+│        └─ Predicate: (before 2026-01-01T00:00:00Z or unconditional)
+└─ Asset: USDC:GA2J…FHVAW
+```
+
 `lens decode --type ContractDataEntry` decodes Soroban contract data and names
 its storage level. `persistent` and `temporary` come from the wire durability;
 instance storage keeps persistent durability on the wire and is recognised by
@@ -185,7 +203,10 @@ ContractDataEntry
 
 For an instance entry the same fields render as `Key: instance storage key`
 with `Durability: persistent`, which is what separates instance storage from an
-ordinary persistent entry.
+ordinary persistent entry. A contract instance's `Executable` also names its
+implementation — `wasm:<hex>` for a WASM module, `stellar asset contract
+(built-in token)` for the built-in token, and the owner plus tag for Protocol
+23 external references — instead of stopping at a union discriminant.
 
 `lens decode --type LiquidityPoolEntry` names the market a constant product
 pool trades and renders its share supply as pool share tokens, not lumens:

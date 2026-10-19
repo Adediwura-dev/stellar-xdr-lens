@@ -70,6 +70,7 @@ pkg/lens/              the library; this is the reusable surface
   data_entry.go        account data values: printable text vs hex
   survey.go            time-sliced survey command names and encrypted bodies
   contract_code.go     WASM section parsing: contract spec, env meta and meta
+  contract_executable.go contract executables: wasm hash, built-in token, external refs
   overlay.go           peer addresses, certificate keys, overlay message names
   tx_history.go        ledger-sequence field notes for history sets and batches
   asset_types.go       asset details and Stellar Asset Contract id derivation
@@ -499,8 +500,7 @@ ContractDataEntry
 └─ Val
    ├─ Type: ScValTypeScvContractInstance
    └─ Instance
-      └─ Executable
-         ... 1 more level(s) hidden
+      └─ Executable: deadbeef…0c0d  wasm:deadbeef…0c0d
 ```
 
 `ContractDataEntry` is registered (priority 5), so `lens decode --type
@@ -589,8 +589,9 @@ payloads; `--type LedgerUpgrade` pins the interpretation. Votes nested in a
 
 `fieldNotes` is the same idea for anything that is not an amount — a hint
 attached to a field rendered alongside it. `LedgerVersion: 22` becomes
-`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N`.
-Feature files register notes from `init`:
+`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N` plus
+an estimated close date (see the state archival section). Feature files
+register notes from `init`:
 
 ```go
 func init() {
