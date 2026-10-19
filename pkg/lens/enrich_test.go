@@ -271,16 +271,6 @@ func testAccountID(t *testing.T, addr string) xdr.AccountId {
 	return aid
 }
 
-// testCreditAsset builds a classic credit asset for the internal tests.
-func testCreditAsset(t *testing.T, code, issuer string) xdr.Asset {
-	t.Helper()
-	var a xdr.Asset
-	if err := a.SetCredit(code, testAccountID(t, issuer)); err != nil {
-		t.Fatalf("building asset %s: %v", code, err)
-	}
-	return a
-}
-
 const (
 	testClaimDestA  = "GAPB7YMUQ6MPQ23PTFDNBZP7HGGTZPI2DT5JJURUOIXNPLGHW2O3WYXZ"
 	testClaimDestB  = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
