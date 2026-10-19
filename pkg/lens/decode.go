@@ -72,6 +72,7 @@ var registry = []xdrType{
 	{"BucketEntry", func() any { return new(xdr.BucketEntry) }, 49},
 	{"BucketMetadata", func() any { return new(xdr.BucketMetadata) }, 48},
 	{"HotArchiveBucketEntry", func() any { return new(xdr.HotArchiveBucketEntry) }, 47},
+	{"StellarValue", func() any { return new(xdr.StellarValue) }, 47},
 	{"ScpEnvelope", func() any { return new(xdr.ScpEnvelope) }, 46},
 	{"ScpStatement", func() any { return new(xdr.ScpStatement) }, 44},
 	{"ScpQuorumSet", func() any { return new(xdr.ScpQuorumSet) }, 43},
@@ -118,6 +119,8 @@ var registry = []xdrType{
 	{"Operation", func() any { return new(xdr.Operation) }, 20},
 	{"OperationResult", func() any { return new(xdr.OperationResult) }, 19},
 	{"Memo", func() any { return new(xdr.Memo) }, 10},
+	// Ledger upgrades are commonly ambiguous with StellarMessage and Price.
+	{"LedgerUpgrade", func() any { return new(xdr.LedgerUpgrade) }, 38},
 	{"Asset", func() any { return new(xdr.Asset) }, 9},
 	{"Price", func() any { return new(xdr.Price) }, 8},
 	{"SignerKey", func() any { return new(xdr.SignerKey) }, 7},
