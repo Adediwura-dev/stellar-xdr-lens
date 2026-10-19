@@ -95,6 +95,9 @@ pkg/lens/              the library; this is the reusable surface
   upgrade_explain.go   protocol-version boundary correlation for failed results
   diff.go              structural path diff and bounded opt-in LCS alignment
   diff_filter.go       include/exclude path filtering for structural diffs
+  diff_redact.go       opt-in hash/signature/identifier redaction for diffs
+  encode.go            symmetric JSON/value -> base64 XDR encoder (inverse of decode)
+  roundtrip.go         decode -> encode -> decode property verification engine
   scval_diff.go        recursive ScVal comparison with canonical map-key matching
   semantic_diff.go     exact wide-integer and type-aware semantic comparison
   diff_stats.go        statistical summary of a diff: counts, sections, depth
@@ -213,6 +216,96 @@ only changes are excluded reports as equal, which is what makes
 it as `--include-paths` and `--exclude-paths` (comma-separated and
 repeatable), and the format-side `WithUnifiedFilter`/`WithSideBySideFilter`
 options apply the same selection to the line-based output.
+
+## Hash and signature redaction for structural diffs
+
+A rebuilt transaction or envelope is usually identical except for values that
+cannot be reproduced deterministically: transaction hashes, signatures and
+hints, and identifiers derived from them. `diff_redact.go` normalizes those
+values before the walk so `DiffWithOptions` reports only the differences a
+reviewer can act on.
+
+Redaction is opt-in through `DiffOptions.Redaction`, a `RedactionPolicy`:
+
+```go
+result, err := lens.DiffWithOptions(left, right, lens.DiffOptions{
+    Redaction: lens.RedactionPolicy{
+        Hashes:     true,
+        Signatures: true,
+        Fields:     []string{"PrevHash", "LedgerHash*"},
+    },
+})
+```
+
+`Hashes`, `Signatures` and `Identifiers` select categories by the decoded XDR
+type, not by a fixed path list. A `Hash` is recognized wherever it appears, a
+`Signature`/`SignatureHint` is recognized as a signature, and contract, pool
+and claimable-balance ids are recognized as derived identifiers. `Fields`
+adds name-based matching for values that are not self-describing, such as an
+anonymous byte array named `Hint`; a field pattern may be exact or use
+`path.Match` glob syntax. `RedactHashesAndSignatures()` is the convenience
+policy exposed by `lens diff --redact hashes,signatures`.
+
+The prepass deep-copies and normalizes the trees; the caller's `Value`s are
+never mutated. Each selected scalar is replaced with a stable placeholder
+(`<redacted hash>`, `<redacted signature>`, `<redacted identifier>` or
+`<redacted>`), and `DiffResult.Redacted` lists the normalized paths in
+first-seen order. Nothing is redacted silently: text output prints a redaction
+summary, and JSON output carries the same list in its `redacted` field. The CLI
+accepts repeatable `--redact` categories (`hashes`, `signatures`,
+`identifiers`, `all`) and repeatable `--redact-fields`; both are rejected with
+`--footprint`, which compares sets rather than hydrated values.
+
+## Symmetric JSON encoder and round-trip verification
+
+`encode.go` closes the loop opened by `decode`: it turns a decoded `Value`, or
+the stable JSON document `lens decode --json` emits, back into base64 XDR. The
+structural encoder walks the registered Go type rather than the JSON tree, so
+field names, union discriminants and enum values come from the generated XDR
+definitions rather than a hand-maintained schema.
+
+Two entry points cover the common cases:
+
+- `Encode(v)` re-serializes `v.Raw`, the concrete XDR value behind a decoded
+  tree. It is exact for every registered type and is the inverse of `Decode`.
+- `EncodeJSON(data)` / `EncodeJSONAs(typeName, data)` accept the stable
+  `{"type": ..., "value": ...}` document, a bare value with an explicit type,
+  or the simplified transaction-envelope and ScVal dialects. Documents with an
+  `xdr`, `base64`, `payload` or `raw` field pass through unchanged.
+
+The structural encoder understands the scalar forms the enrichers produce:
+StrKey accounts and contracts, canonical asset strings, `n/d` prices,
+`host:port` peer addresses, `A / B @ fee%` pool parameters, claimable-balance
+ids, named storage keys, wasm and external contract executables, hex or base64
+byte strings, and enum names or enriched labels. Derived annotations that the
+decoder appends (WASM sections, `Spec`, `EnvMeta`, `Meta`) are accepted and
+ignored because they are not XDR fields. Deliberately lossy renderings, notably
+`ClaimPredicate` expressions, return `ErrUnsupportedType` instead of inventing
+a value; callers that hold the decoded `Value` should use `Encode` for those.
+
+`roundtrip.go` turns the encoder contract into a property test that callers can
+run on their own payloads:
+
+```go
+report, err := lens.RoundTripBase64(payload, "TransactionEnvelope")
+if err != nil {
+    // The input could not be decoded or encoded at all.
+}
+if !report.OK() {
+    // report.Changes, report.BytesEqual and report.TreeEqual explain why.
+}
+```
+
+`RoundTripBinary` checks that re-serializing the decoded value reproduces the
+original bytes and tree. `RoundTripJSON` goes through the stable JSON document
+and `EncodeJSON` instead. `RunRoundTripSuite` runs a named set of cases, and
+`RoundTripRegistry` synthesizes a minimal value for every registered type and
+verifies it on the chosen route. Routes report `Skipped` with a reason for
+renderings that are intentionally lossy (claim predicates, and fields such as
+`PeerAddress.NumFailures` that the JSON contract does not carry). The engine is
+deterministic, offline and read-only.
+
+
 
 ## Unified, JSON Patch and side-by-side diff output
 
@@ -992,6 +1085,27 @@ ledger-header fixture and re-encodes its `LedgerVersion` as Protocols 20–23.
 Those cases deliberately keep the header's XDR shape and all other fields
 constant: they compare decoder cost across the version values, not historical
 wire-schema changes. No benchmark or library decode path makes network calls.
+
+Structural-diff benchmarks live in
+[`pkg/lens/diff_bench_test.go`](../pkg/lens/diff_bench_test.go). They cover
+deeply nested trees, the worst-case single change at the deepest leaf, wide
+lists with and without the opt-in LCS aligner, real ledger-close envelopes, and
+the redaction prepass:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'BenchmarkDiff' -benchmem
+```
+
+The same package verifies the encoder contract as a property: `roundtrip_test.go`
+runs every checked-in fixture through both `RoundTripBinary` and
+`RoundTripJSON`, and `RoundTripRegistry` synthesizes a minimal value for every
+registered type. Cases that cannot be represented by the stable JSON contract
+are asserted as skipped with a reason rather than silently passed. Run the
+property suite with the regular tests:
+
+```sh
+go test ./pkg/lens -run 'RoundTrip' -v
+```
 
 The suite deliberately targets properties that would break the tool if violated:
 

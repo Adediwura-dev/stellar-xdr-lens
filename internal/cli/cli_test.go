@@ -3,6 +3,7 @@ package cli_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1069,6 +1070,66 @@ func TestEncodeCommand(t *testing.T) {
 		_, _, err := run(t, "", "encode", "--strict", badJSON)
 		if err == nil {
 			t.Fatalf("expected strict validation error")
+		}
+	})
+
+	t.Run("encode_decode_document", func(t *testing.T) {
+		// The document decode emits must encode back to the canonical XDR.
+		document := `{"type":"Price","value":"7/3 (= 2.3333333)"}`
+		stdout, _, err := run(t, "", "encode", document)
+		if err != nil {
+			t.Fatalf("encode document failed: %v", err)
+		}
+		if got, want := strings.TrimSpace(stdout), fixture(t, "price"); got != want {
+			t.Errorf("encode document = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("encode_structural_value", func(t *testing.T) {
+		// A malformed price has no enriched rendering, so decode emits the
+		// struct fields; the encoder must reproduce them.
+		document := `{"type":"Price","value":{"N":1,"D":0}}`
+		stdout, _, err := run(t, "", "encode", document)
+		if err != nil {
+			t.Fatalf("encode structural value failed: %v", err)
+		}
+		if got, want := strings.TrimSpace(stdout), fixture(t, "price_zero"); got != want {
+			t.Errorf("encode structural value = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("encode_explicit_type", func(t *testing.T) {
+		document := `{"type":"Price","value":"7/3 (= 2.3333333)"}`
+		stdout, _, err := run(t, "", "encode", "--type", "Price", document)
+		if err != nil {
+			t.Fatalf("encode --type failed: %v", err)
+		}
+		if got, want := strings.TrimSpace(stdout), fixture(t, "price"); got != want {
+			t.Errorf("encode --type = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("encode_unknown_type", func(t *testing.T) {
+		_, _, err := run(t, "", "encode", "--type", "NotAType", `{}`)
+		if err == nil {
+			t.Fatal("expected an unknown-type error")
+		}
+		if !errors.Is(err, lens.ErrUnknownType) {
+			t.Errorf("error = %v, want ErrUnknownType", err)
+		}
+	})
+
+	t.Run("encode_decode_pipeline", func(t *testing.T) {
+		decoded, _, err := run(t, "", "decode", "--json", fixture(t, "ledger_header"))
+		if err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		encoded, _, err := run(t, decoded, "encode", "-")
+		if err != nil {
+			t.Fatalf("encode failed: %v", err)
+		}
+		if got, want := strings.TrimSpace(encoded), fixture(t, "ledger_header"); got != want {
+			t.Errorf("decode|encode pipeline = %s, want %s", got, want)
 		}
 	})
 }
