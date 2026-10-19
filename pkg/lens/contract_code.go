@@ -215,6 +215,10 @@ func readU32(b []byte) (uint32, int, error) {
 
 func init() {
 	nodeHooks[reflect.TypeOf(xdr.ContractCodeEntry{})] = decorateContractCode
+	// Spec, EnvMeta and Meta are parsed from the Code bytes and appended to
+	// the decoded tree; they are not XDR fields, so the JSON encoder ignores
+	// them rather than treating them as unknown keys.
+	registerDerivedNodeFields(reflect.TypeOf(xdr.ContractCodeEntry{}), "Spec", "EnvMeta", "Meta")
 }
 
 // decorateContractCode attaches the parsed metadata to a decoded
