@@ -66,6 +66,7 @@ pkg/lens/              the library; this is the reusable surface
   scp.go               consensus node identity and pledge names
   state_archival.go    TTL expiry and eviction rendering
   account_extensions.go liabilities, sponsorship counters and sequence-ledger notes
+  signer_thresholds.go  account threshold triplet, locked master, signer capacity
   data_entry.go        account data values: printable text vs hex
   survey.go            time-sliced survey command names and encrypted bodies
   contract_code.go     WASM section parsing: contract spec, env meta and meta
