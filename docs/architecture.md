@@ -79,7 +79,7 @@ pkg/lens/              the library; this is the reusable surface
   coerce.go            permissive type coercion & number parsing (stringified numbers, hex, assets)
   scval_encode.go      ScVal constructor from intuitive JSON literals
   tx_builder.go        TransactionEnvelope builder from JSON spec
-  explain.go           Summary, Outcome, per-operation descriptions
+  explain.go           Summary, Outcome, per-operation descriptions and failure deepening
   reason.go            all 208 result codes → plain English
   reason_lookup.go     O(1) short code lookup table (ReasonByCode)
   protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
@@ -722,6 +722,32 @@ The rest of `explain.go` uses the concrete SDK types, because
 `Preconditions`, `IsFeeBump`) that already normalise across v0, v1 and fee-bump
 envelopes. Using them is both clearer and more correct than re-deriving that
 logic from the tree.
+
+### Deepening failures with the operation body
+
+[`reason.go`](../pkg/lens/reason.go) explains every result code on its own.
+Some failures deserve more. When an envelope is paired with its result,
+`attachResult` hands each failed operation's reason to
+`deepenOperationFailure`, which rewrites only the summary and hint for codes
+whose cause is provable from the operation's own parameters:
+
+- **`set_options`**: which threshold weight exceeded 255, which flag bit is
+  both set and cleared, which unrecognised bits were submitted, whether the
+  signer is the source account itself (resolved through any operation-level
+  source override), and whether a new signer subentry outran the account's
+  reserve. Every condition mirrors stellar-core's `doCheckValid`, which checks
+  them from the operation body alone.
+- **`liquidity_pool_deposit` / `liquidity_pool_withdraw`**: slippage against
+  the accepted price window (flagging an exact-ratio window and amounts that
+  already sit outside it), which deposit parameter is malformed, and how the
+  requested amounts map to `underfunded`, `pool_full`, `line_full` and
+  `under_minimum`.
+
+It never touches `Code` or `Constant`, never invents ledger state, and a code
+it cannot pin down keeps the generic per-code text — a result explained
+without its envelope produces the same explanations as before. All analysis is
+pure arithmetic on supplied XDR (exact `big.Int` for price comparisons): no
+network calls, deterministic output.
 
 ## Reason lookup table (ReasonByCode)
 

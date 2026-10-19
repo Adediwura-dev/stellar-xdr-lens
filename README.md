@@ -121,8 +121,14 @@ Outcome
     → Check the per-operation results: the transaction itself is fine, the failure is inside an operation.
 ```
 
-All 208 protocol result codes have a written explanation. Use `--fail-on-error`
-to exit non-zero when the transaction failed, which makes this usable as a CI gate.
+All 208 protocol result codes have a written explanation. When an envelope is
+paired with its result, `set_options` and liquidity-pool failures are also
+diagnosed from the operation's own parameters: which threshold weight exceeded
+255, which flag bit is contradictory or unrecognised, whether the signer is
+the source account itself, whether the pool's price bounds left any room for
+slippage, and which deposit or withdrawal bound is malformed. Use
+`--fail-on-error` to exit non-zero when the transaction failed, which makes
+this usable as a CI gate.
 
 For a GitHub-flavored Markdown report with transaction details and one row per
 operation, add `--markdown`:
