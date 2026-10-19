@@ -588,8 +588,9 @@ payloads; `--type LedgerUpgrade` pins the interpretation. Votes nested in a
 
 `fieldNotes` is the same idea for anything that is not an amount — a hint
 attached to a field rendered alongside it. `LedgerVersion: 22` becomes
-`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N`.
-Feature files register notes from `init`:
+`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N` plus
+an estimated close date (see the state archival section). Feature files
+register notes from `init`:
 
 ```go
 func init() {
