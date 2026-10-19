@@ -1,7 +1,6 @@
 package lens_test
 
 import (
-	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -219,12 +218,12 @@ func TestLedgerHeaderFlagsAndUpgradeVotes(t *testing.T) {
 	if note := upgrades.Children[0].Note; note != "protocol version 23" {
 		t.Errorf("Upgrades[0] Note = %q, want %q", note, "protocol version 23")
 	}
-	if note := upgrades.Children[1].Note; note != "base reserve 10000000 stroops (1.0000000 XLM)" {
+	if note := upgrades.Children[1].Note; note != "base reserve 1.0000000 XLM (10000000 stroops)" {
 		t.Errorf("Upgrades[1] Note = %q, want the base reserve proposal", note)
 	}
 
 	// The raw vote bytes remain available for machine-readable output.
-	if got, ok := upgrades.Children[0].Value.(string); !ok || got != hex.EncodeToString(versionBlob) {
+	if b, ok := upgrades.Children[0].Value.(xdr.UpgradeType); !ok || string(b) != string(versionBlob) {
 		t.Errorf("Upgrades[0] Value = %v, want the original upgrade blob", upgrades.Children[0].Value)
 	}
 }
