@@ -1,14 +1,10 @@
 package lens
 
 import (
-	"encoding/hex"
-	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 
-	"github.com/stellar/go-stellar-sdk/amount"
-	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -48,12 +44,6 @@ func init() {
 	// Liquidity-pool control flags live in the V1 header extension. The
 	// containing type is keyed so other Flags fields stay untouched.
 	registerFieldNote(reflect.TypeOf(xdr.LedgerHeaderExtensionV1{}), "Flags", ledgerHeaderFlagNote)
-
-	// Upgrade votes arrive as opaque UpgradeType blobs inside the SCP value.
-	// Each one is a serialized LedgerUpgrade; when it decodes, the note names
-	// the proposed parameter change and the raw bytes stay machine-readable.
-	registerEnricher(reflect.TypeOf(xdr.UpgradeType{}), enrichUpgradeType)
-	registerEnricher(reflect.TypeOf(xdr.LedgerUpgrade{}), enrichLedgerUpgrade)
 }
 
 // protocolVersionNote renders a protocol version field as "protocol N", which
@@ -94,85 +84,4 @@ func ledgerHeaderFlagNote(rv reflect.Value) (string, bool) {
 		return "", false
 	}
 	return strings.Join(names, " | "), true
-}
-
-// enrichUpgradeType decodes one opaque upgrade vote into the LedgerUpgrade it
-// proposes. Votes that are empty or do not parse as a known upgrade decline,
-// leaving the generic hex rendering in place so a malformed proposal is still
-// visible rather than silently dropped.
-func enrichUpgradeType(rv reflect.Value) (string, any, bool) {
-	raw, ok := rv.Interface().(xdr.UpgradeType)
-	if !ok {
-		return "", nil, false
-	}
-	if len(raw) == 0 {
-		return "", nil, false
-	}
-	var upgrade xdr.LedgerUpgrade
-	if err := upgrade.UnmarshalBinary(raw); err != nil {
-		return "", nil, false
-	}
-	return describeLedgerUpgrade(&upgrade), raw, true
-}
-
-// enrichLedgerUpgrade renders an already-decoded LedgerUpgrade the same way
-// as one unwrapped from an opaque vote, so the two paths never disagree.
-func enrichLedgerUpgrade(rv reflect.Value) (string, any, bool) {
-	upgrade, ok := rv.Interface().(xdr.LedgerUpgrade)
-	if !ok {
-		return "", nil, false
-	}
-	return describeLedgerUpgrade(&upgrade), upgrade, true
-}
-
-// describeLedgerUpgrade names the parameter a LedgerUpgrade proposes, with
-// stroop amounts rendered as decimals for the two fee-like parameters. An
-// arm whose payload is missing or a type that carries no short rendering
-// falls back to the upgrade's snake-case name rather than guessing.
-func describeLedgerUpgrade(u *xdr.LedgerUpgrade) string {
-	switch u.Type {
-	case xdr.LedgerUpgradeTypeLedgerUpgradeVersion:
-		if v, ok := u.GetNewLedgerVersion(); ok {
-			return "protocol version " + strconv.FormatUint(uint64(v), 10)
-		}
-	case xdr.LedgerUpgradeTypeLedgerUpgradeBaseFee:
-		if v, ok := u.GetNewBaseFee(); ok {
-			return "base fee " + amount.String(xdr.Int64(int64(v))) +
-				" XLM (" + strconv.FormatUint(uint64(v), 10) + " stroops)"
-		}
-	case xdr.LedgerUpgradeTypeLedgerUpgradeMaxTxSetSize:
-		if v, ok := u.GetNewMaxTxSetSize(); ok {
-			return "max tx set size " + strconv.FormatUint(uint64(v), 10)
-		}
-	case xdr.LedgerUpgradeTypeLedgerUpgradeBaseReserve:
-		if v, ok := u.GetNewBaseReserve(); ok {
-			return "base reserve " + amount.String(xdr.Int64(int64(v))) +
-				" XLM (" + strconv.FormatUint(uint64(v), 10) + " stroops)"
-		}
-	case xdr.LedgerUpgradeTypeLedgerUpgradeFlags:
-		if v, ok := u.GetNewFlags(); ok {
-			if names := ledgerHeaderFlagNames(v); len(names) > 0 {
-				return "flags " + strings.Join(names, " | ")
-			}
-			return "flags " + strconv.FormatUint(uint64(v), 10)
-		}
-	case xdr.LedgerUpgradeTypeLedgerUpgradeMaxSorobanTxSetSize:
-		if v, ok := u.GetNewMaxSorobanTxSetSize(); ok {
-			return "max soroban tx set size " + strconv.FormatUint(uint64(v), 10)
-		}
-	case xdr.LedgerUpgradeTypeLedgerUpgradeConfig:
-		if k, ok := u.GetNewConfig(); ok {
-			id, err := strkey.Encode(strkey.VersionByteContract, k.ContractId[:])
-			if err != nil {
-				id = hex.EncodeToString(k.ContractId[:])
-			}
-			return fmt.Sprintf("config upgrade %s (content %s)",
-				id, hex.EncodeToString(k.ContentHash[:]))
-		}
-	}
-	name := strings.TrimPrefix(u.Type.String(), "LedgerUpgradeTypeLedgerUpgrade")
-	if name == "" {
-		return "upgrade type " + strconv.FormatInt(int64(u.Type), 10)
-	}
-	return "upgrade " + toSnake(name)
 }
