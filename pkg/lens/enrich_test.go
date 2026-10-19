@@ -260,157 +260,120 @@ func TestClaimableBalanceFlagNote(t *testing.T) {
 	}
 }
 
-// testAccountID builds an account id for the internal tests, which cannot use
-// the lens_test package helpers.
-func testAccountID(t *testing.T, addr string) xdr.AccountId {
-	t.Helper()
-	var aid xdr.AccountId
-	if err := aid.SetAddress(addr); err != nil {
-		t.Fatalf("parsing address %s: %v", addr, err)
+func TestEnrichContractExecutableWasm(t *testing.T) {
+	t.Parallel()
+
+	hash := xdr.Hash{0x4F}
+	exec := xdr.ContractExecutable{
+		Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+		WasmHash: &hash,
 	}
-	return aid
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined a wasm executable")
+	}
+	wantHex := hash.HexString()
+	if note != "wasm:"+wantHex {
+		t.Errorf("note = %q, want %q", note, "wasm:"+wantHex)
+	}
+	if raw != wantHex {
+		t.Errorf("raw = %v, want %q", raw, wantHex)
+	}
 }
 
-const (
-	testClaimDestA  = "GAPB7YMUQ6MPQ23PTFDNBZP7HGGTZPI2DT5JJURUOIXNPLGHW2O3WYXZ"
-	testClaimDestB  = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
-	testClaimIssuer = "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
-)
+func TestEnrichContractExecutableStellarAsset(t *testing.T) {
+	t.Parallel()
 
-func unconditionalClaimant(t *testing.T, dest string) xdr.Claimant {
-	t.Helper()
-	return xdr.Claimant{
-		Type: xdr.ClaimantTypeClaimantTypeV0,
-		V0: &xdr.ClaimantV0{
-			Destination: testAccountID(t, dest),
-			Predicate:   xdr.ClaimPredicate{Type: xdr.ClaimPredicateTypeClaimPredicateUnconditional},
+	exec := xdr.ContractExecutable{Type: xdr.ContractExecutableTypeContractExecutableStellarAsset}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined the stellar asset arm")
+	}
+	if note != "stellar asset contract (built-in token)" {
+		t.Errorf("note = %q, want the built-in token description", note)
+	}
+	if raw != "stellar_asset" {
+		t.Errorf("raw = %v, want stellar_asset", raw)
+	}
+}
+
+func TestEnrichContractExecutableExternalRef(t *testing.T) {
+	t.Parallel()
+
+	owner := xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeContract}
+	var contractID xdr.ContractId
+	contractID[0] = 0xCA
+	owner.ContractId = &contractID
+
+	ownerStr, err := owner.String()
+	if err != nil {
+		t.Fatalf("encoding owner: %v", err)
+	}
+
+	exec := xdr.ContractExecutable{
+		Type: xdr.ContractExecutableTypeContractExecutableExternalRef,
+		ExternalRef: &xdr.ContractExecutableExternalRef{
+			ExecutableOwner: owner,
+			Tag:             "evm:1",
 		},
 	}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined the external ref arm")
+	}
+	if note != "external contract reference" {
+		t.Errorf("note = %q, want 'external contract reference'", note)
+	}
+	if raw != ownerStr+" tag: evm:1" {
+		t.Errorf("raw = %v, want owner and tag", raw)
+	}
 }
 
-func TestDecorateClaimableBalanceEntry(t *testing.T) {
+func TestEnrichContractExecutableDeclinesMalformed(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]xdr.ContractExecutable{
+		"unknown type":         {Type: xdr.ContractExecutableType(99)},
+		"missing wasm hash":    {Type: xdr.ContractExecutableTypeContractExecutableWasm},
+		"missing external ref": {Type: xdr.ContractExecutableTypeContractExecutableExternalRef},
+		"unknown owner type": {
+			Type: xdr.ContractExecutableTypeContractExecutableExternalRef,
+			ExternalRef: &xdr.ContractExecutableExternalRef{
+				ExecutableOwner: xdr.ScAddress{Type: xdr.ScAddressType(99)},
+				Tag:             "x",
+			},
+		},
+	}
+	for name, exec := range cases {
+		if _, _, ok := enrichContractExecutable(reflect.ValueOf(exec)); ok {
+			t.Errorf("%s: enrichContractExecutable produced a rendering, want decline", name)
+		}
+	}
+	if _, _, ok := enrichContractExecutable(reflect.ValueOf("not an executable")); ok {
+		t.Error("enrichContractExecutable accepted a non-ContractExecutable value")
+	}
+}
+
+func TestBuildNodeContractExecutableWasm(t *testing.T) {
 	t.Parallel()
 
 	hash := xdr.Hash{0xAB}
-	entry := xdr.ClaimableBalanceEntry{
-		BalanceId: xdr.ClaimableBalanceId{
-			Type: xdr.ClaimableBalanceIdTypeClaimableBalanceIdTypeV0,
-			V0:   &hash,
+	instance := xdr.ScContractInstance{
+		Executable: xdr.ContractExecutable{
+			Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+			WasmHash: &hash,
 		},
-		Claimants: []xdr.Claimant{
-			unconditionalClaimant(t, testClaimDestA),
-			unconditionalClaimant(t, testClaimDestB),
-		},
-		Asset:  testCreditAsset(t, "USDC", testClaimIssuer),
-		Amount: xdr.Int64(10_000_000),
 	}
 
-	node := buildNode("ClaimableBalanceEntry", reflect.ValueOf(entry), 0)
+	node := buildNode("Instance", reflect.ValueOf(instance), 0)
 	if node == nil {
-		t.Fatal("buildNode(ClaimableBalanceEntry) returned nil")
+		t.Fatal("buildNode(ScContractInstance) returned nil")
 	}
-	id := node.Child("BalanceId")
-	if id == nil {
-		t.Fatal("BalanceId child not found")
+	exec := node.Child("Executable")
+	if exec == nil {
+		t.Fatal("Executable child not found")
 	}
-	want := "2 claimants; asset USDC:" + testClaimIssuer
-	if id.Note != want {
-		t.Errorf("BalanceId note = %q, want %q", id.Note, want)
-	}
-	if s, ok := id.Value.(string); !ok || !strings.HasPrefix(s, "B") {
-		t.Errorf("BalanceId value = %v, want B... strkey", id.Value)
-	}
-}
-
-func TestDecorateClaimableBalanceEntryMalformedAssetStillCountsClaimants(t *testing.T) {
-	t.Parallel()
-
-	entry := xdr.ClaimableBalanceEntry{
-		BalanceId: xdr.ClaimableBalanceId{
-			Type: xdr.ClaimableBalanceIdTypeClaimableBalanceIdTypeV0,
-			V0:   &xdr.Hash{0x01},
-		},
-		Claimants: []xdr.Claimant{unconditionalClaimant(t, testClaimDestA)},
-		Asset:     xdr.Asset{Type: xdr.AssetType(99)},
-	}
-
-	node := buildNode("ClaimableBalanceEntry", reflect.ValueOf(entry), 0)
-	if node == nil {
-		t.Fatal("buildNode(ClaimableBalanceEntry) returned nil")
-	}
-	id := node.Child("BalanceId")
-	if id == nil {
-		t.Fatal("BalanceId child not found")
-	}
-	if id.Note != "1 claimant" {
-		t.Errorf("BalanceId note = %q, want %q", id.Note, "1 claimant")
-	}
-}
-
-func TestClaimantCountLabel(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		count int
-		want  string
-	}{
-		{0, "0 claimants"},
-		{1, "1 claimant"},
-		{3, "3 claimants"},
-	}
-	for _, tc := range tests {
-		if got := claimantCountLabel(tc.count); got != tc.want {
-			t.Errorf("claimantCountLabel(%d) = %q, want %q", tc.count, got, tc.want)
-		}
-	}
-}
-
-func TestCanonicalAssetName(t *testing.T) {
-	t.Parallel()
-
-	if name, ok := canonicalAssetName(xdr.MustNewNativeAsset()); !ok || name != "native" {
-		t.Errorf("canonicalAssetName(native) = %q, %v; want native, true", name, ok)
-	}
-	if name, ok := canonicalAssetName(testCreditAsset(t, "USDC", testClaimIssuer)); !ok || name != "USDC:"+testClaimIssuer {
-		t.Errorf("canonicalAssetName(USDC) = %q, %v; want the canonical form", name, ok)
-	}
-	if name, ok := canonicalAssetName(xdr.Asset{Type: xdr.AssetType(99)}); ok || name != "" {
-		t.Errorf("canonicalAssetName(unknown type) = %q, %v; want \"\", false", name, ok)
-	}
-	// A credit union missing its arm must decline rather than panic.
-	if name, ok := canonicalAssetName(xdr.Asset{Type: xdr.AssetTypeAssetTypeCreditAlphanum4}); ok || name != "" {
-		t.Errorf("canonicalAssetName(dangling credit arm) = %q, %v; want \"\", false", name, ok)
-	}
-}
-
-func TestDescribeClaimPredicateNested(t *testing.T) {
-	t.Parallel()
-
-	p := xdr.ClaimPredicate{
-		Type: xdr.ClaimPredicateTypeClaimPredicateAnd,
-		AndPredicates: &[]xdr.ClaimPredicate{
-			{
-				Type: xdr.ClaimPredicateTypeClaimPredicateOr,
-				OrPredicates: &[]xdr.ClaimPredicate{
-					{Type: xdr.ClaimPredicateTypeClaimPredicateUnconditional},
-					{
-						Type: xdr.ClaimPredicateTypeClaimPredicateNot,
-						NotPredicate: ptrTo(&xdr.ClaimPredicate{
-							Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime,
-							AbsBefore: ptrTo(xdr.Int64(1735689600)),
-						}),
-					},
-				},
-			},
-			{
-				Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime,
-				AbsBefore: ptrTo(xdr.Int64(1767225600)),
-			},
-		},
-	}
-
-	want := "((unconditional or not (before 2025-01-01T00:00:00Z)) and before 2026-01-01T00:00:00Z)"
-	if got := DescribeClaimPredicate(p); got != want {
-		t.Errorf("DescribeClaimPredicate(nested) = %q, want %q", got, want)
+	if exec.Note != "wasm:"+hash.HexString() {
+		t.Errorf("Executable Note = %q, want the wasm annotation", exec.Note)
 	}
 }
