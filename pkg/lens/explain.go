@@ -215,15 +215,16 @@ func attachResult(s *Summary, res *xdr.TransactionResult, ops []xdr.Operation, s
 			if i < len(s.Operations) {
 				if i < len(ops) {
 					op := ops[i]
-					if op.Body.Type == xdr.OperationTypePathPaymentStrictReceive ||
-						op.Body.Type == xdr.OperationTypePathPaymentStrictSend {
+					switch op.Body.Type {
+					case xdr.OperationTypePathPaymentStrictReceive,
+						xdr.OperationTypePathPaymentStrictSend:
 						if diag := DiagnosePathPaymentSlippage(op, i, opRes); diag != nil {
 							s.Operations[i].PathPayment = diag
 							if !reason.Success && diag.Hint != "" {
 								reason.Hint = diag.Hint
 							}
 						}
-					} else if op.Body.Type == xdr.OperationTypeSetTrustLineFlags {
+					case xdr.OperationTypeSetTrustLineFlags:
 						if diag := DiagnoseSetTrustLineFlagsOperation(op, i, opRes); diag != nil {
 							s.Operations[i].TrustLine = diag
 							if !reason.Success && diag.Hint != "" {
@@ -334,6 +335,8 @@ func deepenOperationFailure(source string, op xdr.Operation, r Reason) Reason {
 		if body, ok := op.Body.GetRestoreFootprintOp(); ok {
 			return deepenRestoreFootprintFailure(body, r)
 		}
+	case strings.HasPrefix(r.Constant, "ManageDataResultCode"):
+		return withOperationContext(r, op)
 	}
 	return r
 }
