@@ -1,6 +1,9 @@
 package lens
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"reflect"
