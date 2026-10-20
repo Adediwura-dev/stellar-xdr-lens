@@ -174,6 +174,14 @@ existing asset and address enrichers retain canonical asset identifiers and
 StrKeys. These behaviors are exposed by `lens diff --align` and
 `lens diff --semantic`, which can be combined.
 
+### Binary normalization (Base64 vs Hex)
+
+Comparing XDR structures often involves equivalent binary payloads (such as transaction hashes, signatures, contract IDs, or raw byte buffers) that are formatted as Base64 in one tree and Hex in another, or encoded as byte arrays or byte lists. `pkg/lens/diff.go` normalizes binary representations prior to computing diffs so that identical byte sequences are evaluated as equal regardless of string encoding, avoiding spurious false-positive diff lines.
+
+### Numeric delta threshold filter (`--diff-threshold`)
+
+When diffing ledger headers, transactions, or state trees, minor differences in timestamps, base fees, or sequence counters can clutter output when only major state changes are of interest. The `--diff-threshold <value>` flag (and `DiffOptions.Threshold` / `DiffOptions.DiffThreshold`) instructs the differ to suppress scalar numeric differences where the absolute difference $|left - right| \le \text{threshold}$.
+
 `DiffTransactionMetaBalances` accepts decoded `TransactionMeta` versions 0
 through 4 and returns deterministic deltas for account XLM balances, trustline
 balances, and claimable-balance amounts. A `STATE` entry supplies the before
@@ -1052,6 +1060,25 @@ These four context-dependent diagnosers are library APIs. The existing
 `lens explain` flags and output contracts are unchanged; use `lens explain`
 for the standard result-code report, and call the library helpers when the
 relevant ledger context or claim-balance creation time is already available.
+
+## Path payment slippage diagnostics
+
+[`explain.go`](../pkg/lens/explain.go) provides contextual diagnostics for `PathPaymentStrictReceive` and `PathPaymentStrictSend` failures, particularly:
+- `path_payment_strict_receive_over_send_max`: The send amount required to produce the requested destination amount exceeded `sendMax`.
+- `path_payment_strict_send_under_dest_min`: The destination amount delivered by the fixed send amount fell below `destMin`.
+- `path_payment_strict_receive_too_few_offers` and `path_payment_strict_send_too_few_offers`: Order books along the conversion route lacked sufficient liquidity depth to fulfill the payment.
+
+`DiagnosePathPaymentSlippage`, `DiagnosePathPaymentStrictReceive`, and `DiagnosePathPaymentStrictSend` inspect the operation and operation result, breakdown intermediate hops (`PathPaymentHop`) along the payment path, and explain how order book liquidity shifts between quote and submission cause slippage past limit parameters. When paired with `ExplainPair`, these diagnostics are attached directly to each operation's summary.
+
+## SetTrustLineFlags and revocation violations
+
+[`explain.go`](../pkg/lens/explain.go) provides explicit diagnostics for `SetTrustLineFlags` failures:
+- `set_trust_line_flags_cant_revoke`: In Stellar protocol, trustline authorization is irrevocable by default. An asset issuer must set `AUTH_REVOCABLE_FLAG` (flag `0x2`) on their account via `SetOptionsOp` before issuing the asset if they wish to clear `AUTHORIZED_FLAG` or `AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG`. If the issuer lacks `AUTH_REVOCABLE_FLAG`, revocation fails with `cant_revoke`.
+- `set_trust_line_flags_no_trust_line`: The target trustor account has not yet established a trustline for the asset via `ChangeTrustOp`.
+- `set_trust_line_flags_malformed`: The operation is structurally invalid (such as attempting to modify trustline flags on native XLM, which does not use trustlines, or submitting from an account other than the asset issuer).
+- `set_trust_line_flags_invalid_state` and `set_trust_line_flags_low_reserve`: The operation requested conflicting flag transitions or the account lacks XLM reserves to support the updated trustline state.
+
+`DiagnoseSetTrustLineFlags` and `DiagnoseSetTrustLineFlagsOperation` output structured diagnostic reports with actionable remediation advice and highlight `AUTH_REVOCABLE_FLAG` requirements.
 
 ## Testing approach
 
