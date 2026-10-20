@@ -29,8 +29,11 @@ func newDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comman
 		footprintMode    bool
 		includePaths     []string
 		excludePaths     []string
+		redact           []string
+		redactFields     []string
 		context          int
 		sideWidth        int
+		diffThreshold    float64
 	)
 
 	cmd := &cobra.Command{
@@ -60,6 +63,13 @@ Excludes win over includes. For example, ignoring the noise of a rebuild:
 
   lens diff --exclude-paths Signatures,SeqNum before.xdr after.xdr
 
+--redact normalizes the dynamic cryptographic values that a rebuild cannot
+reproduce — hashes, signatures and derived identifiers — before the comparison,
+so two values that differ only in those fields compare equal. It accepts the
+categories hashes, signatures, identifiers, or all, and --redact-fields
+additionally redacts named fields (globs allowed). Redacted paths are reported
+so the normalization is never silent.
+
 Three output formats render the difference for other tools:
 
   --json-patch   an RFC 6902 JSON Patch (add/remove/replace operations);
@@ -75,20 +85,29 @@ These are mutually exclusive with each other and with --json/--stats.`,
   lens diff --unordered-signers a.xdr b.xdr
   lens diff --include-paths Result.Code a.xdr b.xdr
   lens diff --exclude-paths Signatures,SeqNum a.xdr b.xdr
+  lens diff --redact hashes,signatures a.xdr b.xdr
+  lens diff --redact all --redact-fields PrevHash a.xdr b.xdr
   lens diff --footprint before.env.xdr after.env.xdr
   lens diff --json-patch a.xdr b.xdr
   lens diff --unified a.xdr b.xdr
   lens diff --side-by-side a.xdr b.xdr
   lens diff --stats before.xdr after.xdr
+  lens diff --diff-threshold 5 before.xdr after.xdr
   lens diff --exit-code a.xdr b.xdr   # non-zero when they differ`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if diffThreshold < 0 {
+				return fmt.Errorf("%w: --diff-threshold must be non-negative", lens.ErrInvalidArgument)
+			}
 			if err := validateDiffModes(asJSON, statsOnly, jsonPatch, unified, sideBySide, footprintMode); err != nil {
 				return err
 			}
 			if footprintMode && (len(includePaths) > 0 || len(excludePaths) > 0) {
 				return fmt.Errorf("%w: --include-paths and --exclude-paths do not apply to --footprint",
 					lens.ErrInvalidArgument)
+			}
+			if footprintMode && (len(redact) > 0 || len(redactFields) > 0) {
+				return fmt.Errorf("%w: --redact does not apply to --footprint", lens.ErrInvalidArgument)
 			}
 
 			left, err := readOperand(args[0], stdin)
@@ -109,11 +128,27 @@ These are mutually exclusive with each other and with --json/--stats.`,
 				return err
 			}
 
+			redaction, err := lens.RedactionPolicyFromNames(redact)
+			if err != nil {
+				return err
+			}
+			if len(redactFields) > 0 {
+				for _, fields := range redactFields {
+					for _, field := range strings.Split(fields, ",") {
+						if field = strings.TrimSpace(field); field != "" {
+							redaction.Fields = append(redaction.Fields, field)
+						}
+					}
+				}
+			}
+
 			result, err := lens.DiffBase64WithOptions(left, right, typeName, lens.DiffOptions{
 				AlignLists:       alignLists,
 				Semantic:         semantic,
 				UnorderedSigners: unorderedSigners,
 				Filter:           filter,
+				Threshold:        diffThreshold,
+				Redaction:        redaction,
 			})
 			if err != nil {
 				return err
@@ -203,6 +238,10 @@ These are mutually exclusive with each other and with --json/--stats.`,
 				if err := f.Format(stdout, result); err != nil {
 					return err
 				}
+				if len(result.Redacted) > 0 {
+					fmt.Fprintf(stdout, "\n%d path(s) redacted: %s\n",
+						len(result.Redacted), strings.Join(result.Redacted, ", "))
+				}
 			}
 
 			if (exitDiff || quietMode) && !result.Equal() {
@@ -222,6 +261,10 @@ These are mutually exclusive with each other and with --json/--stats.`,
 		"only report changes matching these path patterns (comma-separated, repeatable)")
 	cmd.Flags().StringArrayVar(&excludePaths, "exclude-paths", nil,
 		"ignore changes matching these path patterns (comma-separated, repeatable)")
+	cmd.Flags().StringArrayVar(&redact, "redact", nil,
+		"normalize dynamic cryptographic values before diffing: hashes, signatures, identifiers or all")
+	cmd.Flags().StringArrayVar(&redactFields, "redact-fields", nil,
+		"field names (or globs) whose values are normalized before diffing (comma-separated, repeatable)")
 	cmd.Flags().IntVar(&context, "context", 3, "context lines for --unified and --side-by-side")
 	cmd.Flags().IntVar(&sideWidth, "side-by-side-width", 160, "total column width for --side-by-side")
 	cmd.Flags().BoolVar(&alignLists, "align", false,
@@ -234,6 +277,8 @@ These are mutually exclusive with each other and with --json/--stats.`,
 		"compare the Soroban ledger footprints of the two values as sets")
 	cmd.Flags().BoolVar(&statsOnly, "stats", false,
 		"print only the statistical summary of the diff")
+	cmd.Flags().Float64Var(&diffThreshold, "diff-threshold", 0,
+		"ignore scalar numeric differences below the given delta")
 	cmd.Flags().BoolVar(&exitDiff, "exit-code", false,
 		"exit with a non-zero status when the values differ")
 	cmd.Flags().BoolVarP(&quietMode, "quiet", "q", false,
@@ -332,9 +377,9 @@ func writeKeySet(b *strings.Builder, set lens.FootprintKeySetDiff) {
 	}
 }
 
-// errValuesDiffer signals --exit-code, mirroring diff(1)'s convention of
-// exiting 1 when the inputs differ.
-var errValuesDiffer = &exitError{code: 1, msg: "values differ"}
+// errValuesDiffer now lives in exitcodes.go with the strict exit-code policy:
+// a detected difference is a "diff found" condition, not a generic error, so
+// it exits with ExitDiffFound (2).
 
 // diffChange is the stable JSON shape for one change.
 type diffChange struct {
@@ -351,6 +396,7 @@ type diffDoc struct {
 	Equal     bool         `json:"equal"`
 	Summary   string       `json:"summary"`
 	Changes   []diffChange `json:"changes"`
+	Redacted  []string     `json:"redacted,omitempty"`
 }
 
 func diffDocument(d *lens.DiffResult) diffDoc {
@@ -369,6 +415,7 @@ func diffDocument(d *lens.DiffResult) diffDoc {
 		Equal:     d.Equal(),
 		Summary:   d.Summary(),
 		Changes:   changes,
+		Redacted:  d.Redacted,
 	}
 }
 

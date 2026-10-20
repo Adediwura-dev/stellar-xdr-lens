@@ -53,6 +53,8 @@ internal/cli/          cobra commands — deliberately thin
   meta_diff.go         transaction metadata balance-diff command
   asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
+  exitcodes.go         installed exit-code policy (0 / 1 / 2 / 3)
+  completion.go        shell completion for bash/zsh/fish/powershell
   tui_tree.go          interactive terminal tree explorer (TUI)
 pkg/lens/              the library; this is the reusable surface
   errors.go            stable error kinds and errors.Is-compatible sentinels
@@ -95,6 +97,9 @@ pkg/lens/              the library; this is the reusable surface
   upgrade_explain.go   protocol-version boundary correlation for failed results
   diff.go              structural path diff and bounded opt-in LCS alignment
   diff_filter.go       include/exclude path filtering for structural diffs
+  diff_redact.go       opt-in hash/signature/identifier redaction for diffs
+  encode.go            symmetric JSON/value -> base64 XDR encoder (inverse of decode)
+  roundtrip.go         decode -> encode -> decode property verification engine
   scval_diff.go        recursive ScVal comparison with canonical map-key matching
   semantic_diff.go     exact wide-integer and type-aware semantic comparison
   diff_stats.go        statistical summary of a diff: counts, sections, depth
@@ -105,6 +110,7 @@ pkg/lens/              the library; this is the reusable surface
   canonical.go         deterministic canonical XDR validation (RFC 4506) and serialization
   encode_errors.go     malformed input diagnostics, line/column tracking and error pointers
   stream_parser.go     stream-oriented XDR reader and chunk parser (RFC 5531, length-prefixed, base64)
+  stdin_pipe.go        stdin framing probe: text (base64/hex) vs binary streams
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
@@ -168,6 +174,14 @@ existing asset and address enrichers retain canonical asset identifiers and
 StrKeys. These behaviors are exposed by `lens diff --align` and
 `lens diff --semantic`, which can be combined.
 
+### Binary normalization (Base64 vs Hex)
+
+Comparing XDR structures often involves equivalent binary payloads (such as transaction hashes, signatures, contract IDs, or raw byte buffers) that are formatted as Base64 in one tree and Hex in another, or encoded as byte arrays or byte lists. `pkg/lens/diff.go` normalizes binary representations prior to computing diffs so that identical byte sequences are evaluated as equal regardless of string encoding, avoiding spurious false-positive diff lines.
+
+### Numeric delta threshold filter (`--diff-threshold`)
+
+When diffing ledger headers, transactions, or state trees, minor differences in timestamps, base fees, or sequence counters can clutter output when only major state changes are of interest. The `--diff-threshold <value>` flag (and `DiffOptions.Threshold` / `DiffOptions.DiffThreshold`) instructs the differ to suppress scalar numeric differences where the absolute difference $|left - right| \le \text{threshold}$.
+
 `DiffTransactionMetaBalances` accepts decoded `TransactionMeta` versions 0
 through 4 and returns deterministic deltas for account XLM balances, trustline
 balances, and claimable-balance amounts. A `STATE` entry supplies the before
@@ -213,6 +227,96 @@ only changes are excluded reports as equal, which is what makes
 it as `--include-paths` and `--exclude-paths` (comma-separated and
 repeatable), and the format-side `WithUnifiedFilter`/`WithSideBySideFilter`
 options apply the same selection to the line-based output.
+
+## Hash and signature redaction for structural diffs
+
+A rebuilt transaction or envelope is usually identical except for values that
+cannot be reproduced deterministically: transaction hashes, signatures and
+hints, and identifiers derived from them. `diff_redact.go` normalizes those
+values before the walk so `DiffWithOptions` reports only the differences a
+reviewer can act on.
+
+Redaction is opt-in through `DiffOptions.Redaction`, a `RedactionPolicy`:
+
+```go
+result, err := lens.DiffWithOptions(left, right, lens.DiffOptions{
+    Redaction: lens.RedactionPolicy{
+        Hashes:     true,
+        Signatures: true,
+        Fields:     []string{"PrevHash", "LedgerHash*"},
+    },
+})
+```
+
+`Hashes`, `Signatures` and `Identifiers` select categories by the decoded XDR
+type, not by a fixed path list. A `Hash` is recognized wherever it appears, a
+`Signature`/`SignatureHint` is recognized as a signature, and contract, pool
+and claimable-balance ids are recognized as derived identifiers. `Fields`
+adds name-based matching for values that are not self-describing, such as an
+anonymous byte array named `Hint`; a field pattern may be exact or use
+`path.Match` glob syntax. `RedactHashesAndSignatures()` is the convenience
+policy exposed by `lens diff --redact hashes,signatures`.
+
+The prepass deep-copies and normalizes the trees; the caller's `Value`s are
+never mutated. Each selected scalar is replaced with a stable placeholder
+(`<redacted hash>`, `<redacted signature>`, `<redacted identifier>` or
+`<redacted>`), and `DiffResult.Redacted` lists the normalized paths in
+first-seen order. Nothing is redacted silently: text output prints a redaction
+summary, and JSON output carries the same list in its `redacted` field. The CLI
+accepts repeatable `--redact` categories (`hashes`, `signatures`,
+`identifiers`, `all`) and repeatable `--redact-fields`; both are rejected with
+`--footprint`, which compares sets rather than hydrated values.
+
+## Symmetric JSON encoder and round-trip verification
+
+`encode.go` closes the loop opened by `decode`: it turns a decoded `Value`, or
+the stable JSON document `lens decode --json` emits, back into base64 XDR. The
+structural encoder walks the registered Go type rather than the JSON tree, so
+field names, union discriminants and enum values come from the generated XDR
+definitions rather than a hand-maintained schema.
+
+Two entry points cover the common cases:
+
+- `Encode(v)` re-serializes `v.Raw`, the concrete XDR value behind a decoded
+  tree. It is exact for every registered type and is the inverse of `Decode`.
+- `EncodeJSON(data)` / `EncodeJSONAs(typeName, data)` accept the stable
+  `{"type": ..., "value": ...}` document, a bare value with an explicit type,
+  or the simplified transaction-envelope and ScVal dialects. Documents with an
+  `xdr`, `base64`, `payload` or `raw` field pass through unchanged.
+
+The structural encoder understands the scalar forms the enrichers produce:
+StrKey accounts and contracts, canonical asset strings, `n/d` prices,
+`host:port` peer addresses, `A / B @ fee%` pool parameters, claimable-balance
+ids, named storage keys, wasm and external contract executables, hex or base64
+byte strings, and enum names or enriched labels. Derived annotations that the
+decoder appends (WASM sections, `Spec`, `EnvMeta`, `Meta`) are accepted and
+ignored because they are not XDR fields. Deliberately lossy renderings, notably
+`ClaimPredicate` expressions, return `ErrUnsupportedType` instead of inventing
+a value; callers that hold the decoded `Value` should use `Encode` for those.
+
+`roundtrip.go` turns the encoder contract into a property test that callers can
+run on their own payloads:
+
+```go
+report, err := lens.RoundTripBase64(payload, "TransactionEnvelope")
+if err != nil {
+    // The input could not be decoded or encoded at all.
+}
+if !report.OK() {
+    // report.Changes, report.BytesEqual and report.TreeEqual explain why.
+}
+```
+
+`RoundTripBinary` checks that re-serializing the decoded value reproduces the
+original bytes and tree. `RoundTripJSON` goes through the stable JSON document
+and `EncodeJSON` instead. `RunRoundTripSuite` runs a named set of cases, and
+`RoundTripRegistry` synthesizes a minimal value for every registered type and
+verifies it on the chosen route. Routes report `Skipped` with a reason for
+renderings that are intentionally lossy (claim predicates, and fields such as
+`PeerAddress.NumFailures` that the JSON contract does not carry). The engine is
+deterministic, offline and read-only.
+
+
 
 ## Unified, JSON Patch and side-by-side diff output
 
@@ -742,6 +846,7 @@ whose cause is provable from the operation's own parameters:
   already sit outside it), which deposit parameter is malformed, and how the
   requested amounts map to `underfunded`, `pool_full`, `line_full` and
   `under_minimum`.
+- **`clawback` / `clawback_claimable_balance`**: when the trustline or claimable balance was created without the clawback-enabled bit, when the target account has no trustline, and when the requested amount exceeds the balance held, the explanation points directly at the issuer flag, trustline state, or insufficient balance rather than only naming the generic protocol code.
 
 It never touches `Code` or `Constant`, never invents ledger state, and a code
 it cannot pin down keeps the generic per-code text — a result explained
@@ -957,6 +1062,25 @@ These four context-dependent diagnosers are library APIs. The existing
 for the standard result-code report, and call the library helpers when the
 relevant ledger context or claim-balance creation time is already available.
 
+## Path payment slippage diagnostics
+
+[`explain.go`](../pkg/lens/explain.go) provides contextual diagnostics for `PathPaymentStrictReceive` and `PathPaymentStrictSend` failures, particularly:
+- `path_payment_strict_receive_over_send_max`: The send amount required to produce the requested destination amount exceeded `sendMax`.
+- `path_payment_strict_send_under_dest_min`: The destination amount delivered by the fixed send amount fell below `destMin`.
+- `path_payment_strict_receive_too_few_offers` and `path_payment_strict_send_too_few_offers`: Order books along the conversion route lacked sufficient liquidity depth to fulfill the payment.
+
+`DiagnosePathPaymentSlippage`, `DiagnosePathPaymentStrictReceive`, and `DiagnosePathPaymentStrictSend` inspect the operation and operation result, breakdown intermediate hops (`PathPaymentHop`) along the payment path, and explain how order book liquidity shifts between quote and submission cause slippage past limit parameters. When paired with `ExplainPair`, these diagnostics are attached directly to each operation's summary.
+
+## SetTrustLineFlags and revocation violations
+
+[`explain.go`](../pkg/lens/explain.go) provides explicit diagnostics for `SetTrustLineFlags` failures:
+- `set_trust_line_flags_cant_revoke`: In Stellar protocol, trustline authorization is irrevocable by default. An asset issuer must set `AUTH_REVOCABLE_FLAG` (flag `0x2`) on their account via `SetOptionsOp` before issuing the asset if they wish to clear `AUTHORIZED_FLAG` or `AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG`. If the issuer lacks `AUTH_REVOCABLE_FLAG`, revocation fails with `cant_revoke`.
+- `set_trust_line_flags_no_trust_line`: The target trustor account has not yet established a trustline for the asset via `ChangeTrustOp`.
+- `set_trust_line_flags_malformed`: The operation is structurally invalid (such as attempting to modify trustline flags on native XLM, which does not use trustlines, or submitting from an account other than the asset issuer).
+- `set_trust_line_flags_invalid_state` and `set_trust_line_flags_low_reserve`: The operation requested conflicting flag transitions or the account lacks XLM reserves to support the updated trustline state.
+
+`DiagnoseSetTrustLineFlags` and `DiagnoseSetTrustLineFlagsOperation` output structured diagnostic reports with actionable remediation advice and highlight `AUTH_REVOCABLE_FLAG` requirements.
+
 ## Testing approach
 
 Fixtures in `testdata/` are **real captured mainnet transactions**, with
@@ -992,6 +1116,27 @@ ledger-header fixture and re-encodes its `LedgerVersion` as Protocols 20–23.
 Those cases deliberately keep the header's XDR shape and all other fields
 constant: they compare decoder cost across the version values, not historical
 wire-schema changes. No benchmark or library decode path makes network calls.
+
+Structural-diff benchmarks live in
+[`pkg/lens/diff_bench_test.go`](../pkg/lens/diff_bench_test.go). They cover
+deeply nested trees, the worst-case single change at the deepest leaf, wide
+lists with and without the opt-in LCS aligner, real ledger-close envelopes, and
+the redaction prepass:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'BenchmarkDiff' -benchmem
+```
+
+The same package verifies the encoder contract as a property: `roundtrip_test.go`
+runs every checked-in fixture through both `RoundTripBinary` and
+`RoundTripJSON`, and `RoundTripRegistry` synthesizes a minimal value for every
+registered type. Cases that cannot be represented by the stable JSON contract
+are asserted as skipped with a reason rather than silently passed. Run the
+property suite with the regular tests:
+
+```sh
+go test ./pkg/lens -run 'RoundTrip' -v
+```
 
 The suite deliberately targets properties that would break the tool if violated:
 
@@ -1133,4 +1278,127 @@ When JSON inputs fail syntax validation or schema parsing, `lens` computes exact
 - **Path Tracking**: Resolves dot-and-bracket paths (e.g. `operations[0].amount`) to token byte offsets.
 - **Visual Caret Indicators**: Generates source code snippets with surrounding line context and aligned caret indicators (`^~~~`).
 - **Error Chaining**: Diagnostic errors wrap base causes with full compatibility for `errors.Is` and `errors.As`.
+
+## Exit code policy (`internal/cli/exitcodes.go`)
+
+Every error the CLI can produce resolves to exactly one of four pinned exit
+codes, and scripts are entitled to rely on that table:
+
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 0 | `ExitSuccess` | clean run |
+| 1 | `ExitError` | generic error: usage mistakes, missing files, unreadable environments — anything not caused by the payload |
+| 2 | `ExitDiffFound` | the "checked condition is false" slot: `diff --exit-code`/`--quiet` finding a difference, `explain --fail-on-error` seeing a failed transaction, `result-diff --exit-code` seeing a disagreement |
+| 3 | `ExitInvalidXDR` | the payload itself could not be decoded |
+
+Classification in `ExitCode(err)` (which returns the code plus whether the
+message is printable) is stable across wrapping:
+
+1. errors carrying an explicit code — `errTransactionFailed` and
+   `errValuesDiffer` are defined once here and shared by explain and diff —
+   resolve to their own code and are not printed (the command already
+   summarized its condition);
+2. decode failures are matched with `errors.Is` against the library sentinel
+   family — `ErrInvalidXDR`, `ErrInvalidBase64`, `ErrNoMatch`, `ErrNonCanonical`,
+   `ErrPrematureEOF`, `ErrInvalidFraming`, `ErrRecordTooLarge`,
+   `ErrCorruptMultiStreamRecord` — and exit 3;
+3. everything else, including `ErrUnknownType` and `ErrEmptyInput`, exits 1.
+
+The distinction that matters operationally: a CI gate that sees exit 2 knows
+its pipeline worked and the artifact really is different/failed; exit 3 means
+"the bytes you fed in are garbage", which is a caller bug, and exit 1 means the
+tooling itself was used wrongly. `IsInvalidXDRError` is re-exported for callers
+who need only the classification.
+
+## Stdin framing probe (`pkg/lens/stdin_pipe.go`)
+
+Standard input carries no metadata, so `ReadStdinPayload` (exposed as
+`NewStdinPipe` for direct use) probes the first bytes before committing to an
+interpretation:
+
+- **Text framing** — if the probe sees only base64 or hex alphabet characters,
+  whitespace or `#` comment markers, the payload is handled by
+  `MultiStreamDecoder`: newline-separated base64 records, comment lines and
+  blank lines all decode, matching `decode --multi` behaviour.
+- **Binary framing** — anything else goes to `StreamParser` with
+  `FramingAuto`, which recognizes RFC 5531 record marking and
+  length-prefixed framing and yields the first record.
+- `Framing()` reports what was detected (`StdinFramingLines`,
+  `StdinFramingBinary` or `StdinFramingUnknown`), `ReadPayload()` returns the
+  first record, and `Decode()`/`DecodeEach()` bind it to the registry.
+
+Two robustness details the probe guarantees: reads are chunked through a
+buffer that tolerates readers delivering fewer bytes than requested (the probe
+never misreads a partial first chunk), and the default lookahead size is
+configurable with `WithStdinPipeBuffer` so binary framing can be pinned before
+the data arrives. `internal/cli/input.go` routes every stdin invocation through
+this probe — there is exactly one stdin policy for all commands. Empty input
+surfaces as `lens.ErrEmptyInput`, which the CLI maps to a usage error rather
+than the invalid-XDR code.
+
+## Shell completion (`internal/cli/completion.go`)
+
+`lens` disables cobra's default completion command and installs its own:
+
+```
+lens completion bash|zsh|fish|powershell
+```
+
+`registerCompletions(root)` runs **after** the command tree is fully built in
+`newRootCmd` — running it earlier sees only `rootCmd` and silently completes
+nothing — and walks every command:
+
+- **Dynamic flag values**: `--type`/`-t` on `decode`, `explore`, `diff` and
+  `encode` complete from `lens.TypeNames()`, the same registry the `types`
+  command prints, so nothing can drift between them.
+- **Choice lists**: `--format` (tree/json/compact/summary/txrep/csv/yaml),
+  `--color`, `--network`, and the repeatable `--redact` prefix set are static
+  candidates.
+- **Shell scripts**: all four render through cobra's `Gen*Completion`, with the
+  whole feature covered by driving cobra's hidden `__complete` entry point from
+  tests (`completion_test.go`) — the same channel real shells use.
+
+Completion output is cached in the shell session; there is no network access
+in any of it.
+
+## Testdata corpus synchronizer (`pkg/lens/corpus_sync_test.go`)
+
+The captured fixtures in `testdata/` are the regression suite's ground truth,
+and `corpus_sync_test.go` is the tool that keeps that directory honest: every
+file must either appear in `manifest.json` (captured section by envelope file,
+synthetic section by key plus `.txt`) or the manifest check fails, and every
+captured record must decode and carry its transaction hash.
+
+The synchronizer reads the most recent transactions from public Testnet, but
+**only** when asked. The gated run behind `LENS_CORPUS_SYNC` implements
+three levels:
+
+| Value | Behaviour |
+|-------|-----------|
+| unset | no network, no writes: only the offline invariants run |
+| `1` | dry run: fetches the page, plans it, verifies kept envelopes decode, writes nothing |
+| `write` | additionally captures new `testnet_<hash16>.env.txt`/`.res.txt` fixtures and merges entries into `manifest.json` |
+
+Selection (`planCorpus`) is deterministic and network-free by construction:
+every candidate is decoded *before* selection (fixtures that fail to decode
+would be dead weight), records whose transaction hash is already in the
+manifest are dropped, and duplicates — the same envelope bytes under different
+hashes — collapse to the lexicographically smallest hash, so the plan depends
+only on the page content and the current manifest. Unit tests exercise the
+whole selection, naming and manifest-merge logic against an in-memory stub
+client (`stubCorpusClient`), which is why the default `go test` run never
+opens a socket. `internal/cli` is never involved; no fetch path exists in
+`pkg/lens` non-test code.
+
+```
+Horizon page ──► planCorpus (decode, dedupe, hash-name) ──► corpusPlan
+                     │                                        │
+        ┌────────────┴───────────┐            manifest.json ◄── writeCorpusPlan (write mode only)
+        │ stub (unit tests)      │                (merge, never overwrite)
+        │ HTTP (LENS_CORPUS_SYNC)│
+```
+
+`writeCorpusPlan` is deliberately conservative: fixture files are only created
+when absent (existing files are never overwritten) and manifest entries are
+merged — pre-existing provenance survives an updated capture.
 
