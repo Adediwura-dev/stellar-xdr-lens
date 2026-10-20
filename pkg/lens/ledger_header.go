@@ -180,7 +180,7 @@ func describeLedgerUpgrade(u *xdr.LedgerUpgrade) string {
 			// Match the phrasing used elsewhere: "config upgrade set: contract X,
 			// content hash Y" so fixtures and human output stay consistent.
 			return fmt.Sprintf("config upgrade set: contract %s, content hash %s",
-					id, hex.EncodeToString(k.ContentHash[:]))
+				id, hex.EncodeToString(k.ContentHash[:]))
 		}
 	}
 	name := strings.TrimPrefix(u.Type.String(), "LedgerUpgradeTypeLedgerUpgrade")
