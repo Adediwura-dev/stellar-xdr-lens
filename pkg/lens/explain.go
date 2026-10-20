@@ -79,7 +79,7 @@ type Outcome struct {
 // Explain summarises a single decoded value.
 //
 // It accepts a TransactionEnvelope or a TransactionResult. For any other type
-// it returns an error, since a general-purpose "explanation" of an arbitrary
+// it returns an error, since a general-purpose "exexplanation" of an arbitrary
 // XDR struct would be no better than the decoded tree.
 func Explain(v *Value) (*Summary, error) {
 	if v == nil {
@@ -151,6 +151,14 @@ func explainEnvelope(env *xdr.TransactionEnvelope, res *xdr.TransactionResult) (
 	if err := attachResult(s, res, ops, s.Source); err != nil {
 		return nil, err
 	}
+	for i, op := range env.Operations() {
+		if i >= len(s.Operations) || s.Operations[i].Result == nil {
+			continue
+		}
+		reason := contextualizeChangeTrustFailure(op, *s.Operations[i].Result)
+		s.Operations[i].Result = &reason
+	}
+	s.Headline = resultHeadline(s, s.Outcome)
 	return s, nil
 }
 
@@ -310,6 +318,51 @@ func deepenOperationFailure(source string, op xdr.Operation, r Reason) Reason {
 		if body, ok := op.Body.GetLiquidityPoolWithdrawOp(); ok {
 			return deepenLiquidityPoolWithdrawFailure(body, r)
 		}
+	case strings.HasPrefix(r.Constant, "ClawbackResultCode"):
+		if body, ok := op.Body.GetClawbackOp(); ok {
+			return deepenClawbackFailure(operationEffectiveSource(source, op), body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ClawbackClaimableBalanceResultCode"):
+		if body, ok := op.Body.GetClawbackClaimableBalanceOp(); ok {
+			return deepenClawbackClaimableBalanceFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ExtendFootprintTtlResultCode"):
+		if body, ok := op.Body.GetExtendFootprintTtlOp(); ok {
+			return deepenExtendFootprintTtlFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "RestoreFootprintResultCode"):
+		if body, ok := op.Body.GetRestoreFootprintOp(); ok {
+			return deepenRestoreFootprintFailure(body, r)
+		}
+	}
+	return r
+}
+
+func deepenExtendFootprintTtlFailure(o xdr.ExtendFootprintTtlOp, r Reason) Reason {
+	switch r.Constant {
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlMalformed":
+		if o.ExtendTo == 0 {
+			r.Summary = "the operation asks to extend entries to 0 ledgers; a TTL extension must target a positive lifetime"
+			r.Hint = "Set extendTo to a positive number of ledgers and retry. A value of zero does not preserve any lifetime."
+		}
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlResourceLimitExceeded":
+		r.Summary = "the operation tries to extend the TTL of more ledger entries than the transaction's declared resource budget allows"
+		r.Hint = "Reduce the footprint or split the operation into smaller TTL extensions so the declared resource limits cover the work."
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlInsufficientRefundableFee":
+		r.Summary = fmt.Sprintf("the refundable fee is too small to cover extending the footprint TTL to %d ledgers", o.ExtendTo)
+		r.Hint = "Increase the refundable fee or reduce the number of entries in the footprint; simulation reports the rent this extension requires."
+	}
+	return r
+}
+
+func deepenRestoreFootprintFailure(o xdr.RestoreFootprintOp, r Reason) Reason {
+	switch r.Constant {
+	case "RestoreFootprintResultCodeRestoreFootprintResourceLimitExceeded":
+		r.Summary = "the operation tries to restore more archived entries than the transaction's declared resource budget allows"
+		r.Hint = "Reduce the footprint or split the restore into smaller operations so the declared resource limits fit the work."
+	case "RestoreFootprintResultCodeRestoreFootprintInsufficientRefundableFee":
+		r.Summary = "the refundable fee is too small to cover the rent and restoration of the archived entries"
+		r.Hint = "Increase the refundable fee to match the restore cost reported by simulation."
 	}
 	return r
 }
@@ -1133,6 +1186,97 @@ func formatTime(unix int64) string {
 	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
 }
 
+func contextualizeChangeTrustFailure(op xdr.Operation, reason Reason) Reason {
+	if op.Body.Type != xdr.OperationTypeChangeTrust {
+		return reason
+	}
+	body, ok := op.Body.GetChangeTrustOp()
+	if !ok {
+		return reason
+	}
+	asset := changeTrustAssetLabel(body.Line)
+	if asset == "" {
+		asset = "this asset"
+	}
+
+	switch reason.Code {
+	case "change_trust_malformed":
+		reason.Summary = fmt.Sprintf("The ChangeTrust request for %s is malformed: the asset or limit is invalid.", asset)
+		reason.Hint = fmt.Sprintf("Check the asset and limit for %s before resubmitting; a valid ChangeTrust operation must identify a valid asset and a non-negative limit.", asset)
+	case "change_trust_no_issuer":
+		issuer := changeTrustIssuerLabel(body.Line)
+		if issuer == "" {
+			reason.Summary = fmt.Sprintf("The trustline for %s cannot be created because the issuing account does not exist on-chain.", asset)
+			reason.Hint = fmt.Sprintf("Create or fund the issuing account for %s on the target network, or switch to the correct network before retrying.", asset)
+			return reason
+		}
+		reason.Summary = fmt.Sprintf("The trustline for %s cannot be created because the issuer account %s does not exist on-chain.", asset, issuer)
+		reason.Hint = fmt.Sprintf("Create or fund the issuer account %s on the target network before retrying with %s.", issuer, asset)
+	case "change_trust_invalid_limit":
+		reason.Summary = fmt.Sprintf("The new limit for %s is below the current liabilities or balance already held, so the trustline would shrink beneath existing obligations.", asset)
+		reason.Hint = "Increase the limit to at least the current liabilities or balance, or reduce the existing balance and liabilities before resubmitting."
+	case "change_trust_low_reserve":
+		reason.Summary = fmt.Sprintf("Opening or updating a trustline for %s would leave the account below the minimum XLM reserve required for another trustline.", asset)
+		reason.Hint = "Fund the source account with enough XLM to cover the network reserve requirement for this additional trustline, then retry."
+	}
+	return reason
+}
+
+func changeTrustIssuerLabel(line xdr.ChangeTrustAsset) string {
+	if line.Type == xdr.AssetTypeAssetTypeNative || line.Type == xdr.AssetTypeAssetTypePoolShare {
+		return ""
+	}
+	asset := line.ToAsset()
+	if asset.Type == xdr.AssetTypeAssetTypeNative {
+		return ""
+	}
+	return asset.GetIssuer()
+}
+
+// deepenClawbackFailure refines a failed clawback explanation using the
+// operation's asset, source, and target account. The protocol makes these
+// checks deterministically from the body: clawback is only valid when the
+// trustline was opened with the clawback-enabled flag, and the amount cannot
+// exceed the target's balance.
+func deepenClawbackFailure(source string, o xdr.ClawbackOp, r Reason) Reason {
+	switch r.Constant {
+	case "ClawbackResultCodeClawbackNotClawbackEnabled":
+		r.Summary = fmt.Sprintf("the trustline for %s from %s was opened without the issuer's clawback-enabled flag, so this account is not allowed to be clawed back",
+			assetLabel(o.Asset), shortAddr(source))
+		r.Hint = "Enable the issuer's clawback flag before opening the trustline, or create a new trustline with trustline_clawback_enabled set and retry."
+	case "ClawbackResultCodeClawbackNoTrust":
+		r.Summary = fmt.Sprintf("the target account %s has no trustline for %s, so there is nothing to claw back",
+			shortAddr(source), assetLabel(o.Asset))
+		r.Hint = "Create the asset trustline for the target account before attempting clawback, or use the correct account and asset."
+	case "ClawbackResultCodeClawbackUnderfunded":
+		r.Summary = fmt.Sprintf("the clawback amount %s exceeds the current balance on the trustline for %s; the target account does not hold enough of that asset",
+			amount.String(o.Amount), assetLabel(o.Asset))
+		r.Hint = "Reduce the clawback amount to the target's current balance, or verify the trustline balance before submitting the operation."
+	}
+	return r
+}
+
+// deepenClawbackClaimableBalanceFailure refines a failed claimable-balance
+// clawback explanation using the claimable balance id and the asset metadata it
+// carries. The protocol only permits this when the claimable balance was
+// created with clawback enabled.
+func deepenClawbackClaimableBalanceFailure(o xdr.ClawbackClaimableBalanceOp, r Reason) Reason {
+	switch r.Constant {
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotClawbackEnabled":
+		if balanceID, err := o.BalanceId.MarshalBinary(); err == nil {
+			r.Summary = fmt.Sprintf("the claimable balance %s was created without clawback enabled, so it cannot be clawed back", hex.EncodeToString(balanceID)[:12])
+		} else {
+			r.Summary = "the claimable balance was created without clawback enabled, so it cannot be clawed back"
+		}
+		r.Hint = "Recreate the claimable balance with the clawback-enabled flag set, or use a balance that was issued under the clawback-enabled configuration."
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotIssuer":
+		r.Summary = "the sender is not the asset issuer for this claimable balance, so clawback is not authorised"
+		r.Hint = "Only the issuing account can claw back a claimable balance for this asset."
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceDoesNotExist":
+		r.Summary = "the claimable balance id does not exist in the ledger, so there is nothing to claw back"
+		r.Hint = "Verify the balance id and the correct network state before retrying."
+	}
+	return r
 func describeSetTrustLineFlags(o xdr.SetTrustLineFlagsOp) string {
 	var parts []string
 	if o.SetFlags != 0 {

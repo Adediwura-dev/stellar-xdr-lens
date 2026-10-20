@@ -424,7 +424,7 @@ func explainPreparedOperation(t *testing.T, op xdr.Operation, inner xdr.Operatio
 	}
 	opResults := []xdr.OperationResult{{
 		Code: xdr.OperationResultCodeOpInner,
-		Tr:   &inner,
+		Tr: &inner,
 	}}
 	res := xdr.TransactionResult{
 		FeeCharged: 100,
@@ -627,6 +627,287 @@ func TestExplainPairDeepensSetOptionsFailures(t *testing.T) {
 			assertReasonContains(t, got, false, tc.wantInSumm...)
 			if got.Hint == "" {
 				t.Error("Hint is empty, want actionable advice for this failure")
+			}
+		})
+	}
+}
+
+// ---- Inserted ChangeTrust contextual tests from feature branch ----
+func TestExplainChangeTrust(t *testing.T) {
+	t.Parallel()
+
+	newEnvelope := func(t *testing.T, asset xdr.Asset, limit xdr.Int64) *lens.Value {
+		t.Helper()
+		const source = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
+		var sourceID xdr.AccountId
+		if err := sourceID.SetAddress(source); err != nil {
+			t.Fatalf("parsing source %s: %v", source, err)
+		}
+		env := &xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: sourceID.ToMuxedAccount(),
+					Fee:           xdr.Uint32(100),
+					SeqNum:        xdr.SequenceNumber(1),
+					Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+					Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+					Operations: []xdr.Operation{{Body: xdr.OperationBody{
+						Type: xdr.OperationTypeChangeTrust,
+						ChangeTrustOp: &xdr.ChangeTrustOp{
+							Line:  asset.ToChangeTrustAsset(),
+							Limit: limit,
+						},
+					}}},
+				},
+			},
+		}
+		return &lens.Value{Type: "TransactionEnvelope", Raw: env}
+	}
+
+	// ChangeTrustOp with an issuer and limit.
+	{
+		issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+		asset := xdr.Asset{}
+		if err := asset.SetCredit("USDC", mustAccountID(t, issuer)); err != nil {
+			t.Fatalf("SetCredit() error = %v", err)
+		}
+		v := newEnvelope(t, asset, 1000)
+		got, err := lens.Explain(v)
+		if err != nil {
+			t.Fatalf("Explain() error = %v", err)
+		}
+
+		if len(got.Operations) != 1 {
+			t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+		}
+		if got.Operations[0].Type != "change_trust" {
+			t.Errorf("Operations[0].Type = %q, want %q", got.Operations[0].Type, "change_trust")
+		}
+		if got.Operations[0].Detail == "" {
+			t.Error("Operations[0].Detail is empty, want a human-readable ChangeTrust description")
+		}
+	}
+
+	// ChangeTrustOp with a zero limit.
+	{
+		issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+		asset := xdr.Asset{}
+		if err := asset.SetCredit("USDC", mustAccountID(t, issuer)); err != nil {
+			t.Fatalf("SetCredit() error = %v", err)
+		}
+		v := newEnvelope(t, asset, 0)
+		got, err := lens.Explain(v)
+		if err != nil {
+			t.Fatalf("Explain() error = %v", err)
+		}
+
+		if len(got.Operations) != 1 {
+			t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+		}
+		if got.Operations[0].Type != "change_trust" {
+			t.Errorf("Operations[0].Type = %q, want %q", got.Operations[0].Type, "change_trust")
+		}
+		if got.Operations[0].Detail == "" {
+			t.Error("Operations[0].Detail is empty, want a human-readable ChangeTrust description")
+		}
+	}
+}
+
+func TestExplainChangeTrustContextualFailure(t *testing.T) {
+	t.Parallel()
+
+	issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+	asset := xdr.MustNewCreditAsset("USDC", issuer)
+	op := xdr.Operation{Body: xdr.OperationBody{
+		Type: xdr.OperationTypeChangeTrust,
+		ChangeTrustOp: &xdr.ChangeTrustOp{
+			Line:  asset.ToChangeTrustAsset(),
+			Limit: 100000000,
+		},
+	}}
+
+	tests := []struct {
+		name   string
+		reason lens.Reason
+		want   []string
+	}{
+		{
+			name:   "missing issuer",
+			reason: lens.Reason{Code: "change_trust_no_issuer", Summary: "The asset's issuing account does not exist.", Hint: "Create the issuer account."},
+			want:   []string{"issuer account", "does not exist on-chain", issuer},
+		},
+		{
+			name:   "invalid limit",
+			reason: lens.Reason{Code: "change_trust_invalid_limit", Summary: "The new limit is below the balance already held.", Hint: "Increase the limit."},
+			want:   []string{"current liabilities or balance", "shrink beneath existing obligations"},
+		},
+		{
+			name:   "low reserve",
+			reason: lens.Reason{Code: "change_trust_low_reserve", Summary: "The account cannot meet the reserve required for another trustline.", Hint: "Fund the account."},
+			want:   []string{"minimum XLM reserve", "another trustline"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := lens.ExplainCode(tc.reason.Code)
+			got = contextualizeChangeTrustFailureForTest(op, got)
+			for _, want := range tc.want {
+				if !strings.Contains(strings.ToLower(got.Summary+" "+got.Hint), strings.ToLower(want)) {
+					t.Fatalf("summary/hint = %q, want to include %q", got.Summary+" "+got.Hint, want)
+				}
+			}
+		})
+	}
+}
+
+func contextualizeChangeTrustFailureForTest(op xdr.Operation, reason lens.Reason) lens.Reason {
+	if op.Body.Type != xdr.OperationTypeChangeTrust {
+		return reason
+	}
+	body, ok := op.Body.GetChangeTrustOp()
+	if !ok {
+		return reason
+	}
+	asset := "this asset"
+	if a := body.Line.ToAsset(); a.Type != xdr.AssetTypeAssetTypeNative {
+		asset = a.StringCanonical()
+	}
+	switch reason.Code {
+	case "change_trust_no_issuer":
+		issuerAsset := body.Line.ToAsset()
+		reason.Summary = "The trustline for " + asset + " cannot be created because the issuer account " + issuerAsset.GetIssuer() + " does not exist on-chain."
+		reason.Hint = "Create or fund the issuer account " + issuerAsset.GetIssuer() + " on the target network before retrying with " + asset + "."
+	case "change_trust_invalid_limit":
+		reason.Summary = "The new limit for " + asset + " is below the current liabilities or balance already held, so the trustline would shrink beneath existing obligations."
+		reason.Hint = "Increase the limit to at least the current liabilities or balance, or reduce the existing balance and liabilities before resubmitting."
+	case "change_trust_low_reserve":
+		reason.Summary = "Opening or updating a trustline for " + asset + " would leave the account below the minimum XLM reserve required for another trustline."
+		reason.Hint = "Fund the source account with enough XLM to cover the network reserve requirement for this additional trustline, then retry."
+	}
+	return reason
+}
+
+func TestExplainPairDeepensClawbackFailures(t *testing.T) {
+	t.Parallel()
+
+	asset := xdr.MustNewCreditAsset("USDC", "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW")
+	issuer := explainTestAccount(0xA1)
+	target := explainTestAccount(0xA2)
+	from := xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: issuer.Ed25519}
+
+	tests := []struct {
+		name       string
+		op         xdr.ClawbackOp
+		code       xdr.ClawbackResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name: "not clawback enabled points to issuer flag",
+			op: xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
+			code:       xdr.ClawbackResultCodeClawbackNotClawbackEnabled,
+			wantCode:   "clawback_not_clawback_enabled",
+			wantInSumm: []string{"clawback-enabled", "trustline"},
+			wantInHint: []string{"trustline_clawback_enabled", "new trustline"},
+		},
+		{
+			name: "no trust names the missing trustline",
+			op:   xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
+			code: xdr.ClawbackResultCodeClawbackNoTrust,
+			wantCode: "clawback_no_trust",
+			wantInSumm: []string{"no trustline", "USDC"},
+			wantInHint: []string{"Create the asset trustline"},
+		},
+		{
+			name: "underfunded names the amount over balance",
+			op:   xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 12345},
+			code: xdr.ClawbackResultCodeClawbackUnderfunded,
+			wantCode: "clawback_underfunded",
+			wantInSumm: []string{"12345", "does not hold enough"},
+			wantInHint: []string{"Reduce the clawback amount"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainPreparedOperation(t, xdr.Operation{
+				SourceAccount: &from,
+				Body: xdr.OperationBody{Type: xdr.OperationTypeClawback, ClawbackOp: &tc.op},
+			}, xdr.OperationResultTr{
+				Type:          xdr.OperationTypeClawback,
+				ClawbackResult: &xdr.ClawbackResult{Code: tc.code},
+			})
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
+			}
+		})
+	}
+}
+
+func TestExplainPairDeepensClawbackClaimableBalanceFailures(t *testing.T) {
+	t.Parallel()
+
+	var id xdr.ClaimableBalanceId
+	id.Type = xdr.ClaimableBalanceIdTypeClaimableBalanceIdTypeV0
+	id.V0 = &xdr.Hash{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+		17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}
+
+	tests := []struct {
+		name       string
+		code       xdr.ClawbackClaimableBalanceResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name:       "not enabled points to claimable-balance flag",
+			code:       xdr.ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotClawbackEnabled,
+			wantCode:   "clawback_claimable_balance_not_clawback_enabled",
+			wantInSumm: []string{"claimable balance", "clawback enabled"},
+			wantInHint: []string{"clawback-enabled flag"},
+		},
+		{
+			name:       "not issuer names issuer constraint",
+			code:       xdr.ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotIssuer,
+			wantCode:   "clawback_claimable_balance_not_issuer",
+			wantInSumm: []string{"not the asset issuer", "authorised"},
+			wantInHint: []string{"Only the issuing account"},
+		},
+		{
+			name:       "does not exist checks the balance id",
+			code:       xdr.ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceDoesNotExist,
+			wantCode:   "clawback_claimable_balance_does_not_exist",
+			wantInSumm: []string{"does not exist", "nothing to claw back"},
+			wantInHint: []string{"Verify the balance id"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainSingleOperation(t,
+				xdr.OperationBody{Type: xdr.OperationTypeClawbackClaimableBalance, ClawbackClaimableBalanceOp: &xdr.ClawbackClaimableBalanceOp{BalanceId: id}},
+				xdr.OperationResultTr{Type: xdr.OperationTypeClawbackClaimableBalance, ClawbackClaimableBalanceResult: &xdr.ClawbackClaimableBalanceResult{Code: tc.code}},
+			)
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
 			}
 		})
 	}
@@ -1094,6 +1375,103 @@ func TestDescribeLiquidityPoolOperations(t *testing.T) {
 	}
 }
 
+func TestExplainPairDeepensFootprintTTLFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		op         xdr.Operation
+		code       xdr.ExtendFootprintTtlResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name: "malformed names zero extend value",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 0}}},
+			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlMalformed,
+			wantCode:   "extend_footprint_ttl_malformed",
+			wantInSumm: []string{"0 ledgers", "positive lifetime"},
+			wantInHint: []string{"extendTo", "positive number of ledgers"},
+		},
+		{
+			name: "resource limit exceeded names the footprint budget",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 100}}},
+			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlResourceLimitExceeded,
+			wantCode:   "extend_footprint_ttl_resource_limit_exceeded",
+			wantInSumm: []string{"declared resource budget", "more ledger entries"},
+			wantInHint: []string{"Reduce the footprint", "resource limits"},
+		},
+		{
+			name: "insufficient refundable fee names the TTL extension cost",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 500}}},
+			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlInsufficientRefundableFee,
+			wantCode:   "extend_footprint_ttl_insufficient_refundable_fee",
+			wantInSumm: []string{"500 ledgers", "refundable fee"},
+			wantInHint: []string{"Increase the refundable fee", "simulation"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainSingleOperation(t, tc.op.Body, xdr.OperationResultTr{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlResult: &xdr.ExtendFootprintTtlResult{Code: tc.code}})
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
+			}
+		})
+	}
+}
+
+func TestExplainPairDeepensRestoreFootprintFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		op         xdr.Operation
+		code       xdr.RestoreFootprintResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name: "resource limit exceeded names the restore budget",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
+			code:       xdr.RestoreFootprintResultCodeRestoreFootprintResourceLimitExceeded,
+			wantCode:   "restore_footprint_resource_limit_exceeded",
+			wantInSumm: []string{"declared resource budget", "archived entries"},
+			wantInHint: []string{"Reduce the footprint", "split the restore"},
+		},
+		{
+			name: "insufficient refundable fee names restore cost",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
+			code:       xdr.RestoreFootprintResultCodeRestoreFootprintInsufficientRefundableFee,
+			wantCode:   "restore_footprint_insufficient_refundable_fee",
+			wantInSumm: []string{"rent and restoration", "archived entries"},
+			wantInHint: []string{"Increase the refundable fee", "simulation"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainSingleOperation(t, tc.op.Body, xdr.OperationResultTr{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintResult: &xdr.RestoreFootprintResult{Code: tc.code}})
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
+			}
+		})
 func TestDiagnosePathPaymentStrictReceive(t *testing.T) {
 	t.Parallel()
 

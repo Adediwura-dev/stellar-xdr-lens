@@ -1,6 +1,7 @@
 package lens
 
 import (
+	"encoding/hex"
 	"reflect"
 	"testing"
 
@@ -202,6 +203,7 @@ func TestDescribeLedgerUpgrade(t *testing.T) {
 		want    string
 	}{
 		{"version", version, "protocol version 23"},
+		{"max tx set size", maxTxSet, "max tx set size 1200"},
 		{"base fee", baseFee, "base fee 0.0000200 XLM (200 stroops)"},
 		{"max tx set size", maxTxSet, "max tx set size 1200"},
 		{"base reserve", baseReserve, "base reserve 1.0000000 XLM (10000000 stroops)"},
@@ -238,8 +240,8 @@ func TestEnrichUpgradeType(t *testing.T) {
 	if !ok || note != "protocol version 23" {
 		t.Errorf("enrichUpgradeType(version) = (%q, %v), want protocol version 23", note, ok)
 	}
-	if b, okRaw := raw.(xdr.UpgradeType); !okRaw || string(b) != string(blob) {
-		t.Errorf("raw = %v, want the original upgrade bytes", raw)
+	if s, okRaw := raw.(string); !okRaw || s != hex.EncodeToString(blob) {
+		t.Errorf("raw = %v, want hex string of original upgrade bytes", raw)
 	}
 
 	// Empty and undecodable blobs decline so the generic hex view remains.
