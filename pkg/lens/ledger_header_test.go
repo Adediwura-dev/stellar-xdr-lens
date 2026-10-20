@@ -222,9 +222,14 @@ func TestLedgerHeaderFlagsAndUpgradeVotes(t *testing.T) {
 		t.Errorf("Upgrades[1] Note = %q, want the base reserve proposal", note)
 	}
 
-	// The raw vote bytes remain available for machine-readable output.
-	if b, ok := upgrades.Children[0].Value.(xdr.UpgradeType); !ok || string(b) != string(versionBlob) {
-		t.Errorf("Upgrades[0] Value = %v, want the original upgrade blob", upgrades.Children[0].Value)
+	// The raw vote bytes remain available on the decoded header's Raw value
+	// so callers that need the original blob can still access it.
+	rawHdr, ok := v.Raw.(*xdr.LedgerHeader)
+	if !ok {
+		t.Fatalf("Raw is %T, want *xdr.LedgerHeader", v.Raw)
+	}
+	if string(rawHdr.ScpValue.Upgrades[0]) != string(versionBlob) {
+		t.Errorf("raw upgrade blob = %v, want %v", rawHdr.ScpValue.Upgrades[0], versionBlob)
 	}
 }
 

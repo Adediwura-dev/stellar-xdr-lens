@@ -1,7 +1,9 @@
 package lens
 
 import (
+	"encoding/hex"
 	"fmt"
+	"math/big"
 	"reflect"
 	"strconv"
 	"strings"
@@ -55,6 +57,10 @@ type OpSummary struct {
 	// Result is the operation's outcome, present only when a result was
 	// supplied and covers this operation.
 	Result *Reason `json:"result,omitempty"`
+	// PathPayment provides contextual diagnostics for path payment slippage.
+	PathPayment *PathPaymentSlippageDiagnosis `json:"pathPayment,omitempty"`
+	// TrustLine provides contextual diagnostics for SetTrustLineFlags failures.
+	TrustLine *SetTrustLineFlagsDiagnosis `json:"trustLine,omitempty"`
 }
 
 // Outcome is the resolved result of a transaction.
@@ -73,7 +79,7 @@ type Outcome struct {
 // Explain summarises a single decoded value.
 //
 // It accepts a TransactionEnvelope or a TransactionResult. For any other type
-// it returns an error, since a general-purpose "explanation" of an arbitrary
+// it returns an error, since a general-purpose "exexplanation" of an arbitrary
 // XDR struct would be no better than the decoded tree.
 func Explain(v *Value) (*Summary, error) {
 	if v == nil {
@@ -126,7 +132,8 @@ func explainEnvelope(env *xdr.TransactionEnvelope, res *xdr.TransactionResult) (
 	}
 	s.Preconds = describePreconditions(env)
 
-	for i, op := range env.Operations() {
+	ops := env.Operations()
+	for i, op := range ops {
 		s.Operations = append(s.Operations, OpSummary{
 			Index:  i,
 			Type:   operationTypeLabel(op.Body.Type),
@@ -141,9 +148,17 @@ func explainEnvelope(env *xdr.TransactionEnvelope, res *xdr.TransactionResult) (
 	}
 
 	s.Kind = "transaction"
-	if err := attachResult(s, res, env.Operations(), s.Source); err != nil {
+	if err := attachResult(s, res, ops, s.Source); err != nil {
 		return nil, err
 	}
+	for i, op := range env.Operations() {
+		if i >= len(s.Operations) || s.Operations[i].Result == nil {
+			continue
+		}
+		reason := contextualizeChangeTrustFailure(op, *s.Operations[i].Result)
+		s.Operations[i].Result = &reason
+	}
+	s.Headline = resultHeadline(s, s.Outcome)
 	return s, nil
 }
 
@@ -152,7 +167,8 @@ func explainEnvelope(env *xdr.TransactionEnvelope, res *xdr.TransactionResult) (
 // the outcome is populated.
 func explainResult(res *xdr.TransactionResult) (*Summary, error) {
 	s := &Summary{Kind: "transaction_result"}
-	// There is no envelope, so argument-specific context cannot be resolved.
+	// No envelope means no operation bodies, so failures keep their generic
+	// per-code explanation; deepenOperationFailure never runs.
 	if err := attachResult(s, res, nil, ""); err != nil {
 		return nil, err
 	}
@@ -162,11 +178,11 @@ func explainResult(res *xdr.TransactionResult) (*Summary, error) {
 // attachResult resolves a TransactionResult into an Outcome and pairs each
 // operation result with its operation.
 //
-// ops is the envelope's operation list, or nil when only a result was given,
-// and txSource is the transaction's source account. They are used to resolve
-// argument-specific diagnostics that the result code cannot carry on its own,
-// such as the manage_data entry key or a create_claimable_balance asset.
-func attachResult(s *Summary, res *xdr.TransactionResult, ops []xdr.Operation, txSource string) error {
+// ops carries the envelope's operations when one was supplied. They let a
+// failed operation's explanation be deepened with the operation's own
+// parameters (see deepenOperationFailure); without them the generic per-code
+// reason stands.
+func attachResult(s *Summary, res *xdr.TransactionResult, ops []xdr.Operation, source string) error {
 	s.FeeCharged = int64(res.FeeCharged)
 
 	code, err := resultCodeName(res)
@@ -189,14 +205,34 @@ func attachResult(s *Summary, res *xdr.TransactionResult, ops []xdr.Operation, t
 	if ok {
 		for i, opRes := range opResults {
 			reason := explainOperationResult(opRes)
-			if i < len(ops) {
-				reason = withOperationContext(reason, ops[i], txSource)
+			if !reason.Success && i < len(ops) {
+				reason = deepenOperationFailure(source, ops[i], reason)
 			}
 			if !reason.Success {
 				outcome.FailedOps = append(outcome.FailedOps, i)
 			}
 			// Attach to the matching operation when the envelope was given.
 			if i < len(s.Operations) {
+				if i < len(ops) {
+					op := ops[i]
+					switch op.Body.Type {
+					case xdr.OperationTypePathPaymentStrictReceive,
+						xdr.OperationTypePathPaymentStrictSend:
+						if diag := DiagnosePathPaymentSlippage(op, i, opRes); diag != nil {
+							s.Operations[i].PathPayment = diag
+							if !reason.Success && diag.Hint != "" {
+								reason.Hint = diag.Hint
+							}
+						}
+					case xdr.OperationTypeSetTrustLineFlags:
+						if diag := DiagnoseSetTrustLineFlagsOperation(op, i, opRes); diag != nil {
+							s.Operations[i].TrustLine = diag
+							if !reason.Success && diag.Hint != "" {
+								reason.Hint = diag.Hint
+							}
+						}
+					}
+				}
 				s.Operations[i].Result = &reason
 			} else {
 				// Result without a paired envelope: still surface it.
@@ -247,6 +283,486 @@ func explainOperationResult(opRes xdr.OperationResult) Reason {
 		}
 	}
 	return ExplainCode(opRes.Code.String())
+}
+
+// ---------------------------------------------------------------------------
+// Context-aware failure deepening
+// ---------------------------------------------------------------------------
+//
+// explainOperationResult answers "what failed". When an envelope is paired
+// with its result the operation bodies are also in hand, and for the
+// operation families with the richest failure modes that is enough to say
+// precisely why: which threshold exceeded 255, which flag bit is
+// contradictory, how far the pool price drifted from the window the
+// operation accepted.
+//
+// deepenOperationFailure refines such a Reason using the operation body. It
+// only ever rewrites Summary and Hint for codes whose causes are provable
+// from the operation's own parameters; Code and Constant are untouched, and
+// anything it cannot pin down keeps the generic per-code explanation.
+// Everything here is pure analysis of supplied XDR — no network calls, no
+// ledger lookups — so output stays deterministic and offline-first.
+func deepenOperationFailure(source string, op xdr.Operation, r Reason) Reason {
+	if r.Success {
+		return r
+	}
+	switch {
+	case strings.HasPrefix(r.Constant, "SetOptionsResultCode"):
+		if body, ok := op.Body.GetSetOptionsOp(); ok {
+			return deepenSetOptionsFailure(operationEffectiveSource(source, op), body, r)
+		}
+	case strings.HasPrefix(r.Constant, "LiquidityPoolDepositResultCode"):
+		if body, ok := op.Body.GetLiquidityPoolDepositOp(); ok {
+			return deepenLiquidityPoolDepositFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "LiquidityPoolWithdrawResultCode"):
+		if body, ok := op.Body.GetLiquidityPoolWithdrawOp(); ok {
+			return deepenLiquidityPoolWithdrawFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ClawbackResultCode"):
+		if body, ok := op.Body.GetClawbackOp(); ok {
+			return deepenClawbackFailure(operationEffectiveSource(source, op), body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ClawbackClaimableBalanceResultCode"):
+		if body, ok := op.Body.GetClawbackClaimableBalanceOp(); ok {
+			return deepenClawbackClaimableBalanceFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ExtendFootprintTtlResultCode"):
+		if body, ok := op.Body.GetExtendFootprintTtlOp(); ok {
+			return deepenExtendFootprintTtlFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "RestoreFootprintResultCode"):
+		if body, ok := op.Body.GetRestoreFootprintOp(); ok {
+			return deepenRestoreFootprintFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ManageDataResultCode"):
+		return withOperationContext(r, op, source)
+	case strings.HasPrefix(r.Constant, "CreateClaimableBalanceResultCode"):
+		return withOperationContext(r, op, source)
+	}
+	return r
+}
+
+func deepenExtendFootprintTtlFailure(o xdr.ExtendFootprintTtlOp, r Reason) Reason {
+	switch r.Constant {
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlMalformed":
+		if o.ExtendTo == 0 {
+			r.Summary = "the operation asks to extend entries to 0 ledgers; a TTL extension must target a positive lifetime"
+			r.Hint = "Set extendTo to a positive number of ledgers and retry. A value of zero does not preserve any lifetime."
+		}
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlResourceLimitExceeded":
+		r.Summary = "the operation tries to extend the TTL of more ledger entries than the transaction's declared resource budget allows"
+		r.Hint = "Reduce the footprint or split the operation into smaller TTL extensions so the declared resource limits cover the work."
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlInsufficientRefundableFee":
+		r.Summary = fmt.Sprintf("the refundable fee is too small to cover extending the footprint TTL to %d ledgers", o.ExtendTo)
+		r.Hint = "Increase the refundable fee or reduce the number of entries in the footprint; simulation reports the rent this extension requires."
+	}
+	return r
+}
+
+func deepenRestoreFootprintFailure(o xdr.RestoreFootprintOp, r Reason) Reason {
+	switch r.Constant {
+	case "RestoreFootprintResultCodeRestoreFootprintResourceLimitExceeded":
+		r.Summary = "the operation tries to restore more archived entries than the transaction's declared resource budget allows"
+		r.Hint = "Reduce the footprint or split the restore into smaller operations so the declared resource limits fit the work."
+	case "RestoreFootprintResultCodeRestoreFootprintInsufficientRefundableFee":
+		r.Summary = "the refundable fee is too small to cover the rent and restoration of the archived entries"
+		r.Hint = "Increase the refundable fee to match the restore cost reported by simulation."
+	}
+	return r
+}
+
+// operationEffectiveSource resolves the account an operation runs as: the
+// operation-level override when present, otherwise the transaction source.
+func operationEffectiveSource(txSource string, op xdr.Operation) string {
+	if op.SourceAccount != nil {
+		if addr, err := op.SourceAccount.GetAddress(); err == nil && addr != "" {
+			return addr
+		}
+	}
+	return txSource
+}
+
+// accountAuthFlagBits names the defined account-flag bits in bit order. The
+// mask mirrors AUTH_FLAGS in stellar-core; anything outside it is rejected as
+// an unknown flag.
+var accountAuthFlagBits = [...]struct {
+	bit  uint32
+	name string
+}{
+	{0x1, "auth_required"},
+	{0x2, "auth_revocable"},
+	{0x4, "auth_immutable"},
+	{0x8, "auth_clawback_enabled"},
+}
+
+const (
+	authRequiredFlag        uint32 = 0x1
+	authRevocableFlag       uint32 = 0x2
+	authImmutableFlag       uint32 = 0x4
+	authClawbackEnabledFlag uint32 = 0x8
+	authFlagMask                   = authRequiredFlag | authRevocableFlag | authImmutableFlag | authClawbackEnabledFlag
+)
+
+// flagBitsNames renders set flag bits as "name (0xN)" pairs joined by
+// "and", so a summary can name the exact bits involved in a failure.
+func flagBitsNames(flags uint32) string {
+	var parts []string
+	for _, f := range accountAuthFlagBits {
+		if flags&f.bit != 0 {
+			parts = append(parts, fmt.Sprintf("%s (0x%x)", f.name, f.bit))
+		}
+	}
+	if unknown := flags &^ authFlagMask; unknown != 0 {
+		parts = append(parts, fmt.Sprintf("unrecognised bit(s) 0x%x", unknown))
+	}
+	return strings.Join(parts, " and ")
+}
+
+// deepenSetOptionsFailure refines a failed set_options explanation with the
+// operation's own fields. stellar-core validates most of these conditions in
+// doCheckValid, from the operation body alone, so every diagnosis below is
+// provable offline from the XDR that was submitted.
+func deepenSetOptionsFailure(source string, o xdr.SetOptionsOp, r Reason) Reason {
+	switch r.Constant {
+	case "SetOptionsResultCodeSetOptionsThresholdOutOfRange":
+		// XDR carries thresholds as uint32 but the protocol only accepts
+		// 0..255; the offending field is visible right here in the op.
+		var over []string
+		for _, f := range []struct {
+			name string
+			v    *xdr.Uint32
+		}{
+			{"master weight", o.MasterWeight},
+			{"low threshold", o.LowThreshold},
+			{"medium threshold", o.MedThreshold},
+			{"high threshold", o.HighThreshold},
+		} {
+			if f.v != nil && uint64(*f.v) > 255 {
+				over = append(over, fmt.Sprintf("%s %d", f.name, *f.v))
+			}
+		}
+		if len(over) > 0 {
+			r.Summary = fmt.Sprintf("%s is outside the allowed range 0–255 for threshold weights",
+				strings.Join(over, ", "))
+			r.Hint = "Threshold weights are a single byte; clamp each value to 0–255 before signing."
+		}
+
+	case "SetOptionsResultCodeSetOptionsBadFlags":
+		// Core rejects an operation that sets and clears the same bit.
+		if o.SetFlags != nil && o.ClearFlags != nil {
+			if overlap := uint32(*o.SetFlags) & uint32(*o.ClearFlags); overlap != 0 {
+				r.Summary = fmt.Sprintf(
+					"the operation sets and clears the same account flag(s) in one change: %s; a flag cannot move in both directions at once",
+					flagBitsNames(overlap))
+				r.Hint = "Keep each flag on exactly one side of the operation, or split the change into two operations."
+			}
+		}
+
+	case "SetOptionsResultCodeSetOptionsUnknownFlag":
+		var unknown uint32
+		if o.SetFlags != nil {
+			unknown |= uint32(*o.SetFlags) &^ authFlagMask
+		}
+		if o.ClearFlags != nil {
+			unknown |= uint32(*o.ClearFlags) &^ authFlagMask
+		}
+		if unknown != 0 {
+			r.Summary = fmt.Sprintf(
+				"the flags carry unrecognised bit(s) 0x%x; the only defined account flags are %s",
+				unknown, flagBitsNames(authFlagMask))
+			r.Hint = "Mask the flag value down to the four defined bits before submitting."
+		}
+
+	case "SetOptionsResultCodeSetOptionsCantChange":
+		// Core returns this only when auth flags are touched on an account
+		// whose auth-immutable flag is set, and that flag is permanent.
+		var touched uint32
+		if o.ClearFlags != nil {
+			touched |= uint32(*o.ClearFlags)
+			if uint32(*o.ClearFlags)&authImmutableFlag != 0 {
+				r.Summary = "the operation tries to clear the auth-immutable flag, but that flag is permanent once set; no operation can clear it"
+				r.Hint = "An immutable account's auth flags are locked forever. Use a different account."
+				return r
+			}
+		}
+		if o.SetFlags != nil {
+			touched |= uint32(*o.SetFlags)
+		}
+		if touched &= authFlagMask; touched != 0 {
+			r.Summary = fmt.Sprintf(
+				"the operation changes account auth flags (%s), but the account has auth-immutable set, which permanently locks its flags",
+				flagBitsNames(touched))
+			r.Hint = "Nothing can change an immutable account's auth flags. Use a different account, or merge into a fresh one."
+		}
+
+	case "SetOptionsResultCodeSetOptionsLowReserve":
+		// The only reserve a set_options op can add is a new signer subentry.
+		if o.Signer != nil && o.Signer.Weight != 0 {
+			r.Summary = fmt.Sprintf(
+				"adding %s as a new signer subentry raises the account's reserve by one base reserve (0.5 XLM on Mainnet), and the remaining balance cannot cover it",
+				signerKeyLabel(o.Signer.Key))
+			r.Hint = "Fund the account by at least one more base reserve, or free reserve by removing an offer, trustline, data entry or signer first."
+		}
+
+	case "SetOptionsResultCodeSetOptionsTooManySigners":
+		// Only a genuinely new signer key hits the cap; updating the weight
+		// of an existing signer does not.
+		if o.Signer != nil && o.Signer.Weight != 0 {
+			r.Summary = fmt.Sprintf(
+				"the account already holds the maximum of five signers and %s is not one of them; updating an existing signer's weight would not hit this limit",
+				signerKeyLabel(o.Signer.Key))
+			r.Hint = "Remove a signer first (the same key with weight 0) before adding a new one."
+		}
+
+	case "SetOptionsResultCodeSetOptionsBadSigner":
+		if o.Signer == nil {
+			break
+		}
+		if addr, err := o.Signer.Key.GetAddress(); err == nil && addr != "" && addr == source {
+			r.Summary = fmt.Sprintf(
+				"the operation adds the source account %s as a signer of itself; an account can never sign for its own address",
+				shortAddr(addr))
+			r.Hint = "Use a distinct key (or a pre-auth transaction hash) as the signer."
+			return r
+		}
+		if o.Signer.Weight > 255 {
+			r.Summary = fmt.Sprintf("signer weight %d is outside the allowed range 0–255", o.Signer.Weight)
+			r.Hint = "Signer weights are a single byte; clamp the weight to 0–255."
+		}
+
+	case "SetOptionsResultCodeSetOptionsInvalidHomeDomain":
+		if o.HomeDomain != nil {
+			r.Summary = fmt.Sprintf("home domain %q is not a syntactically valid domain name", string(*o.HomeDomain))
+			r.Hint = "Use a valid DNS-style name, or the empty string to clear the domain."
+		}
+
+	case "SetOptionsResultCodeSetOptionsAuthRevocableRequired":
+		// Clawback is only legal on a revocable account.
+		if o.SetFlags != nil && uint32(*o.SetFlags)&authClawbackEnabledFlag != 0 {
+			r.Summary = "the operation enables auth-clawback on an account that is not auth-revocable; clawback is only allowed on revocable accounts"
+			r.Hint = "Include auth_revocable (0x2) in the same change, or set it before enabling clawback."
+		}
+	}
+	return r
+}
+
+// signerKeyLabel renders a signer key short enough for prose while keeping
+// its kind recognisable. It never panics: nil union arms degrade to the kind
+// alone.
+func signerKeyLabel(k xdr.SignerKey) string {
+	hexOf := func(b *xdr.Uint256) string {
+		if b == nil {
+			return ""
+		}
+		return " " + hex.EncodeToString(b[:])[:8] + "…"
+	}
+	switch k.Type {
+	case xdr.SignerKeyTypeSignerKeyTypeEd25519:
+		if k.Ed25519 == nil {
+			return "signer"
+		}
+		if addr, err := (&k).GetAddress(); err == nil && addr != "" {
+			return "signer " + shortAddr(addr)
+		}
+		return "signer ed25519" + hexOf(k.Ed25519)
+	case xdr.SignerKeyTypeSignerKeyTypePreAuthTx:
+		return "pre-auth signer" + hexOf(k.PreAuthTx)
+	case xdr.SignerKeyTypeSignerKeyTypeHashX:
+		return "hash-x signer" + hexOf(k.HashX)
+	case xdr.SignerKeyTypeSignerKeyTypeEd25519SignedPayload:
+		if k.Ed25519SignedPayload == nil {
+			return "signed-payload signer"
+		}
+		if addr, err := (&k).GetAddress(); err == nil && addr != "" {
+			return "signed-payload signer " + shortAddr(addr)
+		}
+		return "signed-payload signer"
+	}
+	return "signer"
+}
+
+// deepenLiquidityPoolDepositFailure refines a failed liquidity-pool-deposit
+// explanation with the operation's own amounts and price bounds, following
+// the checks in stellar-core's LiquidityPoolDepositOpFrame.
+func deepenLiquidityPoolDepositFailure(o xdr.LiquidityPoolDepositOp, r Reason) Reason {
+	switch r.Constant {
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositMalformed":
+		if summary, ok := liquidityPoolDepositMalformedReason(o); ok {
+			r.Summary = summary
+			r.Hint = "Fix the deposit parameters: positive max amounts and a strictly positive, non-empty price window (minPrice ≤ maxPrice)."
+		}
+
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositBadPrice":
+		if o.MinPrice.N <= 0 || o.MinPrice.D <= 0 || o.MaxPrice.N <= 0 || o.MaxPrice.D <= 0 {
+			break // degenerate bounds; the malformed diagnosis owns this case
+		}
+		r.Summary = fmt.Sprintf(
+			"the pool's ratio at apply time fell outside the price window the deposit accepted (A:B between %s and %s) — slippage between quoting and submission",
+			priceRatio(o.MinPrice), priceRatio(o.MaxPrice))
+		hint := "Widen minPrice/maxPrice to tolerate pool movement (for example ±1–5% around the quoted ratio) and resubmit; core compares the actual deposit amounts, which follow the pool's current ratio, against the window."
+		if o.MinPrice.N == o.MaxPrice.N && o.MinPrice.D == o.MaxPrice.D {
+			hint = "The window pins one exact ratio (min == max), so any trade before inclusion breaks it. Widen minPrice/maxPrice around the quoted ratio (for example ±1–5%) and resubmit."
+		}
+		if dir := depositAmountsVsWindow(o); dir != 0 {
+			which := "below"
+			if dir > 0 {
+				which = "above"
+			}
+			r.Summary += fmt.Sprintf(
+				"; the offered amounts themselves (%s and %s) imply a ratio that already falls %s the window",
+				amount.String(o.MaxAmountA), amount.String(o.MaxAmountB), which)
+		}
+		r.Hint = hint
+
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositUnderfunded":
+		r.Summary = fmt.Sprintf(
+			"the source cannot cover the deposit of %s and %s: the spendable balance of one asset (balance, minus the base reserve and any sell liabilities) is short",
+			amount.String(o.MaxAmountA), amount.String(o.MaxAmountB))
+		r.Hint = "Check both trustline balances; for XLM the spendable amount excludes the minimum reserve and open-offer liabilities."
+
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositPoolFull":
+		r.Summary = fmt.Sprintf(
+			"the deposit would push a reserve of pool %s, or the pool's total shares, past the protocol maximum (2^63−1); the pool has effectively reached its cap",
+			poolIDLabel(o.LiquidityPoolId))
+		r.Hint = "No smaller deposit fixes a pool at its cap; use a different pool, or withdraw first."
+
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositLineFull":
+		r.Summary = fmt.Sprintf(
+			"the deposit would mint pool shares for pool %s beyond the source's pool-share trustline limit",
+			poolIDLabel(o.LiquidityPoolId))
+		r.Hint = "Raise the trustline limit with change_trust (the maximum is INT64_MAX), or hold fewer pool shares."
+
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositNoTrust":
+		r.Summary = fmt.Sprintf(
+			"the source has no pool-share trustline for pool %s, so it cannot hold the shares this deposit mints",
+			poolIDLabel(o.LiquidityPoolId))
+		r.Hint = "Open the pool-share trustline with change_trust on that pool before depositing."
+
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositNotAuthorized":
+		r.Summary = fmt.Sprintf(
+			"one of the two asset trustlines behind pool %s is not authorised to hold its asset; the deposit cannot proceed until the issuer authorises it",
+			poolIDLabel(o.LiquidityPoolId))
+		r.Hint = "Ask the asset issuer to authorise the trustline (allow-trust or set-trustline-flags), then retry."
+
+	case "LiquidityPoolDepositResultCodeLiquidityPoolDepositTrustlineFrozen":
+		r.Summary = fmt.Sprintf(
+			"one of the trustlines this deposit touches for pool %s is frozen; frozen balances cannot move into the pool",
+			poolIDLabel(o.LiquidityPoolId))
+		r.Hint = "Ask the asset issuer to unfreeze the trustline, then retry."
+	}
+	return r
+}
+
+// liquidityPoolDepositMalformedReason mirrors the doCheckValid rules of
+// stellar-core's LiquidityPoolDepositOpFrame and names the first rule the
+// operation breaks.
+func liquidityPoolDepositMalformedReason(o xdr.LiquidityPoolDepositOp) (string, bool) {
+	switch {
+	case o.MaxAmountA <= 0:
+		return fmt.Sprintf("maxAmountA is %s; a deposit must offer a positive amount of each asset",
+			amount.String(o.MaxAmountA)), true
+	case o.MaxAmountB <= 0:
+		return fmt.Sprintf("maxAmountB is %s; a deposit must offer a positive amount of each asset",
+			amount.String(o.MaxAmountB)), true
+	case o.MinPrice.N <= 0 || o.MinPrice.D <= 0:
+		return fmt.Sprintf("minPrice %s is not strictly positive on both sides",
+			priceRatio(o.MinPrice)), true
+	case o.MaxPrice.N <= 0 || o.MaxPrice.D <= 0:
+		return fmt.Sprintf("maxPrice %s is not strictly positive on both sides",
+			priceRatio(o.MaxPrice)), true
+	case int64(o.MinPrice.N)*int64(o.MaxPrice.D) > int64(o.MinPrice.D)*int64(o.MaxPrice.N):
+		return fmt.Sprintf("minPrice %s exceeds maxPrice %s, leaving an empty price window",
+			priceRatio(o.MinPrice), priceRatio(o.MaxPrice)), true
+	}
+	return "", false
+}
+
+// depositAmountsVsWindow reports where the deposit's own maximum amounts sit
+// relative to the accepted price window: -1 below it, +1 above, 0 inside.
+// Exact integer arithmetic avoids the rounding that would make a boundary
+// case lie.
+func depositAmountsVsWindow(o xdr.LiquidityPoolDepositOp) int {
+	a := new(big.Int).SetInt64(int64(o.MaxAmountA))
+	b := new(big.Int).SetInt64(int64(o.MaxAmountB))
+	minN, minD := big.NewInt(int64(o.MinPrice.N)), big.NewInt(int64(o.MinPrice.D))
+	maxN, maxD := big.NewInt(int64(o.MaxPrice.N)), big.NewInt(int64(o.MaxPrice.D))
+	// ratio is B per A: below the window when b/a < minN/minD, above it
+	// when b/a > maxN/maxD.
+	if b.Mul(b, minD).Cmp(a.Mul(a, minN)) < 0 {
+		return -1
+	}
+	if b.Mul(b, maxD).Cmp(a.Mul(a, maxN)) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// deepenLiquidityPoolWithdrawFailure refines a failed
+// liquidity-pool-withdraw explanation with the operation's own share amount
+// and minimum-return bounds, following stellar-core's
+// LiquidityPoolWithdrawOpFrame.
+func deepenLiquidityPoolWithdrawFailure(o xdr.LiquidityPoolWithdrawOp, r Reason) Reason {
+	switch r.Constant {
+	case "LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawMalformed":
+		switch {
+		case o.Amount <= 0:
+			r.Summary = fmt.Sprintf("the operation burns %s pool shares; the share amount must be positive",
+				amount.String(o.Amount))
+			r.Hint = "Set amount to the number of pool shares to burn, above zero."
+		case o.MinAmountA < 0:
+			r.Summary = fmt.Sprintf("minAmountA is %s; minimum returns cannot be negative",
+				amount.String(o.MinAmountA))
+			r.Hint = "Set each minimum return to zero or more."
+		case o.MinAmountB < 0:
+			r.Summary = fmt.Sprintf("minAmountB is %s; minimum returns cannot be negative",
+				amount.String(o.MinAmountB))
+			r.Hint = "Set each minimum return to zero or more."
+		}
+
+	case "LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawUnderfunded":
+		r.Summary = fmt.Sprintf(
+			"the account holds fewer than the %s of pool shares this withdrawal burns; open offers against the pool count as liabilities",
+			amount.String(o.Amount))
+		r.Hint = "Burn fewer shares (lower amount), or wait for offers that lock the shares to fill or be removed."
+
+	case "LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawUnderMinimum":
+		r.Summary = fmt.Sprintf(
+			"burning %s pool shares would return less than the minimums demanded (at least %s and %s); the pool's ratio moved since the quote — slippage",
+			amount.String(o.Amount), amount.String(o.MinAmountA), amount.String(o.MinAmountB))
+		r.Hint = "Relax minAmountA/minAmountB to tolerate the pool's current ratio and retry; like a price limit, tight minimums fail whenever anyone trades the pool first."
+
+	case "LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawLineFull":
+		r.Summary = fmt.Sprintf(
+			"the %s and %s this withdrawal returns would push one of the account's asset trustlines past its limit",
+			amount.String(o.MinAmountA), amount.String(o.MinAmountB))
+		r.Hint = "Lower the trustline limit or free up capacity on the asset the account already holds, then retry."
+
+	case "LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawNoTrust":
+		r.Summary = fmt.Sprintf(
+			"the source has no pool-share trustline for pool %s, so it holds no shares to burn",
+			poolIDLabel(o.LiquidityPoolId))
+		r.Hint = "The account must hold pool shares before it can withdraw; check the pool id."
+
+	case "LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawTrustlineFrozen":
+		r.Summary = fmt.Sprintf(
+			"one of the trustlines this withdrawal touches for pool %s is frozen; frozen balances cannot receive the returned assets",
+			poolIDLabel(o.LiquidityPoolId))
+		r.Hint = "Ask the asset issuer to unfreeze the trustline, then retry."
+	}
+	return r
+}
+
+// priceRatio renders an XDR price as the ratio developers quote it by.
+func priceRatio(p xdr.Price) string {
+	return fmt.Sprintf("%d/%d", p.N, p.D)
+}
+
+// poolIDLabel abbreviates a 32-byte pool id for inline prose, keeping enough
+// of both ends to be recognisable.
+func poolIDLabel(id xdr.PoolId) string {
+	h := hex.EncodeToString(id[:])
+	return h[:8] + "…" + h[len(h)-4:]
 }
 
 // resultCodeName returns the transaction-level result code constant name.
@@ -317,11 +833,7 @@ func withOperationContext(r Reason, op xdr.Operation, txSource string) Reason {
 		if !ok {
 			return r
 		}
-		source := txSource
-		if op.SourceAccount != nil {
-			source = addressOf(*op.SourceAccount)
-		}
-		return withCreateClaimableBalanceContext(r, cb, source)
+		return withCreateClaimableBalanceContext(r, cb, operationEffectiveSource(txSource, op))
 	default:
 		return r
 	}
@@ -645,18 +1157,34 @@ func describeOperation(op xdr.Operation) string {
 		if !ok {
 			break
 		}
-		return fmt.Sprintf("send at most %s %s to deliver exactly %s %s to %s",
+		desc := fmt.Sprintf("send at most %s %s to deliver exactly %s %s to %s",
 			amount.String(o.SendMax), assetLabel(o.SendAsset),
 			amount.String(o.DestAmount), assetLabel(o.DestAsset), shortAddr(addressOf(o.Destination)))
+		if len(o.Path) > 0 {
+			hops := make([]string, len(o.Path))
+			for i, a := range o.Path {
+				hops[i] = assetLabel(a)
+			}
+			desc += fmt.Sprintf(" via [%s]", strings.Join(hops, " -> "))
+		}
+		return desc
 
 	case xdr.OperationTypePathPaymentStrictSend:
 		o, ok := body.GetPathPaymentStrictSendOp()
 		if !ok {
 			break
 		}
-		return fmt.Sprintf("send exactly %s %s to deliver at least %s %s to %s",
+		desc := fmt.Sprintf("send exactly %s %s to deliver at least %s %s to %s",
 			amount.String(o.SendAmount), assetLabel(o.SendAsset),
 			amount.String(o.DestMin), assetLabel(o.DestAsset), shortAddr(addressOf(o.Destination)))
+		if len(o.Path) > 0 {
+			hops := make([]string, len(o.Path))
+			for i, a := range o.Path {
+				hops[i] = assetLabel(a)
+			}
+			desc += fmt.Sprintf(" via [%s]", strings.Join(hops, " -> "))
+		}
+		return desc
 
 	case xdr.OperationTypeManageSellOffer:
 		o, ok := body.GetManageSellOfferOp()
@@ -750,6 +1278,31 @@ func describeOperation(op xdr.Operation) string {
 
 	case xdr.OperationTypeRestoreFootprint:
 		return "restore archived ledger entries"
+
+	case xdr.OperationTypeLiquidityPoolDeposit:
+		o, ok := body.GetLiquidityPoolDepositOp()
+		if !ok {
+			break
+		}
+		return fmt.Sprintf("deposit up to %s and %s into pool %s within price bounds %s..%s",
+			amount.String(o.MaxAmountA), amount.String(o.MaxAmountB),
+			poolIDLabel(o.LiquidityPoolId), priceRatio(o.MinPrice), priceRatio(o.MaxPrice))
+
+	case xdr.OperationTypeLiquidityPoolWithdraw:
+		o, ok := body.GetLiquidityPoolWithdrawOp()
+		if !ok {
+			break
+		}
+		return fmt.Sprintf("burn %s pool shares of pool %s for at least %s and %s",
+			amount.String(o.Amount), poolIDLabel(o.LiquidityPoolId),
+			amount.String(o.MinAmountA), amount.String(o.MinAmountB))
+
+	case xdr.OperationTypeSetTrustLineFlags:
+		o, ok := body.GetSetTrustLineFlagsOp()
+		if !ok {
+			break
+		}
+		return describeSetTrustLineFlags(o)
 	}
 	return operationTypeLabel(body.Type)
 }
@@ -923,4 +1476,439 @@ func formatTime(unix int64) string {
 		return "0"
 	}
 	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+}
+
+func contextualizeChangeTrustFailure(op xdr.Operation, reason Reason) Reason {
+	if op.Body.Type != xdr.OperationTypeChangeTrust {
+		return reason
+	}
+	body, ok := op.Body.GetChangeTrustOp()
+	if !ok {
+		return reason
+	}
+	asset := changeTrustAssetLabel(body.Line)
+	if asset == "" {
+		asset = "this asset"
+	}
+
+	switch reason.Code {
+	case "change_trust_malformed":
+		reason.Summary = fmt.Sprintf("The ChangeTrust request for %s is malformed: the asset or limit is invalid.", asset)
+		reason.Hint = fmt.Sprintf("Check the asset and limit for %s before resubmitting; a valid ChangeTrust operation must identify a valid asset and a non-negative limit.", asset)
+	case "change_trust_no_issuer":
+		issuer := changeTrustIssuerLabel(body.Line)
+		if issuer == "" {
+			reason.Summary = fmt.Sprintf("The trustline for %s cannot be created because the issuing account does not exist on-chain.", asset)
+			reason.Hint = fmt.Sprintf("Create or fund the issuing account for %s on the target network, or switch to the correct network before retrying.", asset)
+			return reason
+		}
+		reason.Summary = fmt.Sprintf("The trustline for %s cannot be created because the issuer account %s does not exist on-chain.", asset, issuer)
+		reason.Hint = fmt.Sprintf("Create or fund the issuer account %s on the target network before retrying with %s.", issuer, asset)
+	case "change_trust_invalid_limit":
+		reason.Summary = fmt.Sprintf("The new limit for %s is below the current liabilities or balance already held, so the trustline would shrink beneath existing obligations.", asset)
+		reason.Hint = "Increase the limit to at least the current liabilities or balance, or reduce the existing balance and liabilities before resubmitting."
+	case "change_trust_low_reserve":
+		reason.Summary = fmt.Sprintf("Opening or updating a trustline for %s would leave the account below the minimum XLM reserve required for another trustline.", asset)
+		reason.Hint = "Fund the source account with enough XLM to cover the network reserve requirement for this additional trustline, then retry."
+	}
+	return reason
+}
+
+func changeTrustIssuerLabel(line xdr.ChangeTrustAsset) string {
+	if line.Type == xdr.AssetTypeAssetTypeNative || line.Type == xdr.AssetTypeAssetTypePoolShare {
+		return ""
+	}
+	asset := line.ToAsset()
+	if asset.Type == xdr.AssetTypeAssetTypeNative {
+		return ""
+	}
+	return asset.GetIssuer()
+}
+
+// deepenClawbackFailure refines a failed clawback explanation using the
+// operation's asset, source, and target account. The protocol makes these
+// checks deterministically from the body: clawback is only valid when the
+// trustline was opened with the clawback-enabled flag, and the amount cannot
+// exceed the target's balance.
+func deepenClawbackFailure(source string, o xdr.ClawbackOp, r Reason) Reason {
+	switch r.Constant {
+	case "ClawbackResultCodeClawbackNotClawbackEnabled":
+		r.Summary = fmt.Sprintf("the trustline for %s from %s was opened without the issuer's clawback-enabled flag, so this account is not allowed to be clawed back",
+			assetLabel(o.Asset), shortAddr(source))
+		r.Hint = "Enable the issuer's clawback flag before opening the trustline, or create a new trustline with trustline_clawback_enabled set and retry."
+	case "ClawbackResultCodeClawbackNoTrust":
+		r.Summary = fmt.Sprintf("the target account %s has no trustline for %s, so there is nothing to claw back",
+			shortAddr(source), assetLabel(o.Asset))
+		r.Hint = "Create the asset trustline for the target account before attempting clawback, or use the correct account and asset."
+	case "ClawbackResultCodeClawbackUnderfunded":
+		r.Summary = fmt.Sprintf("the clawback amount %s exceeds the current balance on the trustline for %s; the target account does not hold enough of that asset",
+			amount.String(o.Amount), assetLabel(o.Asset))
+		r.Hint = "Reduce the clawback amount to the target's current balance, or verify the trustline balance before submitting the operation."
+	}
+	return r
+}
+
+// deepenClawbackClaimableBalanceFailure refines a failed claimable-balance
+// clawback explanation using the claimable balance id and the asset metadata it
+// carries. The protocol only permits this when the claimable balance was
+// created with clawback enabled.
+func deepenClawbackClaimableBalanceFailure(o xdr.ClawbackClaimableBalanceOp, r Reason) Reason {
+	switch r.Constant {
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotClawbackEnabled":
+		if balanceID, err := o.BalanceId.MarshalBinary(); err == nil {
+			r.Summary = fmt.Sprintf("the claimable balance %s was created without clawback enabled, so it cannot be clawed back", hex.EncodeToString(balanceID)[:12])
+		} else {
+			r.Summary = "the claimable balance was created without clawback enabled, so it cannot be clawed back"
+		}
+		r.Hint = "Recreate the claimable balance with the clawback-enabled flag set, or use a balance that was issued under the clawback-enabled configuration."
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotIssuer":
+		r.Summary = "the sender is not the asset issuer for this claimable balance, so clawback is not authorised"
+		r.Hint = "Only the issuing account can claw back a claimable balance for this asset."
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceDoesNotExist":
+		r.Summary = "the claimable balance id does not exist in the ledger, so there is nothing to claw back"
+		r.Hint = "Verify the balance id and the correct network state before retrying."
+	}
+	return r
+}
+
+func describeSetTrustLineFlags(o xdr.SetTrustLineFlagsOp) string {
+	var parts []string
+	if o.SetFlags != 0 {
+		setNames := trustLineFlagNames(o.SetFlags)
+		if len(setNames) > 0 {
+			parts = append(parts, "set "+strings.Join(setNames, "|"))
+		} else {
+			parts = append(parts, fmt.Sprintf("set flags %d", o.SetFlags))
+		}
+	}
+	if o.ClearFlags != 0 {
+		clearNames := trustLineFlagNames(o.ClearFlags)
+		revoking := o.ClearFlags&xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag) != 0 ||
+			o.ClearFlags&xdr.Uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag) != 0
+		if len(clearNames) > 0 {
+			msg := "clear " + strings.Join(clearNames, "|")
+			if revoking {
+				msg += " (revoking authorization, requires issuer AUTH_REVOCABLE_FLAG)"
+			}
+			parts = append(parts, msg)
+		} else {
+			parts = append(parts, fmt.Sprintf("clear flags %d", o.ClearFlags))
+		}
+	}
+	action := "modify trustline flags"
+	if len(parts) > 0 {
+		action = strings.Join(parts, ", ")
+	}
+	trustor := o.Trustor.Address()
+	return fmt.Sprintf("%s for %s on %s", action, assetLabel(o.Asset), shortAddr(trustor))
+}
+
+// PathPaymentHop describes an intermediate conversion step in a path payment route.
+type PathPaymentHop struct {
+	Index   int    `json:"index"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Summary string `json:"summary"`
+}
+
+// PathPaymentSlippageDiagnosis provides contextual diagnostics breaking down
+// intermediate hops and order book slippage in a path payment.
+type PathPaymentSlippageDiagnosis struct {
+	OperationIndex int              `json:"operationIndex"`
+	PaymentType    string           `json:"paymentType"` // "strict_receive" or "strict_send"
+	SendAsset      string           `json:"sendAsset"`
+	DestAsset      string           `json:"destAsset"`
+	SendMax        string           `json:"sendMax,omitempty"`
+	DestMin        string           `json:"destMin,omitempty"`
+	Amount         string           `json:"amount"`
+	Destination    string           `json:"destination"`
+	Hops           []PathPaymentHop `json:"hops,omitempty"`
+	Summary        string           `json:"summary"`
+	Explanation    string           `json:"explanation"`
+	Hint           string           `json:"hint"`
+}
+
+func (d *PathPaymentSlippageDiagnosis) String() string {
+	if d == nil {
+		return "<nil>"
+	}
+	return d.Summary
+}
+
+func (d *PathPaymentSlippageDiagnosis) DiagnosticReport() string {
+	if d == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Path payment slippage failure:\n")
+	fmt.Fprintf(&b, "  Operation:       %d (%s)\n", d.OperationIndex, d.PaymentType)
+	fmt.Fprintf(&b, "  Route:           %s -> %s\n", d.SendAsset, d.DestAsset)
+	if d.SendMax != "" {
+		fmt.Fprintf(&b, "  Send limit:      sendMax %s %s\n", d.SendMax, d.SendAsset)
+	}
+	if d.DestMin != "" {
+		fmt.Fprintf(&b, "  Dest limit:      destMin %s %s\n", d.DestMin, d.DestAsset)
+	}
+	if d.Destination != "" {
+		fmt.Fprintf(&b, "  Destination:     %s\n", d.Destination)
+	}
+	if len(d.Hops) > 0 {
+		fmt.Fprintf(&b, "  Intermediate hops (%d):\n", len(d.Hops))
+		for _, hop := range d.Hops {
+			fmt.Fprintf(&b, "    %d. %s\n", hop.Index+1, hop.Summary)
+		}
+	}
+	fmt.Fprintf(&b, "  Explanation:     %s\n", d.Explanation)
+	fmt.Fprintf(&b, "  Hint:            %s\n", d.Hint)
+	return b.String()
+}
+
+func buildPathPaymentHops(sendAsset xdr.Asset, path []xdr.Asset, destAsset xdr.Asset) []PathPaymentHop {
+	assets := make([]xdr.Asset, 0, len(path)+2)
+	assets = append(assets, sendAsset)
+	assets = append(assets, path...)
+	assets = append(assets, destAsset)
+
+	hops := make([]PathPaymentHop, 0, len(assets)-1)
+	for i := 0; i < len(assets)-1; i++ {
+		from := assetLabel(assets[i])
+		to := assetLabel(assets[i+1])
+		hops = append(hops, PathPaymentHop{
+			Index:   i,
+			From:    from,
+			To:      to,
+			Summary: fmt.Sprintf("%s -> %s via DEX order book", from, to),
+		})
+	}
+	return hops
+}
+
+// DiagnosePathPaymentStrictReceive diagnoses a strict receive path payment failure,
+// detailing intermediate conversion hops and slippage past the sendMax limit.
+func DiagnosePathPaymentStrictReceive(op xdr.PathPaymentStrictReceiveOp, opIndex int, code string) *PathPaymentSlippageDiagnosis {
+	hops := buildPathPaymentHops(op.SendAsset, op.Path, op.DestAsset)
+	dest := shortAddr(addressOf(op.Destination))
+	sendAssetStr := assetLabel(op.SendAsset)
+	destAssetStr := assetLabel(op.DestAsset)
+	sendMaxStr := amount.String(op.SendMax)
+	destAmountStr := amount.String(op.DestAmount)
+
+	hopCount := len(hops)
+	var explanation, summary, hint string
+
+	switch {
+	case strings.Contains(code, "over_send_max") || strings.Contains(code, "over_sendmax") || strings.Contains(strings.ToLower(code), "oversendmax"):
+		summary = fmt.Sprintf("Path payment failed: required send amount exceeds sendMax limit of %s %s",
+			sendMaxStr, sendAssetStr)
+		explanation = fmt.Sprintf("Order book liquidity shifted across %d intermediate trade hop(s) between path quotation and execution. Fluctuation in order book offer prices increased the cumulative conversion cost beyond the configured sendMax (%s %s).",
+			hopCount, sendMaxStr, sendAssetStr)
+		hint = "Market price moved against you on the DEX. Increase sendMax to allow for higher slippage tolerance, or re-quote path liquidity before resubmitting."
+	case strings.Contains(code, "too_few_offers") || strings.Contains(code, "TooFewOffers"):
+		summary = fmt.Sprintf("Path payment failed: insufficient order book depth across %d hop(s)", hopCount)
+		explanation = fmt.Sprintf("One or more order books along the path (%s -> %s) lacked sufficient bid/ask offer depth to satisfy the requested conversion amount of %s %s.",
+			sendAssetStr, destAssetStr, destAmountStr, destAssetStr)
+		hint = "Liquidity was depleted between path computation and submission. Check liquidity on intermediate pairs or split the payment into smaller amounts."
+	default:
+		return nil
+	}
+
+	return &PathPaymentSlippageDiagnosis{
+		OperationIndex: opIndex,
+		PaymentType:    "strict_receive",
+		SendAsset:      sendAssetStr,
+		DestAsset:      destAssetStr,
+		SendMax:        sendMaxStr,
+		Amount:         destAmountStr,
+		Destination:    dest,
+		Hops:           hops,
+		Summary:        summary,
+		Explanation:    explanation,
+		Hint:           hint,
+	}
+}
+
+// DiagnosePathPaymentStrictSend diagnoses a strict send path payment failure,
+// detailing intermediate conversion hops and slippage delivering below destMin.
+func DiagnosePathPaymentStrictSend(op xdr.PathPaymentStrictSendOp, opIndex int, code string) *PathPaymentSlippageDiagnosis {
+	hops := buildPathPaymentHops(op.SendAsset, op.Path, op.DestAsset)
+	dest := shortAddr(addressOf(op.Destination))
+	sendAssetStr := assetLabel(op.SendAsset)
+	destAssetStr := assetLabel(op.DestAsset)
+	destMinStr := amount.String(op.DestMin)
+	sendAmountStr := amount.String(op.SendAmount)
+
+	hopCount := len(hops)
+	var explanation, summary, hint string
+
+	switch {
+	case strings.Contains(code, "under_dest_min") || strings.Contains(code, "under_destmin") || strings.Contains(strings.ToLower(code), "underdestmin"):
+		summary = fmt.Sprintf("Path payment failed: delivered amount fell below destMin limit of %s %s",
+			destMinStr, destAssetStr)
+		explanation = fmt.Sprintf("Order book liquidity shifted across %d intermediate trade hop(s) between path quotation and execution. Fluctuation in order book offer prices degraded the cumulative conversion rate, delivering less than the required destMin (%s %s).",
+			hopCount, destMinStr, destAssetStr)
+		hint = "Market price moved against you on the DEX. Lower destMin to accept higher slippage, or re-quote path liquidity before resubmitting."
+	case strings.Contains(code, "too_few_offers") || strings.Contains(code, "TooFewOffers"):
+		summary = fmt.Sprintf("Path payment failed: insufficient order book depth across %d hop(s)", hopCount)
+		explanation = fmt.Sprintf("One or more order books along the path (%s -> %s) lacked sufficient bid/ask offer depth to convert %s %s.",
+			sendAssetStr, destAssetStr, sendAmountStr, sendAssetStr)
+		hint = "Liquidity was depleted between path computation and submission. Check liquidity on intermediate pairs or split the payment into smaller amounts."
+	default:
+		return nil
+	}
+
+	return &PathPaymentSlippageDiagnosis{
+		OperationIndex: opIndex,
+		PaymentType:    "strict_send",
+		SendAsset:      sendAssetStr,
+		DestAsset:      destAssetStr,
+		DestMin:        destMinStr,
+		Amount:         sendAmountStr,
+		Destination:    dest,
+		Hops:           hops,
+		Summary:        summary,
+		Explanation:    explanation,
+		Hint:           hint,
+	}
+}
+
+// DiagnosePathPaymentSlippage extracts and diagnoses a path payment slippage failure
+// from an operation and its corresponding operation result.
+func DiagnosePathPaymentSlippage(op xdr.Operation, opIndex int, opRes xdr.OperationResult) *PathPaymentSlippageDiagnosis {
+	reason := explainOperationResult(opRes)
+	switch op.Body.Type {
+	case xdr.OperationTypePathPaymentStrictReceive:
+		if pOp, ok := op.Body.GetPathPaymentStrictReceiveOp(); ok {
+			return DiagnosePathPaymentStrictReceive(pOp, opIndex, reason.Code)
+		}
+	case xdr.OperationTypePathPaymentStrictSend:
+		if pOp, ok := op.Body.GetPathPaymentStrictSendOp(); ok {
+			return DiagnosePathPaymentStrictSend(pOp, opIndex, reason.Code)
+		}
+	}
+	return nil
+}
+
+// SetTrustLineFlagsDiagnosis provides explicit diagnosis for SetTrustLineFlags failures,
+// specifically detailing revocation violations and AUTH_REVOCABLE_FLAG issuer requirements.
+type SetTrustLineFlagsDiagnosis struct {
+	OperationIndex int      `json:"operationIndex"`
+	Asset          string   `json:"asset"`
+	Trustor        string   `json:"trustor"`
+	Action         string   `json:"action"` // e.g. "revoke_authorization", "set_flags", "clear_flags"
+	SetFlags       []string `json:"setFlags,omitempty"`
+	ClearFlags     []string `json:"clearFlags,omitempty"`
+	RevokingAuth   bool     `json:"revokingAuth"`
+	Summary        string   `json:"summary"`
+	Explanation    string   `json:"explanation"`
+	Hint           string   `json:"hint"`
+}
+
+func (d *SetTrustLineFlagsDiagnosis) String() string {
+	if d == nil {
+		return "<nil>"
+	}
+	return d.Summary
+}
+
+func (d *SetTrustLineFlagsDiagnosis) DiagnosticReport() string {
+	if d == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "SetTrustLineFlags failure:\n")
+	fmt.Fprintf(&b, "  Operation:       %d\n", d.OperationIndex)
+	fmt.Fprintf(&b, "  Asset:           %s\n", d.Asset)
+	fmt.Fprintf(&b, "  Trustor:         %s\n", d.Trustor)
+	fmt.Fprintf(&b, "  Action:          %s\n", d.Action)
+	if len(d.SetFlags) > 0 {
+		fmt.Fprintf(&b, "  Flags to set:    %s\n", strings.Join(d.SetFlags, ", "))
+	}
+	if len(d.ClearFlags) > 0 {
+		fmt.Fprintf(&b, "  Flags to clear:  %s\n", strings.Join(d.ClearFlags, ", "))
+	}
+	fmt.Fprintf(&b, "  Explanation:     %s\n", d.Explanation)
+	fmt.Fprintf(&b, "  Hint:            %s\n", d.Hint)
+	return b.String()
+}
+
+// DiagnoseSetTrustLineFlags diagnoses a SetTrustLineFlags operation failure,
+// detailing revocation violations and issuer AUTH_REVOCABLE_FLAG requirements.
+func DiagnoseSetTrustLineFlags(op xdr.SetTrustLineFlagsOp, opIndex int, code string) *SetTrustLineFlagsDiagnosis {
+	assetStr := assetLabel(op.Asset)
+	trustorStr := op.Trustor.Address()
+
+	setNames := trustLineFlagNames(op.SetFlags)
+	clearNames := trustLineFlagNames(op.ClearFlags)
+	revokingAuth := op.ClearFlags&xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag) != 0 ||
+		op.ClearFlags&xdr.Uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag) != 0
+
+	action := "modify_flags"
+	if revokingAuth {
+		action = "revoke_authorization"
+	} else if len(setNames) > 0 && len(clearNames) == 0 {
+		action = "set_flags"
+	} else if len(clearNames) > 0 && len(setNames) == 0 {
+		action = "clear_flags"
+	}
+
+	var summary, explanation, hint string
+
+	switch {
+	case strings.Contains(code, "success") || strings.Contains(code, "Success"):
+		return nil
+	case strings.Contains(code, "cant_revoke") || strings.Contains(code, "CantRevoke"):
+		summary = fmt.Sprintf("Cannot revoke trustline authorization for %s on %s: issuer lacks AUTH_REVOCABLE_FLAG permission",
+			shortAddr(trustorStr), assetStr)
+		explanation = "The asset issuer attempted to clear the authorized flag on a trustline, but the issuer account does not have AUTH_REVOCABLE_FLAG (flag 0x2) enabled. On Stellar, trustline authorization is irrevocable by default; an issuer must enable AUTH_REVOCABLE_FLAG on their account prior to issuing the asset to retain the ability to revoke trustlines."
+		hint = "To revoke authorization on trustlines, the asset issuer account must have AUTH_REVOCABLE_FLAG set via SetOptionsOp. If the issuer account does not have AUTH_REVOCABLE_FLAG, existing trustlines cannot be revoked."
+	case strings.Contains(code, "no_trust_line") || strings.Contains(code, "NoTrustLine"):
+		summary = fmt.Sprintf("Trustline does not exist for %s on asset %s", shortAddr(trustorStr), assetStr)
+		explanation = fmt.Sprintf("The target account %s has not established a trustline for %s. Flags cannot be modified on a non-existent trustline.",
+			shortAddr(trustorStr), assetStr)
+		hint = "The trustor account must first submit a ChangeTrust operation creating the trustline before the issuer can configure trustline flags."
+	case strings.Contains(code, "malformed") || strings.Contains(code, "Malformed"):
+		summary = fmt.Sprintf("SetTrustLineFlags operation is malformed for asset %s", assetStr)
+		explanation = "The SetTrustLineFlags operation was rejected as structurally invalid. Common causes include attempting to set flags on native XLM (which does not use trustlines), specifying an invalid asset, or submitting from an account that is not the asset's issuer."
+		hint = "Verify that the asset is a valid issued credit asset (not XLM) and that the operation source matches the asset issuer account."
+	case strings.Contains(code, "invalid_state") || strings.Contains(code, "InvalidState"):
+		summary = "Invalid trustline flags state combination"
+		explanation = "The requested set and clear flags produce an invalid or conflicting state (e.g. attempting to set and clear the same flag simultaneously)."
+		hint = "Ensure setFlags and clearFlags bitmasks do not overlap and specify a valid flag transition."
+	case strings.Contains(code, "low_reserve") || strings.Contains(code, "LowReserve"):
+		summary = "Insufficient reserve for trustline flag change"
+		explanation = "The operation failed because the account balance is insufficient to satisfy base reserve requirements for the updated trustline state."
+		hint = "Ensure the account holds sufficient XLM to cover base reserves before modifying trustline flags."
+	default:
+		summary = fmt.Sprintf("SetTrustLineFlags failed with %s", code)
+		explanation = fmt.Sprintf("Flag change (set: [%s], clear: [%s]) failed on trustline for %s.",
+			strings.Join(setNames, ","), strings.Join(clearNames, ","), assetStr)
+		hint = "Check trustline existence, issuer permissions, and flag parameters."
+	}
+
+	return &SetTrustLineFlagsDiagnosis{
+		OperationIndex: opIndex,
+		Asset:          assetStr,
+		Trustor:        trustorStr,
+		Action:         action,
+		SetFlags:       setNames,
+		ClearFlags:     clearNames,
+		RevokingAuth:   revokingAuth,
+		Summary:        summary,
+		Explanation:    explanation,
+		Hint:           hint,
+	}
+}
+
+// DiagnoseSetTrustLineFlagsOperation extracts and diagnoses a SetTrustLineFlags failure
+// from an operation and its corresponding operation result.
+func DiagnoseSetTrustLineFlagsOperation(op xdr.Operation, opIndex int, opRes xdr.OperationResult) *SetTrustLineFlagsDiagnosis {
+	if op.Body.Type != xdr.OperationTypeSetTrustLineFlags {
+		return nil
+	}
+	sOp, ok := op.Body.GetSetTrustLineFlagsOp()
+	if !ok {
+		return nil
+	}
+	reason := explainOperationResult(opRes)
+	return DiagnoseSetTrustLineFlags(sOp, opIndex, reason.Code)
 }

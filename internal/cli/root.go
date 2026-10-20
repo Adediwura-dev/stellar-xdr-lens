@@ -81,6 +81,10 @@ unsigned transactions and works in CI.`,
 	root.PersistentFlags().StringVarP(&g.file, "file", "f", "",
 		"read the XDR payload from a file instead of an argument")
 
+	// Replace cobra's generic completion command with ours, so `lens
+	// completion bash` and friends are documented behaviour of this tool.
+	root.CompletionOptions.DisableDefaultCmd = true
+
 	root.AddCommand(
 		newDecodeCmd(g, stdout, stdin),
 		newEncodeCmd(g, stdout, stdin),
@@ -92,7 +96,12 @@ unsigned transactions and works in CI.`,
 		newAssetCmd(g, stdout, stdin),
 		newTypesCmd(stdout),
 		newVersionCmd(stdout),
+		newCompletionCmd(root, stdout, stderr),
 	)
+
+	// The completion engine attaches after the tree exists, so it can bind
+	// to every command above.
+	registerCompletions(root)
 	return root
 }
 

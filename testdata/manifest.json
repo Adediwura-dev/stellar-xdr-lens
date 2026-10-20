@@ -295,6 +295,126 @@
       "survey_stop": {
         "type": "SignedTimeSlicedSurveyStopCollectingMessage",
         "description": "Stop-collecting command; byte-identical to survey_start on the wire, so decode it with an explicit --type (issue #20)."
+      },
+      "claimable_balance_entry": {
+        "type": "ClaimableBalanceEntry",
+        "description": "Claimable balance with three claimants mixing unconditional, before-absolute-time and OR predicates, 1000 USDC and a v1 ext."
+      },
+      "claimable_balance_entry_simple": {
+        "type": "ClaimableBalanceEntry",
+        "description": "Minimal claimable balance: one claimant with a before-relative-time predicate, native asset, 50 XLM, no extension."
+      },
+      "config_setting_0": {
+        "type": "ConfigSettingEntry",
+        "description": "Singleton ContractMaxSizeBytes setting, 131072 bytes."
+      },
+      "config_setting_1": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractComputeV0: ledger/tx instruction limits, the per-instruction-increment fee rate and the tx memory limit."
+      },
+      "config_setting_2": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractLedgerCostV0: disk read/write fees, per-1Kb read fees and the Soroban state rent curve bounds."
+      },
+      "config_setting_3": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractHistoricalDataV0: the per-1Kb historical data fee."
+      },
+      "config_setting_4": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractEventsV0: max contract event size bytes and the per-1Kb event fee."
+      },
+      "config_setting_5": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractBandwidthV0: ledger/tx bandwidth limits and the per-1Kb tx size fee."
+      },
+      "config_setting_6": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractCostParamsCpuInstructions: the 86-entry CPU instruction cost model."
+      },
+      "config_setting_7": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractCostParamsMemoryBytes: the 86-entry memory cost model."
+      },
+      "config_setting_8": {
+        "type": "ConfigSettingEntry",
+        "description": "Singleton ContractDataKeySizeBytes setting, 250 bytes."
+      },
+      "config_setting_9": {
+        "type": "ConfigSettingEntry",
+        "description": "Singleton ContractDataEntrySizeBytes setting, 65536 bytes."
+      },
+      "config_setting_10": {
+        "type": "ConfigSettingEntry",
+        "description": "StateArchival: TTL bounds (with day estimates), rent rate denominators, eviction scan size and starting bucket level."
+      },
+      "config_setting_11": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractExecutionLanes: LedgerMaxTxCount 2000."
+      },
+      "config_setting_12": {
+        "type": "ConfigSettingEntry",
+        "description": "LiveSorobanStateSizeWindow: a 30-sample state-size window."
+      },
+      "config_setting_13": {
+        "type": "ConfigSettingEntry",
+        "description": "EvictionIterator: a bucket-list eviction cursor (level 9, non-current bucket)."
+      },
+      "config_setting_14": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractParallelComputeV0: LedgerMaxDependentTxClusters 2."
+      },
+      "config_setting_15": {
+        "type": "ConfigSettingEntry",
+        "description": "ContractLedgerCostExtV0: TxMaxFootprintEntries and the per-1Kb write fee."
+      },
+      "config_setting_16": {
+        "type": "ConfigSettingEntry",
+        "description": "ScpTiming: target close time and nomination/ballot timeout parameters in milliseconds."
+      },
+      "config_setting_17": {
+        "type": "ConfigSettingEntry",
+        "description": "FrozenLedgerKeys: three frozen ledger keys, all account keys."
+      },
+      "config_setting_19": {
+        "type": "ConfigSettingEntry",
+        "description": "FreezeBypassTxs: the (empty) transaction-hashes list allowed to bypass a freeze."
+      },
+      "diagnostic_event": {
+        "type": "DiagnosticEvent",
+        "description": "Diagnostic event from a successful contract call: transfer event with string topic, account-address topic and a from/to/amount ScVal map."
+      },
+      "ledger_upgrade_base_fee": {
+        "type": "LedgerUpgrade",
+        "description": "Base-fee upgrade vote proposing NewBaseFee 1000 stroops."
+      },
+      "ledger_upgrade_base_reserve": {
+        "type": "LedgerUpgrade",
+        "description": "Base-reserve upgrade vote proposing NewBaseReserve 10000000 stroops; byte-identical to an ScVal i32 on the wire, so decode with an explicit --type."
+      },
+      "ledger_upgrade_version": {
+        "type": "LedgerUpgrade",
+        "description": "Protocol-version upgrade vote proposing NewLedgerVersion 21."
+      },
+      "liquidity_pool_entry": {
+        "type": "LiquidityPoolEntry",
+        "description": "Constant-product pool with the deterministic 'AAAA…' id, 0.3% fee, reserves 100000 XLM / 500000 USDC and 150 trustline holders."
+      },
+      "stellar_value_votes": {
+        "type": "StellarValue",
+        "description": "Basic StellarValue with three upgrade votes: protocol version 21, base reserve 1.0000000 XLM, and an unparseable deadbeef blob kept as hex."
+      },
+      "trustline_entry_simple": {
+        "type": "TrustLineEntry",
+        "description": "Plain authorized USDC trustline with no extension: balance 1000, limit 5000."
+      },
+      "trustline_entry_v1": {
+        "type": "TrustLineEntry",
+        "description": "Trustline with the v1 liabilities extension: buying 100 XLM, selling 200 XLM, both authorization flags set."
+      },
+      "trustline_entry_v2": {
+        "type": "TrustLineEntry",
+        "description": "Pool-share trustline whose v1 ext nests a v2: liquidity pool use count 5."
       }
     }
   }

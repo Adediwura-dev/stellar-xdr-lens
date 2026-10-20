@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/amount"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -245,6 +246,101 @@ func TestTrustLineFlagNote(t *testing.T) {
 	}
 }
 
+// TestTrustLineFlagNoteCombinations pins the expansion of every documented
+// trustline flag bit, including the combined bitmask used by a clawback-
+// enabled, fully authorized line.
+func TestTrustLineFlagNoteCombinations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		flags xdr.Uint32
+		want  string
+		ok    bool
+	}{
+		{"zero declines", 0, "", false},
+		{
+			"authorized",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag),
+			"authorized",
+			true,
+		},
+		{
+			"maintain liabilities only",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag),
+			"authorized_to_maintain_liabilities",
+			true,
+		},
+		{
+			"clawback only",
+			xdr.Uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag),
+			"trustline_clawback_enabled",
+			true,
+		},
+		{
+			"authorized and clawback",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag |
+				xdr.TrustLineFlagsTrustlineClawbackEnabledFlag),
+			"authorized | trustline_clawback_enabled",
+			true,
+		},
+		{
+			"all three flags",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag |
+				xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag |
+				xdr.TrustLineFlagsTrustlineClawbackEnabledFlag),
+			"authorized | authorized_to_maintain_liabilities | trustline_clawback_enabled",
+			true,
+		},
+		{"unknown bits alone decline", xdr.Uint32(0x8), "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			note, ok := trustLineFlagNote(reflect.ValueOf(tc.flags))
+			if ok != tc.ok || note != tc.want {
+				t.Errorf("trustLineFlagNote(%d) = (%q, %v), want (%q, %v)",
+					tc.flags, note, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// TestTrustLineLiabilitiesAmountFormatting pins the shared amount-field
+// enricher for the V1 liabilities: Buying and Selling are Int64 token
+// balances and must render as decimal units alongside the raw stroop integer,
+// exactly like every other amount field in the protocol.
+func TestTrustLineLiabilitiesAmountFormatting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		field string
+		value xdr.Int64
+		want  string
+	}{
+		{"buying", "Buying", xdr.Int64(100 * amount.One), "100.0000000 (stroops: 1000000000)"},
+		{"selling", "Selling", xdr.Int64(200 * amount.One), "200.0000000 (stroops: 2000000000)"},
+		{"zero buying", "Buying", xdr.Int64(0), "0.0000000 (stroops: 0)"},
+		{"balance", "Balance", xdr.Int64(50 * amount.One), "50.0000000 (stroops: 500000000)"},
+		{"limit", "Limit", xdr.Int64(1000 * amount.One), "1000.0000000 (stroops: 10000000000)"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			note, ok := enrichAmountField(tc.field, reflect.ValueOf(tc.value))
+			if !ok || note != tc.want {
+				t.Errorf("enrichAmountField(%q, %d) = (%q, %v), want (%q, true)",
+					tc.field, tc.value, note, ok, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaimableBalanceFlagNote(t *testing.T) {
 	t.Parallel()
 
@@ -257,5 +353,123 @@ func TestClaimableBalanceFlagNote(t *testing.T) {
 	}
 	if _, ok := claimableBalanceFlagNote(reflect.ValueOf("x")); ok {
 		t.Error("claimableBalanceFlagNote accepted a non-Uint32 value")
+	}
+}
+
+func TestEnrichContractExecutableWasm(t *testing.T) {
+	t.Parallel()
+
+	hash := xdr.Hash{0x4F}
+	exec := xdr.ContractExecutable{
+		Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+		WasmHash: &hash,
+	}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined a wasm executable")
+	}
+	wantHex := hash.HexString()
+	if note != "wasm:"+wantHex {
+		t.Errorf("note = %q, want %q", note, "wasm:"+wantHex)
+	}
+	if raw != wantHex {
+		t.Errorf("raw = %v, want %q", raw, wantHex)
+	}
+}
+
+func TestEnrichContractExecutableStellarAsset(t *testing.T) {
+	t.Parallel()
+
+	exec := xdr.ContractExecutable{Type: xdr.ContractExecutableTypeContractExecutableStellarAsset}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined the stellar asset arm")
+	}
+	if note != "stellar asset contract (built-in token)" {
+		t.Errorf("note = %q, want the built-in token description", note)
+	}
+	if raw != "stellar_asset" {
+		t.Errorf("raw = %v, want stellar_asset", raw)
+	}
+}
+
+func TestEnrichContractExecutableExternalRef(t *testing.T) {
+	t.Parallel()
+
+	owner := xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeContract}
+	var contractID xdr.ContractId
+	contractID[0] = 0xCA
+	owner.ContractId = &contractID
+
+	ownerStr, err := owner.String()
+	if err != nil {
+		t.Fatalf("encoding owner: %v", err)
+	}
+
+	exec := xdr.ContractExecutable{
+		Type: xdr.ContractExecutableTypeContractExecutableExternalRef,
+		ExternalRef: &xdr.ContractExecutableExternalRef{
+			ExecutableOwner: owner,
+			Tag:             "evm:1",
+		},
+	}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined the external ref arm")
+	}
+	if note != "external contract reference" {
+		t.Errorf("note = %q, want 'external contract reference'", note)
+	}
+	if raw != ownerStr+" tag: evm:1" {
+		t.Errorf("raw = %v, want owner and tag", raw)
+	}
+}
+
+func TestEnrichContractExecutableDeclinesMalformed(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]xdr.ContractExecutable{
+		"unknown type":         {Type: xdr.ContractExecutableType(99)},
+		"missing wasm hash":    {Type: xdr.ContractExecutableTypeContractExecutableWasm},
+		"missing external ref": {Type: xdr.ContractExecutableTypeContractExecutableExternalRef},
+		"unknown owner type": {
+			Type: xdr.ContractExecutableTypeContractExecutableExternalRef,
+			ExternalRef: &xdr.ContractExecutableExternalRef{
+				ExecutableOwner: xdr.ScAddress{Type: xdr.ScAddressType(99)},
+				Tag:             "x",
+			},
+		},
+	}
+	for name, exec := range cases {
+		if _, _, ok := enrichContractExecutable(reflect.ValueOf(exec)); ok {
+			t.Errorf("%s: enrichContractExecutable produced a rendering, want decline", name)
+		}
+	}
+	if _, _, ok := enrichContractExecutable(reflect.ValueOf("not an executable")); ok {
+		t.Error("enrichContractExecutable accepted a non-ContractExecutable value")
+	}
+}
+
+func TestBuildNodeContractExecutableWasm(t *testing.T) {
+	t.Parallel()
+
+	hash := xdr.Hash{0xAB}
+	instance := xdr.ScContractInstance{
+		Executable: xdr.ContractExecutable{
+			Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+			WasmHash: &hash,
+		},
+	}
+
+	node := buildNode("Instance", reflect.ValueOf(instance), 0)
+	if node == nil {
+		t.Fatal("buildNode(ScContractInstance) returned nil")
+	}
+	exec := node.Child("Executable")
+	if exec == nil {
+		t.Fatal("Executable child not found")
+	}
+	if exec.Note != "wasm:"+hash.HexString() {
+		t.Errorf("Executable Note = %q, want the wasm annotation", exec.Note)
 	}
 }
