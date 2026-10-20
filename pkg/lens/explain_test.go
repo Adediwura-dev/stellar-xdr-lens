@@ -1374,3 +1374,445 @@ func TestDescribeLiquidityPoolOperations(t *testing.T) {
 		})
 	}
 }
+
+func TestDiagnosePathPaymentStrictReceive(t *testing.T) {
+	t.Parallel()
+
+	nativeAsset := xdr.Asset{Type: xdr.AssetTypeAssetTypeNative}
+	usdcAsset := creditAsset(t, "USDC", testIssuer)
+	eurAsset := creditAsset(t, "EUR", testIssuer)
+	btcAsset := creditAsset(t, "BTC", testIssuer)
+
+	op := xdr.PathPaymentStrictReceiveOp{
+		SendAsset:   nativeAsset,
+		SendMax:     100_0000000,
+		Destination: mustMuxed(t, testDest),
+		DestAsset:   usdcAsset,
+		DestAmount:  50_0000000,
+		Path:        []xdr.Asset{eurAsset, btcAsset},
+	}
+
+	t.Run("over_send_max slippage diagnosis", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnosePathPaymentStrictReceive(op, 0, "path_payment_strict_receive_over_send_max")
+		if diag == nil {
+			t.Fatal("DiagnosePathPaymentStrictReceive returned nil for over_send_max")
+		}
+		if diag.PaymentType != "strict_receive" {
+			t.Errorf("PaymentType = %q, want strict_receive", diag.PaymentType)
+		}
+		if diag.SendMax != "100.0000000" {
+			t.Errorf("SendMax = %q, want 100.0000000", diag.SendMax)
+		}
+		if diag.Amount != "50.0000000" {
+			t.Errorf("Amount = %q, want 50.0000000", diag.Amount)
+		}
+		if len(diag.Hops) != 3 {
+			t.Fatalf("len(Hops) = %d, want 3", len(diag.Hops))
+		}
+		if diag.Hops[0].From != "XLM" || !strings.Contains(diag.Hops[0].To, "EUR") {
+			t.Errorf("Hop 0 = %+v, want XLM -> EUR", diag.Hops[0])
+		}
+		if !strings.Contains(diag.Hops[1].From, "EUR") || !strings.Contains(diag.Hops[1].To, "BTC") {
+			t.Errorf("Hop 1 = %+v, want EUR -> BTC", diag.Hops[1])
+		}
+		if !strings.Contains(diag.Hops[2].From, "BTC") || !strings.Contains(diag.Hops[2].To, "USDC") {
+			t.Errorf("Hop 2 = %+v, want BTC -> USDC", diag.Hops[2])
+		}
+		if !strings.Contains(diag.Explanation, "liquidity shifted") {
+			t.Errorf("Explanation does not mention order book liquidity shift: %q", diag.Explanation)
+		}
+		if diag.String() == "" {
+			t.Error("String() is empty")
+		}
+		report := diag.DiagnosticReport()
+		if !strings.Contains(report, "Path payment slippage failure") ||
+			!strings.Contains(report, "Intermediate hops") ||
+			!strings.Contains(report, "sendMax") {
+			t.Errorf("DiagnosticReport() missing expected sections:\n%s", report)
+		}
+	})
+
+	t.Run("too_few_offers liquidity shift", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnosePathPaymentStrictReceive(op, 1, "path_payment_strict_receive_too_few_offers")
+		if diag == nil {
+			t.Fatal("DiagnosePathPaymentStrictReceive returned nil for too_few_offers")
+		}
+		if !strings.Contains(diag.Explanation, "lacked sufficient bid/ask offer depth") {
+			t.Errorf("Explanation does not mention liquidity gap: %q", diag.Explanation)
+		}
+	})
+
+	t.Run("unrelated code returns nil", func(t *testing.T) {
+		t.Parallel()
+		if diag := lens.DiagnosePathPaymentStrictReceive(op, 0, "path_payment_strict_receive_success"); diag != nil {
+			t.Errorf("expected nil for success code, got %+v", diag)
+		}
+		if diag := lens.DiagnosePathPaymentStrictReceive(op, 0, "path_payment_strict_receive_underfunded"); diag != nil {
+			t.Errorf("expected nil for underfunded code, got %+v", diag)
+		}
+	})
+}
+
+func TestDiagnosePathPaymentStrictSend(t *testing.T) {
+	t.Parallel()
+
+	nativeAsset := xdr.Asset{Type: xdr.AssetTypeAssetTypeNative}
+	usdcAsset := creditAsset(t, "USDC", testIssuer)
+
+	op := xdr.PathPaymentStrictSendOp{
+		SendAsset:   usdcAsset,
+		SendAmount:  50_0000000,
+		Destination: mustMuxed(t, testDest),
+		DestAsset:   nativeAsset,
+		DestMin:     40_0000000,
+		Path:        nil,
+	}
+
+	t.Run("under_dest_min slippage diagnosis", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnosePathPaymentStrictSend(op, 0, "path_payment_strict_send_under_dest_min")
+		if diag == nil {
+			t.Fatal("DiagnosePathPaymentStrictSend returned nil for under_dest_min")
+		}
+		if diag.PaymentType != "strict_send" {
+			t.Errorf("PaymentType = %q, want strict_send", diag.PaymentType)
+		}
+		if diag.Amount != "50.0000000" {
+			t.Errorf("Amount = %q, want 50.0000000", diag.Amount)
+		}
+		if diag.DestMin != "40.0000000" {
+			t.Errorf("DestMin = %q, want 40.0000000", diag.DestMin)
+		}
+		if len(diag.Hops) != 1 {
+			t.Fatalf("len(Hops) = %d, want 1", len(diag.Hops))
+		}
+		if !strings.Contains(diag.Hops[0].From, "USDC") || diag.Hops[0].To != "XLM" {
+			t.Errorf("Hop 0 = %+v, want USDC -> XLM", diag.Hops[0])
+		}
+		if !strings.Contains(diag.Explanation, "destMin") {
+			t.Errorf("Explanation does not mention destMin: %q", diag.Explanation)
+		}
+		report := diag.DiagnosticReport()
+		if !strings.Contains(report, "destMin") {
+			t.Errorf("DiagnosticReport missing destMin:\n%s", report)
+		}
+	})
+
+	t.Run("too_few_offers liquidity shift", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnosePathPaymentStrictSend(op, 0, "path_payment_strict_send_too_few_offers")
+		if diag == nil {
+			t.Fatal("DiagnosePathPaymentStrictSend returned nil for too_few_offers")
+		}
+		if !strings.Contains(diag.Explanation, "order book") {
+			t.Errorf("Explanation does not mention order book: %q", diag.Explanation)
+		}
+	})
+
+	t.Run("success returns nil", func(t *testing.T) {
+		t.Parallel()
+		if diag := lens.DiagnosePathPaymentStrictSend(op, 0, "path_payment_strict_send_success"); diag != nil {
+			t.Errorf("expected nil for success, got %+v", diag)
+		}
+	})
+}
+
+func TestDiagnosePathPaymentSlippageOperation(t *testing.T) {
+	t.Parallel()
+
+	usdcAsset := creditAsset(t, "USDC", testIssuer)
+	nativeAsset := xdr.Asset{Type: xdr.AssetTypeAssetTypeNative}
+
+	recOp := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypePathPaymentStrictReceive,
+			PathPaymentStrictReceiveOp: &xdr.PathPaymentStrictReceiveOp{
+				SendAsset:   nativeAsset,
+				SendMax:     10_0000000,
+				Destination: mustMuxed(t, testDest),
+				DestAsset:   usdcAsset,
+				DestAmount:  5_0000000,
+			},
+		},
+	}
+	sendOp := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypePathPaymentStrictSend,
+			PathPaymentStrictSendOp: &xdr.PathPaymentStrictSendOp{
+				SendAsset:   nativeAsset,
+				SendAmount:  10_0000000,
+				Destination: mustMuxed(t, testDest),
+				DestAsset:   usdcAsset,
+				DestMin:     5_0000000,
+			},
+		},
+	}
+	otherOp := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypePayment,
+			PaymentOp: &xdr.PaymentOp{
+				Destination: mustMuxed(t, testDest),
+				Asset:       nativeAsset,
+				Amount:      100,
+			},
+		},
+	}
+
+	recRes := xdr.OperationResult{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypePathPaymentStrictReceive,
+			PathPaymentStrictReceiveResult: &xdr.PathPaymentStrictReceiveResult{
+				Code: xdr.PathPaymentStrictReceiveResultCodePathPaymentStrictReceiveOverSendmax,
+			},
+		},
+	}
+	sendRes := xdr.OperationResult{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypePathPaymentStrictSend,
+			PathPaymentStrictSendResult: &xdr.PathPaymentStrictSendResult{
+				Code: xdr.PathPaymentStrictSendResultCodePathPaymentStrictSendUnderDestmin,
+			},
+		},
+	}
+
+	if diag := lens.DiagnosePathPaymentSlippage(recOp, 0, recRes); diag == nil || diag.PaymentType != "strict_receive" {
+		t.Errorf("DiagnosePathPaymentSlippage(receive) = %+v, want strict_receive diagnosis", diag)
+	}
+	if diag := lens.DiagnosePathPaymentSlippage(sendOp, 1, sendRes); diag == nil || diag.PaymentType != "strict_send" {
+		t.Errorf("DiagnosePathPaymentSlippage(send) = %+v, want strict_send diagnosis", diag)
+	}
+	if diag := lens.DiagnosePathPaymentSlippage(otherOp, 2, recRes); diag != nil {
+		t.Errorf("DiagnosePathPaymentSlippage(otherOp) = %+v, want nil", diag)
+	}
+}
+
+func TestDiagnoseSetTrustLineFlags(t *testing.T) {
+	t.Parallel()
+
+	usdcAsset := creditAsset(t, "USDC", testIssuer)
+	trustor := mustAccountID(t, testDest)
+
+	op := xdr.SetTrustLineFlagsOp{
+		Trustor:    trustor,
+		Asset:      usdcAsset,
+		ClearFlags: xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag),
+		SetFlags:   0,
+	}
+
+	t.Run("cant_revoke requires AUTH_REVOCABLE_FLAG", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnoseSetTrustLineFlags(op, 0, "set_trust_line_flags_cant_revoke")
+		if diag == nil {
+			t.Fatal("DiagnoseSetTrustLineFlags returned nil for cant_revoke")
+		}
+		if !diag.RevokingAuth {
+			t.Error("RevokingAuth = false, want true")
+		}
+		if diag.Action != "revoke_authorization" {
+			t.Errorf("Action = %q, want revoke_authorization", diag.Action)
+		}
+		if !strings.Contains(diag.Asset, testIssuer) {
+			t.Errorf("Asset = %q, want to contain %q", diag.Asset, testIssuer)
+		}
+		if diag.Trustor != testDest {
+			t.Errorf("Trustor = %q, want %q", diag.Trustor, testDest)
+		}
+		if !strings.Contains(diag.Explanation, "AUTH_REVOCABLE_FLAG") {
+			t.Errorf("Explanation does not mention AUTH_REVOCABLE_FLAG: %q", diag.Explanation)
+		}
+		if !strings.Contains(diag.Hint, "AUTH_REVOCABLE_FLAG") {
+			t.Errorf("Hint does not mention AUTH_REVOCABLE_FLAG: %q", diag.Hint)
+		}
+		if diag.String() == "" {
+			t.Error("String() is empty")
+		}
+		report := diag.DiagnosticReport()
+		if !strings.Contains(report, "SetTrustLineFlags failure") ||
+			!strings.Contains(report, "AUTH_REVOCABLE_FLAG") ||
+			!strings.Contains(report, testIssuer) {
+			t.Errorf("DiagnosticReport missing required details:\n%s", report)
+		}
+	})
+
+	t.Run("no_trust_line diagnosis", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnoseSetTrustLineFlags(op, 0, "set_trust_line_flags_no_trust_line")
+		if diag == nil {
+			t.Fatal("DiagnoseSetTrustLineFlags returned nil for no_trust_line")
+		}
+		if !strings.Contains(diag.Summary, "does not exist") {
+			t.Errorf("Summary missing expected guidance: %q", diag.Summary)
+		}
+	})
+
+	t.Run("malformed diagnosis", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnoseSetTrustLineFlags(op, 0, "set_trust_line_flags_malformed")
+		if diag == nil {
+			t.Fatal("DiagnoseSetTrustLineFlags returned nil for malformed")
+		}
+		if !strings.Contains(diag.Summary, "malformed") {
+			t.Errorf("Summary = %q, want malformed", diag.Summary)
+		}
+	})
+
+	t.Run("invalid_state diagnosis", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnoseSetTrustLineFlags(op, 0, "set_trust_line_flags_invalid_state")
+		if diag == nil {
+			t.Fatal("DiagnoseSetTrustLineFlags returned nil for invalid_state")
+		}
+		if !strings.Contains(diag.Summary, "Invalid trustline flags") {
+			t.Errorf("Summary = %q, want invalid flags", diag.Summary)
+		}
+	})
+
+	t.Run("low_reserve diagnosis", func(t *testing.T) {
+		t.Parallel()
+		diag := lens.DiagnoseSetTrustLineFlags(op, 0, "set_trust_line_flags_low_reserve")
+		if diag == nil {
+			t.Fatal("DiagnoseSetTrustLineFlags returned nil for low_reserve")
+		}
+		if !strings.Contains(diag.Summary, "Insufficient reserve") {
+			t.Errorf("Summary = %q, want low reserve", diag.Summary)
+		}
+	})
+
+	t.Run("success returns nil", func(t *testing.T) {
+		t.Parallel()
+		if diag := lens.DiagnoseSetTrustLineFlags(op, 0, "set_trust_line_flags_success"); diag != nil {
+			t.Errorf("expected nil for success, got %+v", diag)
+		}
+	})
+}
+
+func TestDiagnoseSetTrustLineFlagsOperation(t *testing.T) {
+	t.Parallel()
+
+	usdcAsset := creditAsset(t, "USDC", testIssuer)
+	op := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypeSetTrustLineFlags,
+			SetTrustLineFlagsOp: &xdr.SetTrustLineFlagsOp{
+				Trustor:    mustAccountID(t, testDest),
+				Asset:      usdcAsset,
+				ClearFlags: 1,
+				SetFlags:   0,
+			},
+		},
+	}
+	res := xdr.OperationResult{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypeSetTrustLineFlags,
+			SetTrustLineFlagsResult: &xdr.SetTrustLineFlagsResult{
+				Code: xdr.SetTrustLineFlagsResultCodeSetTrustLineFlagsCantRevoke,
+			},
+		},
+	}
+	diag := lens.DiagnoseSetTrustLineFlagsOperation(op, 0, res)
+	if diag == nil || !diag.RevokingAuth {
+		t.Errorf("DiagnoseSetTrustLineFlagsOperation = %+v, want revocation blocked", diag)
+	}
+
+	otherOp := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypePayment,
+		},
+	}
+	if diag := lens.DiagnoseSetTrustLineFlagsOperation(otherOp, 0, res); diag != nil {
+		t.Errorf("DiagnoseSetTrustLineFlagsOperation(otherOp) = %+v, want nil", diag)
+	}
+}
+
+func TestExplainPairPathPaymentAndTrustLineDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	usdcAsset := creditAsset(t, "USDC", testIssuer)
+	nativeAsset := xdr.Asset{Type: xdr.AssetTypeAssetTypeNative}
+
+	pathOp := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypePathPaymentStrictReceive,
+			PathPaymentStrictReceiveOp: &xdr.PathPaymentStrictReceiveOp{
+				SendAsset:   nativeAsset,
+				SendMax:     10_0000000,
+				Destination: mustMuxed(t, testDest),
+				DestAsset:   usdcAsset,
+				DestAmount:  5_0000000,
+			},
+		},
+	}
+	tlOp := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypeSetTrustLineFlags,
+			SetTrustLineFlagsOp: &xdr.SetTrustLineFlagsOp{
+				Trustor:    mustAccountID(t, testDest),
+				Asset:      usdcAsset,
+				ClearFlags: 1,
+				SetFlags:   0,
+			},
+		},
+	}
+
+	envB64 := buildEnvelope(t, noMemo(), noCond(), pathOp, tlOp)
+	envVal, err := lens.DecodeAs(envB64, "TransactionEnvelope")
+	if err != nil {
+		t.Fatalf("DecodeAs(env): %v", err)
+	}
+
+	pathRes := xdr.OperationResult{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypePathPaymentStrictReceive,
+			PathPaymentStrictReceiveResult: &xdr.PathPaymentStrictReceiveResult{
+				Code: xdr.PathPaymentStrictReceiveResultCodePathPaymentStrictReceiveOverSendmax,
+			},
+		},
+	}
+	tlRes := xdr.OperationResult{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypeSetTrustLineFlags,
+			SetTrustLineFlagsResult: &xdr.SetTrustLineFlagsResult{
+				Code: xdr.SetTrustLineFlagsResultCodeSetTrustLineFlagsCantRevoke,
+			},
+		},
+	}
+	txRes := xdr.TransactionResult{
+		FeeCharged: 200,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxFailed,
+			Results: &[]xdr.OperationResult{pathRes, tlRes},
+		},
+	}
+	resB64 := mustMarshal(t, txRes)
+	resVal, err := lens.DecodeAs(resB64, "TransactionResult")
+	if err != nil {
+		t.Fatalf("DecodeAs(res): %v", err)
+	}
+
+	explained, err := lens.ExplainPair(envVal, resVal)
+	if err != nil {
+		t.Fatalf("ExplainPair error: %v", err)
+	}
+
+	if len(explained.Operations) != 2 {
+		t.Fatalf("len(Operations) = %d, want 2", len(explained.Operations))
+	}
+	if explained.Operations[0].PathPayment == nil {
+		t.Error("Operations[0].PathPayment is nil, want slippage diagnosis")
+	} else if explained.Operations[0].PathPayment.PaymentType != "strict_receive" {
+		t.Errorf("Operations[0].PathPayment.PaymentType = %q, want strict_receive", explained.Operations[0].PathPayment.PaymentType)
+	}
+
+	if explained.Operations[1].TrustLine == nil {
+		t.Error("Operations[1].TrustLine is nil, want trustline diagnosis")
+	} else if !explained.Operations[1].TrustLine.RevokingAuth {
+		t.Error("Operations[1].TrustLine.RevokingAuth = false, want true")
+	}
+}
