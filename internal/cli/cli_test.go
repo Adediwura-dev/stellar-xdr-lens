@@ -417,7 +417,8 @@ func TestDiffExitCode(t *testing.T) {
 		left, right string
 		wantCode    int
 	}{
-		{"differing values exit 1", "tx_soroban.res", "tx_failed.res", 1},
+		// ExitDiffFound (2): completed, but the checked condition is false.
+		{"differing values exit 2", "tx_soroban.res", "tx_failed.res", 2},
 		{"identical values exit 0", "tx_failed.res", "tx_failed.res", 0},
 	}
 
@@ -443,8 +444,8 @@ func TestDiffQuietPrintsNothing(t *testing.T) {
 	if stdout != "" {
 		t.Errorf("--quiet printed output:\n%s", stdout)
 	}
-	if code, _ := cli.ExitCode(err); code != 1 {
-		t.Errorf("exit code = %d, want 1", code)
+	if code, _ := cli.ExitCode(err); code != cli.ExitDiffFound {
+		t.Errorf("exit code = %d, want %d", code, cli.ExitDiffFound)
 	}
 }
 

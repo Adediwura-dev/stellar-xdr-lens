@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
 
 // errNoInput is returned when no payload could be resolved from any source.
@@ -42,13 +44,15 @@ func resolveInput(arg, file string, stdin io.Reader) (string, error) {
 	}
 
 	if arg == stdinMarker || !isTerminal(os.Stdin) {
-		b, err := io.ReadAll(stdin)
+		// lens.ReadStdinPayload is the buffered stdin pipe: one pre-sized
+		// pass over the stream, no second copy. Its ErrEmptyInput models
+		// "the pipeline handed us nothing", which stays errNoInput.
+		payload, err := lens.ReadStdinPayload(stdin)
+		if errors.Is(err, lens.ErrEmptyInput) {
+			return "", errNoInput
+		}
 		if err != nil {
 			return "", fmt.Errorf("reading stdin: %w", err)
-		}
-		payload := strings.TrimSpace(string(b))
-		if payload == "" {
-			return "", errNoInput
 		}
 		return payload, nil
 	}

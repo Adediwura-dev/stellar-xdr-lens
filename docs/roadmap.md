@@ -20,8 +20,15 @@ Working and tested:
   (time-sliced surveys included), history-archive sets, account extensions,
   data entries and the state-archival types; all 208 protocol result codes
   explained
-- Input from arguments, files or stdin; exit codes suitable for CI
-- No network access anywhere in the library or tests
+- Input from arguments, files or stdin; a pinned four-code exit policy
+  (0 clean, 1 generic error, 2 diff/condition false, 3 undecodable XDR)
+- Shell completion for bash, zsh, fish and PowerShell (`lens completion`)
+- Stdin framing probe: pasted base64/hex text and binary framed streams both
+  parse without extra flags
+- A testdata corpus synchronizer keeps the captured fixture corpus anchored to
+  `manifest.json`; reaching Testnet is opt-in via `LENS_CORPUS_SYNC`
+- No network access in the library or in the default test run (the corpus
+  synchronizer tests fetch only when the environment gate is set)
 
 Known limits, stated plainly:
 
@@ -74,7 +81,10 @@ local WASM file or a `--spec` flag — and is a substantial piece of work.
 `lens explain <tx-hash>` fetching from Horizon or an RPC endpoint would be
 convenient. It is deliberately deferred: offline-and-deterministic is a
 property worth protecting, so any network access must be strictly opt-in,
-confined to the CLI (never the library), and never on a default path.
+confined to the CLI (never the library), and never on a default path. The
+policy already has one working template: the testdata corpus synchronizer
+touches Testnet only under an explicit environment gate, and every unit test
+around it runs against an in-memory stub.
 
 ### txrep (SEP-0011)
 

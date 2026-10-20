@@ -127,7 +127,7 @@ diagnosed from the operation's own parameters: which threshold weight exceeded
 255, which flag bit is contradictory or unrecognised, whether the signer is
 the source account itself, whether the pool's price bounds left any room for
 slippage, and which deposit or withdrawal bound is malformed. Use
-`--fail-on-error` to exit non-zero when the transaction failed, which makes
+`--fail-on-error` to exit with 2 when the transaction failed, which makes
 this usable as a CI gate.
 
 For a GitHub-flavored Markdown report with transaction details and one row per
@@ -258,6 +258,31 @@ offline decode has no passphrase for, so use the digest to identify the inner
 transaction rather than as the explorer's transaction hash. An outer signature
 whose hint does not match is another signer of the fee source account, not a
 wrong signature, and the note says so.
+A transaction's `LedgerFootprint` is flat on the wire, so `lens decode` also
+groups its keys by storage level after the untouched `ReadOnly` and `ReadWrite`
+lists. Each grouped entry points at its wire position and names the contract it
+belongs to (contract code keys show their WASM hash instead):
+
+```console
+$ lens decode --file soroban-envelope.xdr  # footprint excerpt
+Footprint
+├─ ReadOnly  [10]
+│  └─ ...
+├─ ReadWrite  [6]
+│  └─ ...
+├─ Instance  [3]
+│  ├─ [0]: readOnly[0]  contract data for CBGSBKYMYO6OMGHQXXNOBRGVUDFUDVC2XLC3SXON5R2SNXILR7XCKKY3
+│  └─ ...
+├─ Temporary  [10]
+│  └─ ...
+└─ Other  [3]
+   ├─ [0]: readOnly[8]  contract code 70fe44694c9fe6b0abc69a6da4858fc2aaba04fa10492a466a1d426d04ca8560
+   └─ ...
+```
+
+`Instance` holds persistent keys that use the contract instance key; `Other`
+holds keys with no Soroban durability, such as trust lines and contract code,
+so no entry is dropped.
 
 #### Alternative Formats and Interactive Explorer
 
@@ -354,7 +379,7 @@ TransactionResult
 5 changed, 1 removed
 ```
 
-Use `--exit-code` to exit non-zero when the values differ, like `diff(1)`.
+Use `--exit-code` to exit with 2 when the values differ, mirroring `diff(1)`.
 The default compares ordered lists by index. Use `--align` to opt into LCS
 matching for unchanged list elements when insertions or removals would cause a
 cascade of positional changes. `--semantic` compares ScVal wide integers as
@@ -375,6 +400,9 @@ $ lens diff --unordered-signers before.xdr after.xdr
 # Set-theoretic (Venn) difference of two Soroban ledger footprints
 $ lens diff --footprint before.env.xdr after.env.xdr
 
+# Ignore minor numeric noise (e.g. sequence numbers, timestamps, base fees) within a delta
+$ lens diff --diff-threshold 10 before.xdr after.xdr
+
 # Just the statistics: how many changes, of what kind, in which section
 $ lens diff --stats before.xdr after.xdr
 TransactionResult
@@ -382,6 +410,8 @@ TransactionResult
   FeeCharged: 1
   Result: 5
 ```
+
+`lens diff` also automatically normalizes binary data (such as Base64 vs Hex hashes and signatures), eliminating spurious diff lines when representations differ only by string encoding.
 
 `--stats` derives everything from an existing diff, so it stays deterministic
 and offline. It has a stable JSON form (`--stats --json`) with the total, the
@@ -465,7 +495,7 @@ Operations (1)
 It reports mismatched operation and result types, operations that have no result
 of their own, results with no matching operation, and each failed operation's
 result code in plain English. `--json` emits the alignment as camelCase JSON and
-`--exit-code` exits non-zero when the two disagree. Everything is computed from
+`--exit-code` exits with 2 when the two disagree. Everything is computed from
 the two supplied blobs; no network call is made.
 
 ### `lens meta-diff` — how did ledger balances change?
@@ -561,6 +591,33 @@ dialects remain supported. Enrichments that intentionally collapse structure
 into prose (notably claim predicates) return an error rather than inventing a
 value; pass the original decoded value to the library's `lens.Encode` instead.
 
+### `lens completion` — shell autocompletion
+
+`lens` ships its own completion engine for bash, zsh, fish and PowerShell.
+Subcommand names and persistent flags are completed on every level; dynamic
+flags complete real values: `--type`/`-t` suggests every registered type name
+(the same list `lens types` prints), and `--format`, `--color`, `--network`
+and `--redact` offer their valid choices.
+
+```console
+# Load completions for the current shell session
+$ source <(lens completion bash)      # bash
+$ source <(lens completion zsh)       # zsh
+$ lens completion fish | source       # fish
+```
+
+Install per-user by writing the script to your completion directory, e.g. for
+zsh:
+
+```sh
+lens completion zsh > "${fpath[1]}/_lens"
+```
+
+`lens completion` replaces the generic cobra completion command, and the
+hidden `__complete` entry point is exercised by `internal/cli/completion_test.go`.
+Registrations run after the command tree is built, so every subcommand is
+visible to `registerCompletions(root)`, which is called from `newRootCmd`.
+
 ### Piping and scripting
 
 `lens` reads from an argument, a `--file`, or stdin, so it composes:
@@ -575,7 +632,8 @@ curl -s "https://horizon.stellar.org/transactions/$HASH" \
 lens decode --json "$XDR" | jq -r '.value.V1.Tx.Fee'
 
 # Gate a deployment on the transaction having succeeded
-lens explain "$ENV" --result "$RES" --fail-on-error || exit 1
+# (exit 2 = the transaction failed, exit 3 = undecodable XDR)
+lens explain "$ENV" --result "$RES" --fail-on-error
 
 # Hexadecimal input support
 lens decode --hex "0x00000000..."
@@ -633,6 +691,38 @@ and Soroban RPC:
 These field names are part of the public interface — sibling tools and scripts
 address them with `jq`, so renaming one is a breaking change. The CSV column
 names in [`CSVColumns`](#csv-export) are part of the same contract.
+
+### Exit codes
+
+The CLI has a strict, pinned exit-code policy (`internal/cli/exitcodes.go`):
+
+| Code | Meaning |
+|------|---------|
+| `0` | clean — the command did what was asked and the answer is "no" |
+| `1` | generic error — bad flags, missing files, unreadable environments; anything not caused by the XDR itself |
+| `2` | diff found — the command ran, but the checked condition is false: `diff --exit-code`/`--quiet` finding a difference, `explain --fail-on-error` seeing a failed transaction, or `result-diff --exit-code` seeing a disagreement |
+| `3` | invalid XDR — the payload could not be decoded: bad base64, a malformed structure, no registered type matches, non-canonical encoding or a corrupted stream record |
+
+Scripts therefore see exactly four outcomes: success, a check that returned
+false, XDR they cannot read, and everything else. The classification is
+`errors.Is`-based, so wrapped decode errors still resolve to code 3.
+
+> **Migration note.** The "diff found" condition now exits with **2**, and
+> undecodable XDR exits with **3**. Earlier releases collapsed both into the
+> generic **1** (and documented `diff(1)` semantics for it); CI that matched
+> "any non-zero" keeps working, but scripts that compared against 1 must now
+> expect 2 for a differing pair and 3 for garbage input.
+
+### Stdin framing
+
+Standard input is probed before it is parsed (`pkg/lens/stdin_pipe.go`, the
+`lens.ReadStdinPayload` entry point): if the first bytes look like base64 or
+hex text, the input is split on lines and comments (`#`) and decoded through
+the multi-stream decoder; otherwise the bytes are treated as a binary framed
+stream (RFC 5531 record marking or length-prefixed, auto-detected). Piping a
+Horizon `envelope_xdr` field and piping a raw binary record to the same
+commands both work without extra flags, and payloads larger than the default
+`bufio` reader are handled correctly.
 
 ## Library use
 

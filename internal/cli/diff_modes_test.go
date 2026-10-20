@@ -194,8 +194,8 @@ func TestResultDiffJSONAndExitCode(t *testing.T) {
 
 	_, _, err = run(t, "", "result-diff", "--exit-code",
 		fixturePath("tx_failed.env"), fixturePath("tx_failed.res"))
-	if code, _ := cli.ExitCode(err); code != 1 {
-		t.Errorf("result-diff --exit-code exit = %d, want 1 (err=%v)", code, err)
+	if code, _ := cli.ExitCode(err); code != cli.ExitDiffFound {
+		t.Errorf("result-diff --exit-code exit = %d, want %d (err=%v)", code, cli.ExitDiffFound, err)
 	}
 
 	_, _, err = run(t, "", "result-diff", "--exit-code",
@@ -302,5 +302,78 @@ func TestDiffModeValidation(t *testing.T) {
 		if _, _, err := run(t, "", full...); err == nil {
 			t.Errorf("%v error = nil, want a mode-conflict error", args)
 		}
+	}
+}
+
+func TestDiffThresholdFlag(t *testing.T) {
+	t.Parallel()
+
+	op1 := xdr.Operation{Body: xdr.OperationBody{
+		Type:           xdr.OperationTypeBumpSequence,
+		BumpSequenceOp: &xdr.BumpSequenceOp{BumpTo: xdr.SequenceNumber(100)},
+	}}
+	op2 := xdr.Operation{Body: xdr.OperationBody{
+		Type:           xdr.OperationTypeBumpSequence,
+		BumpSequenceOp: &xdr.BumpSequenceOp{BumpTo: xdr.SequenceNumber(105)},
+	}}
+	v1_1 := xdr.TransactionV1Envelope{
+		Tx: xdr.Transaction{
+			SourceAccount: xdr.MustMuxedAddress(diffTestSource),
+			Fee:           100,
+			SeqNum:        xdr.SequenceNumber(1),
+			Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+			Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+			Operations:    []xdr.Operation{op1},
+			Ext:           xdr.TransactionExt{V: 0},
+		},
+	}
+	v1_2 := v1_1
+	v1_2.Tx.Operations = []xdr.Operation{op2}
+
+	env1 := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1:   &v1_1,
+	}
+	env2 := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1:   &v1_2,
+	}
+
+	p1, err := xdr.MarshalBase64(env1)
+	if err != nil {
+		t.Fatalf("MarshalBase64: %v", err)
+	}
+	p2, err := xdr.MarshalBase64(env2)
+	if err != nil {
+		t.Fatalf("MarshalBase64: %v", err)
+	}
+
+	stdoutSmall, _, err := run(t, "", "diff", "--diff-threshold", "2", p1, p2)
+	if err != nil {
+		t.Fatalf("diff --diff-threshold 2 error = %v", err)
+	}
+	if !strings.Contains(stdoutSmall, "BumpTo") {
+		t.Errorf("expected BumpTo change reported with threshold 2:\n%s", stdoutSmall)
+	}
+
+	stdoutLarge, _, err := run(t, "", "diff", "--diff-threshold", "10", p1, p2)
+	if err != nil {
+		t.Fatalf("diff --diff-threshold 10 error = %v", err)
+	}
+	if !strings.Contains(stdoutLarge, "no differences") {
+		t.Errorf("expected 'no differences' with threshold 10:\n%s", stdoutLarge)
+	}
+}
+
+func TestDiffThresholdValidation(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := run(t, "", "diff", "--diff-threshold", "-1",
+		fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+	if err == nil {
+		t.Fatal("expected error for negative --diff-threshold, got nil")
+	}
+	if !strings.Contains(err.Error(), "--diff-threshold must be non-negative") {
+		t.Errorf("error = %v, want mention of non-negative", err)
 	}
 }
