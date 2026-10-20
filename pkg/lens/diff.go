@@ -1,7 +1,12 @@
 package lens
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"math"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -88,6 +93,11 @@ type DiffResult struct {
 	RightType string
 	// Changes lists every difference, in document order.
 	Changes []Change
+	// Redacted lists the paths whose values were normalized away by
+	// DiffOptions.Redaction, in first-seen document order. It is nil unless
+	// redaction was requested, and is reported for transparency: those paths
+	// may still differ on the wire even though the diff does not show it.
+	Redacted []string
 }
 
 // DiffOptions configures structural comparison behavior.
@@ -108,6 +118,15 @@ type DiffOptions struct {
 	// filter reports every change. Filtering happens after the walk, so it
 	// only narrows the output; it never changes how the values are compared.
 	Filter *PathFilter
+	// Threshold ignores scalar numeric differences below or equal to the given delta.
+	Threshold float64
+	// DiffThreshold is an alias for Threshold.
+	DiffThreshold float64
+	// Redaction normalizes dynamic cryptographic values — hashes, signatures
+	// and derived identifiers — before the walk, so that two values which
+	// differ only in those fields compare equal. The zero value redacts
+	// nothing and preserves the historical behavior. See diff_redact.go.
+	Redaction RedactionPolicy
 }
 
 // Equal reports whether the two values were structurally identical.
@@ -146,6 +165,12 @@ func DiffWithOptions(left, right *Value, options DiffOptions) (*DiffResult, erro
 		}
 	}
 	res := &DiffResult{LeftType: left.Type, RightType: right.Type}
+	if options.Redaction.Enabled() {
+		var leftPaths, rightPaths []string
+		leftNode = redactNode(leftNode, options.Redaction, "", &leftPaths)
+		rightNode = redactNode(rightNode, options.Redaction, "", &rightPaths)
+		res.Redacted = mergedPaths(leftPaths, rightPaths)
+	}
 	diffNodesWithOptions(leftNode, rightNode, "", &res.Changes, options)
 	if !options.Filter.Empty() {
 		res.Changes = FilterChanges(res.Changes, options.Filter)
@@ -167,6 +192,9 @@ func diffNodesWithOptions(a, b *Node, path string, out *[]Change, options DiffOp
 	}
 
 	if a.Kind != b.Kind {
+		if nodesBinaryEqual(a, b) {
+			return
+		}
 		*out = append(*out, Change{
 			Path:       path,
 			Op:         ChangeTypeChanged,
@@ -180,7 +208,7 @@ func diffNodesWithOptions(a, b *Node, path string, out *[]Change, options DiffOp
 
 	switch a.Kind {
 	case KindScalar:
-		if !sameScalar(a, b) {
+		if !sameScalarWithOptions(a, b, options) {
 			*out = append(*out, Change{
 				Path:       path,
 				Op:         ChangeModified,
@@ -257,7 +285,7 @@ func diffAlignedLists(left, right []*Node, path string, out *[]Change, options D
 	}
 	for i := len(left) - 1; i >= 0; i-- {
 		for j := len(right) - 1; j >= 0; j-- {
-			if sameNode(left[i], right[j]) {
+			if sameNodeWithOptions(left[i], right[j], options) {
 				lcs[i][j] = 1 + lcs[i+1][j+1]
 			} else if lcs[i+1][j] > lcs[i][j+1] {
 				lcs[i][j] = lcs[i+1][j]
@@ -269,7 +297,7 @@ func diffAlignedLists(left, right []*Node, path string, out *[]Change, options D
 
 	i, j := 0, 0
 	for i < len(left) && j < len(right) {
-		if sameNode(left[i], right[j]) {
+		if sameNodeWithOptions(left[i], right[j], options) {
 			diffNodesWithOptions(left[i], right[j], path+"["+strconv.Itoa(j)+"]", out, options)
 			i++
 			j++
@@ -289,28 +317,261 @@ func diffAlignedLists(left, right []*Node, path string, out *[]Change, options D
 	}
 }
 
-func sameNode(a, b *Node) bool {
-	if a == nil || b == nil || a.Kind != b.Kind || a.Name != b.Name {
+func sameNodeWithOptions(a, b *Node, options DiffOptions) bool {
+	if a == nil || b == nil || a.Name != b.Name {
 		return a == b
 	}
+	if a.Kind != b.Kind {
+		return nodesBinaryEqual(a, b)
+	}
 	if a.Kind == KindScalar {
-		return sameScalar(a, b)
+		return sameScalarWithOptions(a, b, options)
 	}
 	if len(a.Children) != len(b.Children) {
 		return false
 	}
 	for i := range a.Children {
-		if !sameNode(a.Children[i], b.Children[i]) {
+		if !sameNodeWithOptions(a.Children[i], b.Children[i], options) {
 			return false
 		}
 	}
 	return true
 }
 
-func sameScalar(a, b *Node) bool {
-	if a.Note != b.Note {
+func sameScalarWithOptions(a, b *Node, options DiffOptions) bool {
+	threshold := options.Threshold
+	if threshold == 0 && options.DiffThreshold > 0 {
+		threshold = options.DiffThreshold
+	}
+
+	// 1. Direct scalar value and note match
+	if a.Note == b.Note && fmt.Sprintf("%v", a.Value) == fmt.Sprintf("%v", b.Value) {
+		return true
+	}
+
+	// 2. Numeric delta threshold filter (--diff-threshold)
+	if threshold > 0 {
+		if numA, okA := asNumber(a.Value); okA {
+			if numB, okB := asNumber(b.Value); okB {
+				if math.Abs(numA-numB) <= threshold {
+					return true
+				}
+			}
+		}
+	}
+
+	// 3. Binary representation normalization (Hex vs Base64 vs Bytes)
+	if nodesBinaryEqual(a, b) {
+		if a.Note == b.Note || a.Note == "" || b.Note == "" || notesCompatible(a.Note, b.Note) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func notesCompatible(aNote, bNote string) bool {
+	if aNote == bNote {
+		return true
+	}
+	aClean := strings.Trim(aNote, "\"")
+	bClean := strings.Trim(bNote, "\"")
+	return aClean == bClean
+}
+
+func asNumber(v any) (float64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	switch val := v.(type) {
+	case int:
+		return float64(val), true
+	case int8:
+		return float64(val), true
+	case int16:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case uint:
+		return float64(val), true
+	case uint8:
+		return float64(val), true
+	case uint16:
+		return float64(val), true
+	case uint32:
+		return float64(val), true
+	case uint64:
+		return float64(val), true
+	case float32:
+		return float64(val), true
+	case float64:
+		return val, true
+	case string:
+		f, err := strconv.ParseFloat(val, 64)
+		if err == nil {
+			return f, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+func bytesFromHex(s string) ([]byte, bool) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	if len(s) == 0 || len(s)%2 != 0 {
+		return nil, false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return nil, false
+		}
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+func bytesFromBase64(s string) ([]byte, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return nil, false
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) > 0 {
+		return b, true
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil && len(b) > 0 {
+		return b, true
+	}
+	return nil, false
+}
+
+func extractDirectBytes(v any) ([]byte, bool) {
+	if v == nil {
+		return nil, false
+	}
+	switch val := v.(type) {
+	case []byte:
+		if len(val) == 0 {
+			return nil, false
+		}
+		return val, true
+	default:
+		rv := reflect.ValueOf(v)
+		if rv.IsValid() && rv.Kind() == reflect.Array && rv.Type().Elem().Kind() == reflect.Uint8 {
+			if rv.Len() == 0 {
+				return nil, false
+			}
+			b := make([]byte, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				b[i] = byte(rv.Index(i).Uint())
+			}
+			return b, true
+		}
+		return nil, false
+	}
+}
+
+func extractListBytes(n *Node) ([]byte, bool) {
+	if n == nil || n.Kind != KindList || len(n.Children) == 0 {
+		return nil, false
+	}
+	b := make([]byte, len(n.Children))
+	for i, child := range n.Children {
+		if child.Kind != KindScalar {
+			return nil, false
+		}
+		num, ok := asNumber(child.Value)
+		if !ok || num < 0 || num > 255 || math.Floor(num) != num {
+			return nil, false
+		}
+		b[i] = byte(num)
+	}
+	return b, true
+}
+
+func nodesBinaryEqual(a, b *Node) bool {
+	if a == nil || b == nil {
 		return false
 	}
+
+	// Case 1: Both are scalar strings (one hex, one base64, or hex case diff)
+	sA, okSA := a.Value.(string)
+	sB, okSB := b.Value.(string)
+	if okSA && okSB && a.Kind == KindScalar && b.Kind == KindScalar {
+		bHexA, isHexA := bytesFromHex(sA)
+		bHexB, isHexB := bytesFromHex(sB)
+		bB64A, isB64A := bytesFromBase64(sA)
+		bB64B, isB64B := bytesFromBase64(sB)
+
+		// One is Hex, the other is Base64:
+		if isHexA && isB64B && bytes.Equal(bHexA, bB64B) {
+			return true
+		}
+		if isB64A && isHexB && bytes.Equal(bB64A, bHexB) {
+			return true
+		}
+		// Both are Hex (case differences):
+		if isHexA && isHexB && bytes.Equal(bHexA, bHexB) {
+			return true
+		}
+		return false
+	}
+
+	// Case 2: One is raw bytes or byte array or byte list, the other is scalar string (hex or base64)
+	var rawBytesA []byte
+	if bytesA, ok := extractDirectBytes(a.Value); ok {
+		rawBytesA = bytesA
+	} else if bytesA, ok := extractListBytes(a); ok {
+		rawBytesA = bytesA
+	}
+
+	var rawBytesB []byte
+	if bytesB, ok := extractDirectBytes(b.Value); ok {
+		rawBytesB = bytesB
+	} else if bytesB, ok := extractListBytes(b); ok {
+		rawBytesB = bytesB
+	}
+
+	if rawBytesA != nil && rawBytesB != nil {
+		return bytes.Equal(rawBytesA, rawBytesB)
+	}
+
+	if rawBytesA != nil && okSB {
+		if bHex, ok := bytesFromHex(sB); ok && bytes.Equal(rawBytesA, bHex) {
+			return true
+		}
+		if bB64, ok := bytesFromBase64(sB); ok && bytes.Equal(rawBytesA, bB64) {
+			return true
+		}
+	}
+
+	if rawBytesB != nil && okSA {
+		if bHex, ok := bytesFromHex(sA); ok && bytes.Equal(rawBytesB, bHex) {
+			return true
+		}
+		if bB64, ok := bytesFromBase64(sA); ok && bytes.Equal(rawBytesB, bB64) {
+			return true
+		}
+	}
+
+	return false
+	// Some enrichers keep the whole decoded value as the raw payload (a
+	// LedgerUpgrade, for example), and that value can contain arm pointers.
+	// Printing with %v would compare pointer addresses and report two
+	// identical values as different, so structural equality comes first.
+	if reflect.DeepEqual(a.Value, b.Value) {
+		return true
+	}
+	// Fall back to the printed form so a value that only differs in Go type
+	// (int64 versus uint64) still compares equal.
 	return fmt.Sprintf("%v", a.Value) == fmt.Sprintf("%v", b.Value)
 }
 

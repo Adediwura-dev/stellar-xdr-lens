@@ -435,3 +435,356 @@ func paths(d *lens.DiffResult) []string {
 	}
 	return out
 }
+
+func TestDiffBinaryNormalization(t *testing.T) {
+	t.Parallel()
+
+	// 4 bytes: 0xdeadbeef
+	// Hex: "deadbeef", "DEADBEEF", "0xdeadbeef"
+	// Base64: "3q2+7w=="
+	// Raw: []byte{0xde, 0xad, 0xbe, 0xef}
+
+	tests := []struct {
+		name  string
+		left  *lens.Node
+		right *lens.Node
+	}{
+		{
+			name:  "hex lowercase vs base64",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: "deadbeef"},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "3q2+7w=="},
+		},
+		{
+			name:  "hex uppercase vs base64",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: "DEADBEEF"},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "3q2+7w=="},
+		},
+		{
+			name:  "hex with 0x prefix vs base64",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: "0xdeadbeef"},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "3q2+7w=="},
+		},
+		{
+			name:  "hex uppercase vs hex lowercase",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: "DEADBEEF"},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "deadbeef"},
+		},
+		{
+			name:  "byte slice vs base64",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: []byte{0xde, 0xad, 0xbe, 0xef}},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "3q2+7w=="},
+		},
+		{
+			name:  "byte slice vs hex",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: []byte{0xde, 0xad, 0xbe, 0xef}},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "deadbeef"},
+		},
+		{
+			name:  "byte array vs hex",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: [4]byte{0xde, 0xad, 0xbe, 0xef}},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "deadbeef"},
+		},
+		{
+			name:  "byte array vs base64",
+			left:  &lens.Node{Kind: lens.KindScalar, Value: [4]byte{0xde, 0xad, 0xbe, 0xef}},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "3q2+7w=="},
+		},
+		{
+			name: "list of uint8 bytes vs hex",
+			left: &lens.Node{
+				Kind: lens.KindList,
+				Children: []*lens.Node{
+					{Kind: lens.KindScalar, Value: uint8(0xde)},
+					{Kind: lens.KindScalar, Value: uint8(0xad)},
+					{Kind: lens.KindScalar, Value: uint8(0xbe)},
+					{Kind: lens.KindScalar, Value: uint8(0xef)},
+				},
+			},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "deadbeef"},
+		},
+		{
+			name: "list of int bytes vs base64",
+			left: &lens.Node{
+				Kind: lens.KindList,
+				Children: []*lens.Node{
+					{Kind: lens.KindScalar, Value: 0xde},
+					{Kind: lens.KindScalar, Value: 0xad},
+					{Kind: lens.KindScalar, Value: 0xbe},
+					{Kind: lens.KindScalar, Value: 0xef},
+				},
+			},
+			right: &lens.Node{Kind: lens.KindScalar, Value: "3q2+7w=="},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			leftVal := &lens.Value{Type: "BinaryData", Node: tc.left}
+			rightVal := &lens.Value{Type: "BinaryData", Node: tc.right}
+
+			res, err := lens.Diff(leftVal, rightVal)
+			if err != nil {
+				t.Fatalf("Diff() error = %v", err)
+			}
+			if !res.Equal() {
+				t.Errorf("Diff() reported %d change(s), want equal: %+v", len(res.Changes), res.Changes)
+			}
+
+			// Reverse symmetry
+			resRev, err := lens.Diff(rightVal, leftVal)
+			if err != nil {
+				t.Fatalf("Diff() reverse error = %v", err)
+			}
+			if !resRev.Equal() {
+				t.Errorf("Diff() reverse reported %d change(s), want equal: %+v", len(resRev.Changes), resRev.Changes)
+			}
+		})
+	}
+}
+
+func TestDiffBinaryDifferentContentReportsModified(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		left  any
+		right any
+	}{
+		{
+			name:  "different hex content same length",
+			left:  "deadbeef",
+			right: "cafebabe",
+		},
+		{
+			name:  "hex vs base64 with different bytes",
+			left:  "deadbeef",
+			right: "AQIDBA==", // 01020304
+		},
+		{
+			name:  "different length hex",
+			left:  "deadbeef",
+			right: "deadbeef01",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			leftVal := &lens.Value{Type: "Hash", Node: &lens.Node{Kind: lens.KindScalar, Value: tc.left}}
+			rightVal := &lens.Value{Type: "Hash", Node: &lens.Node{Kind: lens.KindScalar, Value: tc.right}}
+
+			res, err := lens.Diff(leftVal, rightVal)
+			if err != nil {
+				t.Fatalf("Diff() error = %v", err)
+			}
+			if res.Equal() || len(res.Changes) != 1 {
+				t.Fatalf("expected 1 change, got %d (equal=%v)", len(res.Changes), res.Equal())
+			}
+			if res.Changes[0].Op != lens.ChangeModified {
+				t.Errorf("Op = %v, want ChangeModified", res.Changes[0].Op)
+			}
+		})
+	}
+}
+
+func TestDiffBinaryAlignedLists(t *testing.T) {
+	t.Parallel()
+
+	// List with hex on left and base64 on right
+	leftList := &lens.Value{
+		Type: "HashList",
+		Node: &lens.Node{
+			Kind: lens.KindList,
+			Children: []*lens.Node{
+				{Kind: lens.KindScalar, Value: "deadbeef"},
+				{Kind: lens.KindScalar, Value: "cafebabe"},
+			},
+		},
+	}
+	rightList := &lens.Value{
+		Type: "HashList",
+		Node: &lens.Node{
+			Kind: lens.KindList,
+			Children: []*lens.Node{
+				{Kind: lens.KindScalar, Value: "3q2+7w=="}, // deadbeef in base64
+				{Kind: lens.KindScalar, Value: "yv66vg=="}, // cafebabe in base64
+			},
+		},
+	}
+
+	res, err := lens.DiffWithOptions(leftList, rightList, lens.DiffOptions{AlignLists: true})
+	if err != nil {
+		t.Fatalf("DiffWithOptions() error = %v", err)
+	}
+	if !res.Equal() {
+		t.Errorf("aligned list with normalized binary items reported %d change(s): %+v", len(res.Changes), res.Changes)
+	}
+}
+
+func TestDiffNumericThreshold(t *testing.T) {
+	t.Parallel()
+
+	mkVal := func(name string, val any) *lens.Value {
+		return &lens.Value{
+			Type: "Record",
+			Node: &lens.Node{
+				Kind: lens.KindStruct,
+				Children: []*lens.Node{
+					{Name: name, Kind: lens.KindScalar, Value: val},
+				},
+			},
+		}
+	}
+
+	t.Run("delta within threshold is ignored", func(t *testing.T) {
+		t.Parallel()
+		left := mkVal("SeqNum", 1000)
+		right := mkVal("SeqNum", 1005)
+
+		res, err := lens.DiffWithOptions(left, right, lens.DiffOptions{Threshold: 10})
+		if err != nil {
+			t.Fatalf("DiffWithOptions() error = %v", err)
+		}
+		if !res.Equal() {
+			t.Errorf("expected no differences within threshold 10, got %d change(s): %+v", len(res.Changes), res.Changes)
+		}
+	})
+
+	t.Run("delta equal to threshold is ignored", func(t *testing.T) {
+		t.Parallel()
+		left := mkVal("SeqNum", 1000)
+		right := mkVal("SeqNum", 1005)
+
+		res, err := lens.DiffWithOptions(left, right, lens.DiffOptions{Threshold: 5})
+		if err != nil {
+			t.Fatalf("DiffWithOptions() error = %v", err)
+		}
+		if !res.Equal() {
+			t.Errorf("expected no differences at threshold boundary, got %d change(s): %+v", len(res.Changes), res.Changes)
+		}
+	})
+
+	t.Run("delta exceeding threshold is reported", func(t *testing.T) {
+		t.Parallel()
+		left := mkVal("SeqNum", 1000)
+		right := mkVal("SeqNum", 1006)
+
+		res, err := lens.DiffWithOptions(left, right, lens.DiffOptions{Threshold: 5})
+		if err != nil {
+			t.Fatalf("DiffWithOptions() error = %v", err)
+		}
+		if res.Equal() || len(res.Changes) != 1 {
+			t.Fatalf("expected 1 change, got %d", len(res.Changes))
+		}
+		if res.Changes[0].Op != lens.ChangeModified {
+			t.Errorf("Op = %v, want ChangeModified", res.Changes[0].Op)
+		}
+	})
+
+	t.Run("floating point threshold and string numbers", func(t *testing.T) {
+		t.Parallel()
+		left := mkVal("Amount", "100.25")
+		right := mkVal("Amount", "100.50")
+
+		res, err := lens.DiffWithOptions(left, right, lens.DiffOptions{Threshold: 0.5})
+		if err != nil {
+			t.Fatalf("DiffWithOptions() error = %v", err)
+		}
+		if !res.Equal() {
+			t.Errorf("expected no differences within threshold 0.5, got %+v", res.Changes)
+		}
+
+		resStrict, err := lens.DiffWithOptions(left, right, lens.DiffOptions{Threshold: 0.1})
+		if err != nil {
+			t.Fatalf("DiffWithOptions() error = %v", err)
+		}
+		if resStrict.Equal() {
+			t.Error("expected difference when threshold is 0.1, got equal")
+		}
+	})
+
+	t.Run("DiffThreshold alias field works", func(t *testing.T) {
+		t.Parallel()
+		left := mkVal("Fee", uint32(100))
+		right := mkVal("Fee", uint32(105))
+
+		res, err := lens.DiffWithOptions(left, right, lens.DiffOptions{DiffThreshold: 10})
+		if err != nil {
+			t.Fatalf("DiffWithOptions() error = %v", err)
+		}
+		if !res.Equal() {
+			t.Errorf("expected no differences with DiffThreshold alias, got %+v", res.Changes)
+		}
+	})
+
+	t.Run("threshold zero enforces strict equality", func(t *testing.T) {
+		t.Parallel()
+		left := mkVal("Count", 10)
+		right := mkVal("Count", 11)
+
+		res, err := lens.DiffWithOptions(left, right, lens.DiffOptions{Threshold: 0})
+		if err != nil {
+			t.Fatalf("DiffWithOptions() error = %v", err)
+		}
+		if res.Equal() || len(res.Changes) != 1 {
+			t.Fatalf("expected 1 change with threshold 0, got %d", len(res.Changes))
+		}
+	})
+
+	t.Run("diverse scalar number types", func(t *testing.T) {
+		t.Parallel()
+
+		typePairs := []struct {
+			left  any
+			right any
+		}{
+			{float32(10.0), float32(10.5)},
+			{float64(10.0), float64(10.5)},
+			{int(10), int(11)},
+			{int64(10), int64(11)},
+			{int32(10), int32(11)},
+			{int16(10), int16(11)},
+			{int8(10), int8(11)},
+			{uint(10), uint(11)},
+			{uint64(10), uint64(11)},
+			{uint32(10), uint32(11)},
+			{uint16(10), uint16(11)},
+			{uint8(10), uint8(11)},
+		}
+
+		for _, p := range typePairs {
+			left := mkVal("Val", p.left)
+			right := mkVal("Val", p.right)
+			res, err := lens.DiffWithOptions(left, right, lens.DiffOptions{Threshold: 2.0})
+			if err != nil {
+				t.Fatalf("DiffWithOptions(%T) error = %v", p.left, err)
+			}
+			if !res.Equal() {
+				t.Errorf("expected equal within threshold 2 for %T, got %+v", p.left, res.Changes)
+			}
+		}
+
+		// Non-number strings and boolean values with threshold
+		nonNums := mkVal("Text", "not_a_number")
+		otherNonNums := mkVal("Text", "still_not_a_number")
+		resNon, err := lens.DiffWithOptions(nonNums, otherNonNums, lens.DiffOptions{Threshold: 5.0})
+		if err != nil {
+			t.Fatalf("DiffWithOptions(non-num) error = %v", err)
+		}
+		if resNon.Equal() || len(resNon.Changes) != 1 {
+			t.Errorf("expected 1 change for non-numeric strings with threshold, got %d", len(resNon.Changes))
+		}
+
+		b1 := mkVal("Bool", true)
+		b2 := mkVal("Bool", false)
+		resB, err := lens.DiffWithOptions(b1, b2, lens.DiffOptions{Threshold: 5.0})
+		if err != nil {
+			t.Fatalf("DiffWithOptions(bool) error = %v", err)
+		}
+		if resB.Equal() || len(resB.Changes) != 1 {
+			t.Errorf("expected 1 change for booleans, got %d", len(resB.Changes))
+		}
+	})
+}
