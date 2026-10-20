@@ -85,6 +85,9 @@ func (f *MarkdownFormatter) FormatSummary(w io.Writer, s *lens.Summary) error {
 			result, status, hint := "-", "Not reported", "-"
 			if op.Result != nil {
 				result = op.Result.Code + ": " + op.Result.Summary
+				if op.Result.Context != "" {
+					result += " — " + op.Result.Context
+				}
 				status = "Failed"
 				if op.Result.Success {
 					status = "Succeeded"

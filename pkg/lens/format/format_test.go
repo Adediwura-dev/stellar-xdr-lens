@@ -370,6 +370,59 @@ func TestShouldColorHonoursNoColor(t *testing.T) {
 	}
 }
 
+// TestFormattersRenderOperationContext ensures the argument-specific
+// diagnostics resolved by Explain (here, the manage_data entry key and the
+// reserve it locks) survive into both human-facing renderings.
+func TestFormattersRenderOperationContext(t *testing.T) {
+	t.Parallel()
+
+	summary := &lens.Summary{
+		Kind:     "transaction",
+		Headline: `Transaction failed at operation 0, manage_data (set data entry "profile" (7 bytes)): The account cannot meet the reserve required for another data entry.`,
+		Operations: []lens.OpSummary{{
+			Index:  0,
+			Type:   "manage_data",
+			Detail: `set data entry "profile" (7 bytes)`,
+			Result: &lens.Reason{
+				Code:    "manage_data_low_reserve",
+				Summary: "The account cannot meet the reserve required for another data entry.",
+				Context: `data entry "profile" adds one subentry, and each subentry locks 0.5 XLM of reserve; the account cannot lock another 0.5 XLM.`,
+				Hint:    "Each data entry is a subentry and locks 0.5 XLM of base reserve. Free up reserve or remove another entry, then retry.",
+			},
+		}},
+		Outcome: &lens.Outcome{
+			Success: false,
+			Reason:  lens.Reason{Code: "tx_failed", Summary: "The transaction was well-formed and authorised, but at least one of its operations failed."},
+		},
+	}
+
+	var textOut bytes.Buffer
+	if err := format.NewSummaryFormatter().Format(&textOut, summary); err != nil {
+		t.Fatalf("Format() error = %v", err)
+	}
+	if !strings.Contains(textOut.String(), `data entry "profile" adds one subentry`) {
+		t.Errorf("text output does not render the operation context:\n%s", textOut.String())
+	}
+
+	var markdownOut bytes.Buffer
+	if err := format.NewMarkdownFormatter().FormatSummary(&markdownOut, summary); err != nil {
+		t.Fatalf("FormatSummary() error = %v", err)
+	}
+	if !strings.Contains(markdownOut.String(), `data entry "profile" adds one subentry`) {
+		t.Errorf("markdown output does not render the operation context:\n%s", markdownOut.String())
+	}
+
+	// JSON consumers get the same detail, under a stable field name.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	if err := enc.Encode(summary); err != nil {
+		t.Fatalf("json encode error = %v", err)
+	}
+	if !strings.Contains(buf.String(), `"context"`) {
+		t.Errorf("json output does not include the context field:\n%s", buf.String())
+	}
+}
+
 func keys(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

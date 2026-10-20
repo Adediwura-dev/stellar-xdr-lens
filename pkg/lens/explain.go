@@ -783,6 +783,43 @@ func innerResultCodeName(res *xdr.TransactionResult) (string, bool) {
 	return name, true
 }
 
+// manageDataReservePerEntry is the base reserve each data entry locks on the
+// public network. Lens is offline-first and never queries network parameters,
+// so this is the well-known default rather than a live value.
+const manageDataReservePerEntry = "0.5 XLM"
+
+// withOperationContext adds argument-specific detail to a result code when the
+// envelope carries enough information to produce it.
+//
+// A manage_data result code says what went wrong but not which entry it was
+// about. The entry key lives only in the envelope, so it is resolved here and
+// attached to the Reason rather than folded into the static reason table,
+// which has no access to the operation.
+func withOperationContext(r Reason, op xdr.Operation) Reason {
+	if op.Body.Type != xdr.OperationTypeManageData {
+		return r
+	}
+	md, ok := op.Body.GetManageDataOp()
+	if !ok {
+		return r
+	}
+	key := string(md.DataName)
+
+	switch r.Constant {
+	case "ManageDataResultCodeManageDataNameNotFound":
+		r.Context = fmt.Sprintf(
+			"the account has no data entry named %q, so there is nothing to delete; it may already have been removed.", key)
+	case "ManageDataResultCodeManageDataLowReserve":
+		r.Context = fmt.Sprintf(
+			"data entry %q adds one subentry, and each subentry locks %s of reserve; the account cannot lock another %s.",
+			key, manageDataReservePerEntry, manageDataReservePerEntry)
+	case "ManageDataResultCodeManageDataInvalidName":
+		r.Context = fmt.Sprintf(
+			"the data entry name %q is not valid: names must be 1-64 bytes, and an empty name cannot be set or deleted.", key)
+	}
+	return r
+}
+
 func envelopeHeadline(s *Summary) string {
 	var b strings.Builder
 	b.WriteString("Transaction from ")
@@ -958,10 +995,11 @@ func describeOperation(op xdr.Operation) string {
 		if !ok {
 			break
 		}
+		dataName := string(o.DataName)
 		if o.DataValue == nil {
-			return fmt.Sprintf("delete data entry %q", string(o.DataName))
+			return fmt.Sprintf("delete data entry %q", dataName)
 		}
-		return fmt.Sprintf("set data entry %q (%d bytes)", string(o.DataName), len(*o.DataValue))
+		return fmt.Sprintf("set data entry %q (%d bytes)", dataName, len(*o.DataValue))
 
 	case xdr.OperationTypeSetOptions:
 		o, ok := body.GetSetOptionsOp()

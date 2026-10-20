@@ -130,6 +130,23 @@ slippage, and which deposit or withdrawal bound is malformed. Use
 `--fail-on-error` to exit with 2 when the transaction failed, which makes
 this usable as a CI gate.
 
+For `manage_data` failures, the per-operation result also carries a context
+line: the entry key pulled from the envelope, and for `manage_data_low_reserve`
+the reserve the new subentry would lock.
+
+```console
+$ lens explain --file envelope.xdr --result-file result.xdr
+...
+  ✗ [0] manage_data — set data entry "profile" (7 bytes)
+      manage_data_low_reserve: The account cannot meet the reserve required for another data entry.
+      data entry "profile" adds one subentry, and each subentry locks 0.5 XLM of reserve; the account cannot lock another 0.5 XLM.
+      → Each data entry is a subentry and locks 0.5 XLM of base reserve. Free up reserve or remove another entry, then retry.
+```
+
+The same detail appears as `context` in `--json` output and in the Markdown
+result cell, and it is resolved entirely from the decoded envelope — no network
+call is made.
+
 For a GitHub-flavored Markdown report with transaction details and one row per
 operation, add `--markdown`:
 
