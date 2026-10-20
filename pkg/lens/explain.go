@@ -75,7 +75,7 @@ type Outcome struct {
 // Explain summarises a single decoded value.
 //
 // It accepts a TransactionEnvelope or a TransactionResult. For any other type
-// it returns an error, since a general-purpose "explanation" of an arbitrary
+// it returns an error, since a general-purpose "exexplanation" of an arbitrary
 // XDR struct would be no better than the decoded tree.
 func Explain(v *Value) (*Summary, error) {
 	if v == nil {
@@ -294,6 +294,14 @@ func deepenOperationFailure(source string, op xdr.Operation, r Reason) Reason {
 	case strings.HasPrefix(r.Constant, "LiquidityPoolWithdrawResultCode"):
 		if body, ok := op.Body.GetLiquidityPoolWithdrawOp(); ok {
 			return deepenLiquidityPoolWithdrawFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ClawbackResultCode"):
+		if body, ok := op.Body.GetClawbackOp(); ok {
+			return deepenClawbackFailure(operationEffectiveSource(source, op), body, r)
+		}
+	case strings.HasPrefix(r.Constant, "ClawbackClaimableBalanceResultCode"):
+		if body, ok := op.Body.GetClawbackClaimableBalanceOp(); ok {
+			return deepenClawbackClaimableBalanceFailure(body, r)
 		}
 	}
 	return r
@@ -1140,4 +1148,50 @@ func changeTrustIssuerLabel(line xdr.ChangeTrustAsset) string {
 		return ""
 	}
 	return asset.GetIssuer()
+}
+
+// deepenClawbackFailure refines a failed clawback explanation using the
+// operation's asset, source, and target account. The protocol makes these
+// checks deterministically from the body: clawback is only valid when the
+// trustline was opened with the clawback-enabled flag, and the amount cannot
+// exceed the target's balance.
+func deepenClawbackFailure(source string, o xdr.ClawbackOp, r Reason) Reason {
+	switch r.Constant {
+	case "ClawbackResultCodeClawbackNotClawbackEnabled":
+		r.Summary = fmt.Sprintf("the trustline for %s from %s was opened without the issuer's clawback-enabled flag, so this account is not allowed to be clawed back",
+			assetLabel(o.Asset), shortAddr(source))
+		r.Hint = "Enable the issuer's clawback flag before opening the trustline, or create a new trustline with trustline_clawback_enabled set and retry."
+	case "ClawbackResultCodeClawbackNoTrust":
+		r.Summary = fmt.Sprintf("the target account %s has no trustline for %s, so there is nothing to claw back",
+			shortAddr(source), assetLabel(o.Asset))
+		r.Hint = "Create the asset trustline for the target account before attempting clawback, or use the correct account and asset."
+	case "ClawbackResultCodeClawbackUnderfunded":
+		r.Summary = fmt.Sprintf("the clawback amount %s exceeds the current balance on the trustline for %s; the target account does not hold enough of that asset",
+			amount.String(o.Amount), assetLabel(o.Asset))
+		r.Hint = "Reduce the clawback amount to the target's current balance, or verify the trustline balance before submitting the operation."
+	}
+	return r
+}
+
+// deepenClawbackClaimableBalanceFailure refines a failed claimable-balance
+// clawback explanation using the claimable balance id and the asset metadata it
+// carries. The protocol only permits this when the claimable balance was
+// created with clawback enabled.
+func deepenClawbackClaimableBalanceFailure(o xdr.ClawbackClaimableBalanceOp, r Reason) Reason {
+	switch r.Constant {
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotClawbackEnabled":
+		if balanceID, err := o.BalanceId.MarshalBinary(); err == nil {
+			r.Summary = fmt.Sprintf("the claimable balance %s was created without clawback enabled, so it cannot be clawed back", hex.EncodeToString(balanceID)[:12])
+		} else {
+			r.Summary = "the claimable balance was created without clawback enabled, so it cannot be clawed back"
+		}
+		r.Hint = "Recreate the claimable balance with the clawback-enabled flag set, or use a balance that was issued under the clawback-enabled configuration."
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotIssuer":
+		r.Summary = "the sender is not the asset issuer for this claimable balance, so clawback is not authorised"
+		r.Hint = "Only the issuing account can claw back a claimable balance for this asset."
+	case "ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceDoesNotExist":
+		r.Summary = "the claimable balance id does not exist in the ledger, so there is nothing to claw back"
+		r.Hint = "Verify the balance id and the correct network state before retrying."
+	}
+	return r
 }

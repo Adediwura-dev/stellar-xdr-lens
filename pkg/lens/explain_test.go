@@ -356,6 +356,7 @@ func TestExplainCodeNeverRestatesTheConstant(t *testing.T) {
 		}
 	}
 }
+
 // ---- Context-aware failure deepening (issues #116 and #117) -------------
 //
 // When an envelope is paired with its result, a failed operation's
@@ -629,169 +630,9 @@ func TestExplainPairDeepensSetOptionsFailures(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// ---- Inserted ChangeTrust contextual tests from feature branch ----
-	// Keep the original ChangeTrust tests from the feature so the
-	// contextualizer is exercised on plain Explain() flows as well.
-	func TestExplainChangeTrust(t *testing.T) {
-		t.Parallel()
-
-		newEnvelope := func(t *testing.T, asset xdr.Asset, limit xdr.Int64) *lens.Value {
-			t.Helper()
-			const source = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
-			var sourceID xdr.AccountId
-			if err := sourceID.SetAddress(source); err != nil {
-				t.Fatalf("parsing source %s: %v", source, err)
-			}
-			env := &xdr.TransactionEnvelope{
-				Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-				V1: &xdr.TransactionV1Envelope{
-					Tx: xdr.Transaction{
-						SourceAccount: sourceID.ToMuxedAccount(),
-						Fee:           xdr.Uint32(100),
-						SeqNum:        xdr.SequenceNumber(1),
-						Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
-						Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
-						Operations: []xdr.Operation{{Body: xdr.OperationBody{
-							Type: xdr.OperationTypeChangeTrust,
-							ChangeTrustOp: &xdr.ChangeTrustOp{
-								Line:  asset.ToChangeTrustAsset(),
-								Limit: limit,
-							},
-						}}},
-					},
-				},
-			}
-			return &lens.Value{Type: "TransactionEnvelope", Raw: env}
-		}
-
-		// ChangeTrustOp with an issuer and limit.
-		{
-			issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
-			asset := xdr.Asset{}
-			if err := asset.SetCredit("USDC", mustAccountID(t, issuer)); err != nil {
-				t.Fatalf("SetCredit() error = %v", err)
-			}
-			v := newEnvelope(t, asset, 1000)
-			got, err := lens.Explain(v)
-			if err != nil {
-				t.Fatalf("Explain() error = %v", err)
-			}
-
-			if len(got.Operations) != 1 {
-				t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
-			}
-			if got.Operations[0].Type != "change_trust" {
-				t.Errorf("Operations[0].Type = %q, want %q", got.Operations[0].Type, "change_trust")
-			}
-			if got.Operations[0].Detail == "" {
-				t.Error("Operations[0].Detail is empty, want a human-readable ChangeTrust description")
-			}
-		}
-
-		// ChangeTrustOp with a zero limit.
-		{
-			issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
-			asset := xdr.Asset{}
-			if err := asset.SetCredit("USDC", mustAccountID(t, issuer)); err != nil {
-				t.Fatalf("SetCredit() error = %v", err)
-			}
-			v := newEnvelope(t, asset, 0)
-			got, err := lens.Explain(v)
-			if err != nil {
-				t.Fatalf("Explain() error = %v", err)
-			}
-
-			if len(got.Operations) != 1 {
-				t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
-			}
-			if got.Operations[0].Type != "change_trust" {
-				t.Errorf("Operations[0].Type = %q, want %q", got.Operations[0].Type, "change_trust")
-			}
-			if got.Operations[0].Detail == "" {
-				t.Error("Operations[0].Detail is empty, want a human-readable ChangeTrust description")
-			}
-		}
-
-	}
-
-	func TestExplainChangeTrustContextualFailure(t *testing.T) {
-		t.Parallel()
-
-		issuer := "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
-		asset := xdr.MustNewCreditAsset("USDC", issuer)
-		op := xdr.Operation{Body: xdr.OperationBody{
-			Type: xdr.OperationTypeChangeTrust,
-			ChangeTrustOp: &xdr.ChangeTrustOp{
-				Line:  asset.ToChangeTrustAsset(),
-				Limit: 100000000,
-			},
-		}}
-
-		tests := []struct {
-			name   string
-			reason lens.Reason
-			want   []string
-		}{
-			{
-				name:   "missing issuer",
-				reason: lens.Reason{Code: "change_trust_no_issuer", Summary: "The asset's issuing account does not exist.", Hint: "Create the issuer account."},
-				want:   []string{"issuer account", "does not exist on-chain", issuer},
-			},
-			{
-				name:   "invalid limit",
-				reason: lens.Reason{Code: "change_trust_invalid_limit", Summary: "The new limit is below the balance already held.", Hint: "Increase the limit."},
-				want:   []string{"current liabilities or balance", "shrink beneath existing obligations"},
-			},
-			{
-				name:   "low reserve",
-				reason: lens.Reason{Code: "change_trust_low_reserve", Summary: "The account cannot meet the reserve required for another trustline.", Hint: "Fund the account."},
-				want:   []string{"minimum XLM reserve", "another trustline"},
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				got := lens.ExplainCode(tc.reason.Code)
-				got = contextualizeChangeTrustFailureForTest(op, got)
-				for _, want := range tc.want {
-					if !strings.Contains(strings.ToLower(got.Summary+" "+got.Hint), strings.ToLower(want)) {
-						t.Fatalf("summary/hint = %q, want to include %q", got.Summary+" "+got.Hint, want)
-					}
-				}
-			})
-		}
-	}
-
-	func contextualizeChangeTrustFailureForTest(op xdr.Operation, reason lens.Reason) lens.Reason {
-		if op.Body.Type != xdr.OperationTypeChangeTrust {
-			return reason
-		}
-		body, ok := op.Body.GetChangeTrustOp()
-		if !ok {
-			return reason
-		}
-		asset := "this asset"
-		if a := body.Line.ToAsset(); a.Type != xdr.AssetTypeAssetTypeNative {
-			asset = a.StringCanonical()
-		}
-		switch reason.Code {
-		case "change_trust_no_issuer":
-			issuerAsset := body.Line.ToAsset()
-			reason.Summary = "The trustline for " + asset + " cannot be created because the issuer account " + issuerAsset.GetIssuer() + " does not exist on-chain."
-			reason.Hint = "Create or fund the issuer account " + issuerAsset.GetIssuer() + " on the target network before retrying with " + asset + "."
-		case "change_trust_invalid_limit":
-			reason.Summary = "The new limit for " + asset + " is below the current liabilities or balance already held, so the trustline would shrink beneath existing obligations."
-			reason.Hint = "Increase the limit to at least the current liabilities or balance, or reduce the existing balance and liabilities before resubmitting."
-		case "change_trust_low_reserve":
-			reason.Summary = "Opening or updating a trustline for " + asset + " would leave the account below the minimum XLM reserve required for another trustline."
-			reason.Hint = "Fund the source account with enough XLM to cover the network reserve requirement for this additional trustline, then retry."
-		}
-		return reason
-	}
-
-<<<<<<< HEAD
+// ---- Inserted ChangeTrust contextual tests from feature branch ----
 func TestExplainChangeTrust(t *testing.T) {
 	t.Parallel()
 
@@ -869,115 +710,10 @@ func TestExplainChangeTrust(t *testing.T) {
 		}
 		if got.Operations[0].Detail == "" {
 			t.Error("Operations[0].Detail is empty, want a human-readable ChangeTrust description")
-=======
-// ---- Context-aware failure deepening (issues #116 and #117) -------------
-//
-// When an envelope is paired with its result, a failed operation's
-// explanation is deepened with the operation's own parameters. The helpers
-// below build a one-operation transaction and its failing result so each
-// deepened code can be driven from the operation body alone.
-
-// explainTestKey builds a deterministic 32-byte key for test accounts and
-// signers.
-func explainTestKey(seed byte) *xdr.Uint256 {
-	var k xdr.Uint256
-	for i := range k {
-		k[i] = seed
-	}
-	return &k
-}
-
-func explainTestAccount(seed byte) xdr.AccountId {
-	return xdr.AccountId{
-		Type:    xdr.PublicKeyTypePublicKeyTypeEd25519,
-		Ed25519: explainTestKey(seed),
-	}
-}
-
-func optUint32(v uint32) *xdr.Uint32 {
-	u := xdr.Uint32(v)
-	return &u
-}
-
-func mustDecodeForExplain(t *testing.T, payload, typ string) *lens.Value {
-	t.Helper()
-	v, err := lens.DecodeAs(payload, typ)
-	if err != nil {
-		t.Fatalf("DecodeAs(%s) error = %v", typ, err)
-	}
-	return v
-}
-
-// explainSingleOperation builds a one-operation transaction whose only
-// operation carries body, pairs it with a tx_failed result carrying inner as
-// the operation result, and returns the operation's Reason.
-func explainSingleOperation(t *testing.T, body xdr.OperationBody, inner xdr.OperationResultTr) lens.Reason {
-	t.Helper()
-	return explainPreparedOperation(t, xdr.Operation{Body: body}, inner)
-}
-
-// explainPreparedOperation is explainSingleOperation for a fully assembled
-// operation, so tests can also exercise an operation-level source override.
-func explainPreparedOperation(t *testing.T, op xdr.Operation, inner xdr.OperationResultTr) lens.Reason {
-	t.Helper()
-	source := explainTestAccount(0xA1)
-	env := xdr.TransactionEnvelope{
-		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
-		V1: &xdr.TransactionV1Envelope{
-			Tx: xdr.Transaction{
-				SourceAccount: xdr.MuxedAccount{
-					Type:    xdr.CryptoKeyTypeKeyTypeEd25519,
-					Ed25519: source.Ed25519,
-				},
-				Fee:        100,
-				SeqNum:     4242,
-				Operations: []xdr.Operation{op},
-			},
-		},
-	}
-	opResults := []xdr.OperationResult{{
-		Code: xdr.OperationResultCodeOpInner,
-		Tr:   &inner,
-	}}
-	res := xdr.TransactionResult{
-		FeeCharged: 100,
-		Result: xdr.TransactionResultResult{
-			Code:    xdr.TransactionResultCodeTxFailed,
-			Results: &opResults,
-		},
-	}
-
-	envVal := mustDecodeForExplain(t, mustMarshal(t, env), "TransactionEnvelope")
-	resVal := mustDecodeForExplain(t, mustMarshal(t, res), "TransactionResult")
-	summary, err := lens.ExplainPair(envVal, resVal)
-	if err != nil {
-		t.Fatalf("ExplainPair() error = %v", err)
-	}
-	if summary.Outcome == nil || summary.Outcome.Success {
-		t.Fatalf("Outcome = %+v, want a failed outcome", summary.Outcome)
-	}
-	if len(summary.Operations) != 1 || summary.Operations[0].Result == nil {
-		t.Fatalf("Operations = %+v, want one operation carrying a result", summary.Operations)
-	}
-	return *summary.Operations[0].Result
-}
-
-// assertReasonContains fails unless every want substring appears in the
-// summary (and the hint, when checkHint is set).
-func assertReasonContains(t *testing.T, r lens.Reason, checkHint bool, wants ...string) {
-	t.Helper()
-	for _, w := range wants {
-		if !strings.Contains(r.Summary, w) {
-			t.Errorf("Summary = %q, want it to contain %q", r.Summary, w)
-		}
-		if checkHint && !strings.Contains(r.Hint, w) {
-			t.Errorf("Hint = %q, want it to contain %q", r.Hint, w)
->>>>>>> upstream/main
 		}
 	}
 }
 
-<<<<<<< HEAD
 func TestExplainChangeTrustContextualFailure(t *testing.T) {
 	t.Parallel()
 
@@ -1010,187 +746,23 @@ func TestExplainChangeTrustContextualFailure(t *testing.T) {
 			name:   "low reserve",
 			reason: lens.Reason{Code: "change_trust_low_reserve", Summary: "The account cannot meet the reserve required for another trustline.", Hint: "Fund the account."},
 			want:   []string{"minimum XLM reserve", "another trustline"},
-=======
-// TestExplainPairDeepensSetOptionsFailures covers issue #117: each set_options
-// failure mode is diagnosed from the operation body, not just named.
-func TestExplainPairDeepensSetOptionsFailures(t *testing.T) {
-	t.Parallel()
-
-	source := explainTestAccount(0xA1)
-	distinctSigner := xdr.Signer{
-		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypeEd25519, Ed25519: explainTestKey(0x2B)},
-		Weight: 1,
-	}
-	preAuthSigner := xdr.Signer{
-		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypePreAuthTx, PreAuthTx: explainTestKey(0x3C)},
-		Weight: 1,
-	}
-	hashXSigner := xdr.Signer{
-		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypeHashX, HashX: explainTestKey(0x4D)},
-		Weight: 1,
-	}
-	payloadSigner := xdr.Signer{
-		Key: xdr.SignerKey{
-			Type: xdr.SignerKeyTypeSignerKeyTypeEd25519SignedPayload,
-			Ed25519SignedPayload: &xdr.SignerKeyEd25519SignedPayload{
-				Ed25519: *explainTestKey(0x5E),
-				Payload: []byte("payload"),
-			},
-		},
-		Weight: 1,
-	}
-	selfSigner := xdr.Signer{
-		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypeEd25519, Ed25519: source.Ed25519},
-		Weight: 1,
-	}
-
-	tests := []struct {
-		name       string
-		op         xdr.SetOptionsOp
-		code       xdr.SetOptionsResultCode
-		wantCode   string
-		wantInSumm []string
-	}{
-		{
-			name:       "threshold out of range names the offending field",
-			op:         xdr.SetOptionsOp{MasterWeight: optUint32(300)},
-			code:       xdr.SetOptionsResultCodeSetOptionsThresholdOutOfRange,
-			wantCode:   "set_options_threshold_out_of_range",
-			wantInSumm: []string{"master weight 300", "0–255"},
-		},
-		{
-			name: "bad flags names the contradictory bits",
-			op: xdr.SetOptionsOp{
-				SetFlags:   optUint32(0x2),
-				ClearFlags: optUint32(0x2),
-			},
-			code:       xdr.SetOptionsResultCodeSetOptionsBadFlags,
-			wantCode:   "set_options_bad_flags",
-			wantInSumm: []string{"sets and clears", "auth_revocable (0x2)"},
-		},
-		{
-			name:       "unknown flag names the unrecognised bits",
-			op:         xdr.SetOptionsOp{SetFlags: optUint32(0x20)},
-			code:       xdr.SetOptionsResultCodeSetOptionsUnknownFlag,
-			wantCode:   "set_options_unknown_flag",
-			wantInSumm: []string{"0x20", "auth_clawback_enabled (0x8)"},
-		},
-		{
-			name:       "clearing the immutable flag is impossible",
-			op:         xdr.SetOptionsOp{ClearFlags: optUint32(0x4)},
-			code:       xdr.SetOptionsResultCodeSetOptionsCantChange,
-			wantCode:   "set_options_cant_change",
-			wantInSumm: []string{"auth-immutable", "permanent"},
-		},
-		{
-			name: "changing flags on an immutable account",
-			op: xdr.SetOptionsOp{
-				SetFlags: optUint32(0x1),
-			},
-			code:       xdr.SetOptionsResultCodeSetOptionsCantChange,
-			wantCode:   "set_options_cant_change",
-			wantInSumm: []string{"auth_required (0x1)", "auth-immutable set", "locks"},
-		},
-		{
-			name:       "low reserve points at the new signer subentry",
-			op:         xdr.SetOptionsOp{Signer: &distinctSigner},
-			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
-			wantCode:   "set_options_low_reserve",
-			wantInSumm: []string{"signer", "base reserve"},
-		},
-		{
-			name:       "low reserve labels a pre-auth signer",
-			op:         xdr.SetOptionsOp{Signer: &preAuthSigner},
-			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
-			wantCode:   "set_options_low_reserve",
-			wantInSumm: []string{"pre-auth signer"},
-		},
-		{
-			name:       "low reserve labels a hash-x signer",
-			op:         xdr.SetOptionsOp{Signer: &hashXSigner},
-			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
-			wantCode:   "set_options_low_reserve",
-			wantInSumm: []string{"hash-x signer"},
-		},
-		{
-			name:       "low reserve labels a signed-payload signer",
-			op:         xdr.SetOptionsOp{Signer: &payloadSigner},
-			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
-			wantCode:   "set_options_low_reserve",
-			wantInSumm: []string{"signed-payload signer"},
-		},
-		{
-			name:       "bad signer detects the account signing for itself",
-			op:         xdr.SetOptionsOp{Signer: &selfSigner},
-			code:       xdr.SetOptionsResultCodeSetOptionsBadSigner,
-			wantCode:   "set_options_bad_signer",
-			wantInSumm: []string{"itself"},
-		},
-		{
-			name:       "bad signer flags an oversized weight",
-			op:         xdr.SetOptionsOp{Signer: &xdr.Signer{Key: distinctSigner.Key, Weight: 300}},
-			code:       xdr.SetOptionsResultCodeSetOptionsBadSigner,
-			wantCode:   "set_options_bad_signer",
-			wantInSumm: []string{"signer weight 300", "0–255"},
-		},
-		{
-			name:       "too many signers explains the five-signer cap",
-			op:         xdr.SetOptionsOp{Signer: &distinctSigner},
-			code:       xdr.SetOptionsResultCodeSetOptionsTooManySigners,
-			wantCode:   "set_options_too_many_signers",
-			wantInSumm: []string{"maximum of five signers"},
-		},
-		{
-			name:       "invalid home domain quotes the value",
-			op:         xdr.SetOptionsOp{HomeDomain: string32Ptr("not a domain")},
-			code:       xdr.SetOptionsResultCodeSetOptionsInvalidHomeDomain,
-			wantCode:   "set_options_invalid_home_domain",
-			wantInSumm: []string{`"not a domain"`},
-		},
-		{
-			name: "auth revocable required explains the clawback pairing",
-			op: xdr.SetOptionsOp{
-				SetFlags: optUint32(0x8),
-			},
-			code:       xdr.SetOptionsResultCodeSetOptionsAuthRevocableRequired,
-			wantCode:   "set_options_auth_revocable_required",
-			wantInSumm: []string{"auth-clawback", "auth-revocable"},
->>>>>>> upstream/main
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-<<<<<<< HEAD
 			got := lens.ExplainCode(tc.reason.Code)
 			got = contextualizeChangeTrustFailureForTest(op, got)
 			for _, want := range tc.want {
 				if !strings.Contains(strings.ToLower(got.Summary+" "+got.Hint), strings.ToLower(want)) {
 					t.Fatalf("summary/hint = %q, want to include %q", got.Summary+" "+got.Hint, want)
 				}
-=======
-
-			got := explainSingleOperation(t,
-				xdr.OperationBody{Type: xdr.OperationTypeSetOptions, SetOptionsOp: &tc.op},
-				xdr.OperationResultTr{
-					Type:             xdr.OperationTypeSetOptions,
-					SetOptionsResult: &xdr.SetOptionsResult{Code: tc.code},
-				})
-
-			if got.Code != tc.wantCode {
-				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
-			}
-			assertReasonContains(t, got, false, tc.wantInSumm...)
-			if got.Hint == "" {
-				t.Error("Hint is empty, want actionable advice for this failure")
->>>>>>> upstream/main
 			}
 		})
 	}
 }
 
-<<<<<<< HEAD
 func contextualizeChangeTrustFailureForTest(op xdr.Operation, reason lens.Reason) lens.Reason {
 	if op.Body.Type != xdr.OperationTypeChangeTrust {
 		return reason
@@ -1216,7 +788,131 @@ func contextualizeChangeTrustFailureForTest(op xdr.Operation, reason lens.Reason
 		reason.Hint = "Fund the source account with enough XLM to cover the network reserve requirement for this additional trustline, then retry."
 	}
 	return reason
-=======
+}
+
+func TestExplainPairDeepensClawbackFailures(t *testing.T) {
+	t.Parallel()
+
+	asset := xdr.MustNewCreditAsset("USDC", "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW")
+	issuer := explainTestAccount(0xA1)
+	target := explainTestAccount(0xA2)
+	from := xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: issuer.Ed25519}
+
+	tests := []struct {
+		name       string
+		op         xdr.ClawbackOp
+		code       xdr.ClawbackResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name: "not clawback enabled points to issuer flag",
+			op: xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
+			code:       xdr.ClawbackResultCodeClawbackNotClawbackEnabled,
+			wantCode:   "clawback_not_clawback_enabled",
+			wantInSumm: []string{"clawback-enabled", "trustline"},
+			wantInHint: []string{"trustline_clawback_enabled", "new trustline"},
+		},
+		{
+			name: "no trust names the missing trustline",
+			op:   xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
+			code: xdr.ClawbackResultCodeClawbackNoTrust,
+			wantCode: "clawback_no_trust",
+			wantInSumm: []string{"no trustline", "USDC"},
+			wantInHint: []string{"Create the asset trustline"},
+		},
+		{
+			name: "underfunded names the amount over balance",
+			op:   xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 12345},
+			code: xdr.ClawbackResultCodeClawbackUnderfunded,
+			wantCode: "clawback_underfunded",
+			wantInSumm: []string{"12345", "does not hold enough"},
+			wantInHint: []string{"Reduce the clawback amount"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainPreparedOperation(t, xdr.Operation{
+				SourceAccount: &from,
+				Body: xdr.OperationBody{Type: xdr.OperationTypeClawback, ClawbackOp: &tc.op},
+			}, xdr.OperationResultTr{
+				Type:          xdr.OperationTypeClawback,
+				ClawbackResult: &xdr.ClawbackResult{Code: tc.code},
+			})
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
+			}
+		})
+	}
+}
+
+func TestExplainPairDeepensClawbackClaimableBalanceFailures(t *testing.T) {
+	t.Parallel()
+
+	var id xdr.ClaimableBalanceId
+	id.Type = xdr.ClaimableBalanceIdTypeClaimableBalanceIdTypeV0
+	id.V0 = &xdr.Hash{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+		17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}
+
+	tests := []struct {
+		name       string
+		code       xdr.ClawbackClaimableBalanceResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name:       "not enabled points to claimable-balance flag",
+			code:       xdr.ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotClawbackEnabled,
+			wantCode:   "clawback_claimable_balance_not_clawback_enabled",
+			wantInSumm: []string{"claimable balance", "clawback enabled"},
+			wantInHint: []string{"clawback-enabled flag"},
+		},
+		{
+			name:       "not issuer names issuer constraint",
+			code:       xdr.ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceNotIssuer,
+			wantCode:   "clawback_claimable_balance_not_issuer",
+			wantInSumm: []string{"not the asset issuer", "authorised"},
+			wantInHint: []string{"Only the issuing account"},
+		},
+		{
+			name:       "does not exist checks the balance id",
+			code:       xdr.ClawbackClaimableBalanceResultCodeClawbackClaimableBalanceDoesNotExist,
+			wantCode:   "clawback_claimable_balance_does_not_exist",
+			wantInSumm: []string{"does not exist", "nothing to claw back"},
+			wantInHint: []string{"Verify the balance id"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainSingleOperation(t,
+				xdr.OperationBody{Type: xdr.OperationTypeClawbackClaimableBalance, ClawbackClaimableBalanceOp: &xdr.ClawbackClaimableBalanceOp{BalanceId: id}},
+				xdr.OperationResultTr{Type: xdr.OperationTypeClawbackClaimableBalance, ClawbackClaimableBalanceResult: &xdr.ClawbackClaimableBalanceResult{Code: tc.code}},
+			)
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
+			}
+		})
+	}
+}
+
 func string32Ptr(s string) *xdr.String32 {
 	d := xdr.String32(s)
 	return &d
@@ -1677,5 +1373,4 @@ func TestDescribeLiquidityPoolOperations(t *testing.T) {
 			}
 		})
 	}
->>>>>>> upstream/main
 }

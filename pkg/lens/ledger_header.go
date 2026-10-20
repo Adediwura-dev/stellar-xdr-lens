@@ -114,13 +114,13 @@ func enrichUpgradeType(rv reflect.Value) (string, any, bool) {
 	if err := xdr.SafeUnmarshal(raw, &upgrade); err != nil {
 		return "", nil, false
 	}
-	// Use the succinct ledgerUpgradeSummary for human-facing notes so that
+	// Use the succinct per-upgrade description for human-facing notes so that
 	// decoded StellarValue Upgrades read as compact parameter descriptions
 	// (e.g. "ledger flags 1"). Return the vote bytes as a hex string for
 	// Node.Value so list elements render as hex; callers that need the
 	// original blob can access the decoded container via the Value.Raw
 	// (the Value.Raw pointer returned by DecodeAs).
-	if note, ok := ledgerUpgradeSummary(upgrade); ok {
+	if note := describeLedgerUpgrade(&upgrade); note != "" {
 		return note, hex.EncodeToString(raw), true
 	}
 	return "", nil, false

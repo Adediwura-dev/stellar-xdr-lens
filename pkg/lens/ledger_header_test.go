@@ -218,7 +218,7 @@ func TestLedgerHeaderFlagsAndUpgradeVotes(t *testing.T) {
 	if note := upgrades.Children[0].Note; note != "protocol version 23" {
 		t.Errorf("Upgrades[0] Note = %q, want %q", note, "protocol version 23")
 	}
-	if note := upgrades.Children[1].Note; note != "base reserve 10000000 stroops (1.0000000 XLM)" {
+	if note := upgrades.Children[1].Note; note != "base reserve 1.0000000 XLM (10000000 stroops)" {
 		t.Errorf("Upgrades[1] Note = %q, want the base reserve proposal", note)
 	}
 

@@ -742,6 +742,7 @@ whose cause is provable from the operation's own parameters:
   already sit outside it), which deposit parameter is malformed, and how the
   requested amounts map to `underfunded`, `pool_full`, `line_full` and
   `under_minimum`.
+- **`clawback` / `clawback_claimable_balance`**: when the trustline or claimable balance was created without the clawback-enabled bit, when the target account has no trustline, and when the requested amount exceeds the balance held, the explanation points directly at the issuer flag, trustline state, or insufficient balance rather than only naming the generic protocol code.
 
 It never touches `Code` or `Constant`, never invents ledger state, and a code
 it cannot pin down keeps the generic per-code text — a result explained
