@@ -10,11 +10,10 @@ import (
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
 
-func newResultDiffCmd(stdout io.Writer, stdin io.Reader) *cobra.Command {
+func newResultDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
 	var (
-		asJSON    bool
-		exitDiff  bool
-		quietMode bool
+		asJSON   bool
+		exitDiff bool
 	)
 
 	cmd := &cobra.Command{
@@ -61,7 +60,7 @@ the two supplied blobs.`,
 			}
 
 			switch {
-			case quietMode:
+			case g.quiet:
 				// Print nothing.
 			case asJSON:
 				enc := json.NewEncoder(stdout)
@@ -75,7 +74,7 @@ the two supplied blobs.`,
 				}
 			}
 
-			if (exitDiff || quietMode) && len(diff.Changes) > 0 {
+			if (exitDiff || g.quiet) && len(diff.Changes) > 0 {
 				return errValuesDiffer
 			}
 			return nil
@@ -85,8 +84,6 @@ the two supplied blobs.`,
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the alignment as JSON")
 	cmd.Flags().BoolVar(&exitDiff, "exit-code", false,
 		"exit with a non-zero status when the envelope and result disagree")
-	cmd.Flags().BoolVarP(&quietMode, "quiet", "q", false,
-		"print nothing; report the answer only through the exit code")
 
 	return cmd
 }

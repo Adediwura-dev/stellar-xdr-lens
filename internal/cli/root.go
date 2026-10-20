@@ -25,19 +25,28 @@ type globalFlags struct {
 	color string
 	// file reads the payload from a path instead of an argument.
 	file string
+	// quiet suppresses standard output without changing the exit status.
+	quiet bool
+	// output writes standard output to a file instead (an empty value means
+	// stdout, and "-" is accepted as an explicit synonym for stdout).
+	output string
 }
 
 // Execute builds and runs the root command. It returns an error rather than
 // exiting so that main stays in control of the process exit code.
 func Execute(args []string, stdout, stderr io.Writer, stdin io.Reader) error {
-	root := newRootCmd(stdout, stderr, stdin)
+	g := &globalFlags{}
+	out := newOutputSink(stdout, g)
+	root := newRootCmdWithFlags(g, out, stderr, stdin)
 	root.SetArgs(args)
-	return root.Execute()
+	err := root.Execute()
+	if closeErr := out.Close(err == nil); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	return err
 }
 
-func newRootCmd(stdout, stderr io.Writer, stdin io.Reader) *cobra.Command {
-	g := &globalFlags{}
-
+func newRootCmdWithFlags(g *globalFlags, stdout, stderr io.Writer, stdin io.Reader) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "lens",
 		Short: "Decode, explain and diff Stellar and Soroban XDR",
@@ -80,6 +89,10 @@ unsigned transactions and works in CI.`,
 		`when to colourise output: "auto", "always" or "never" (LENS_THEME selects light or dark colours)`)
 	root.PersistentFlags().StringVarP(&g.file, "file", "f", "",
 		"read the XDR payload from a file instead of an argument")
+	root.PersistentFlags().BoolVarP(&g.quiet, "quiet", "q", false,
+		"suppress standard output; the exit code still reports the result")
+	root.PersistentFlags().StringVarP(&g.output, "output", "o", "",
+		"write command output to a file instead of standard output")
 
 	// Replace cobra's generic completion command with ours, so `lens
 	// completion bash` and friends are documented behaviour of this tool.
@@ -91,7 +104,7 @@ unsigned transactions and works in CI.`,
 		newExploreCmd(g, stdout, stdin),
 		newExplainCmd(g, stdout, stdin),
 		newDiffCmd(g, stdout, stdin),
-		newResultDiffCmd(stdout, stdin),
+		newResultDiffCmd(g, stdout, stdin),
 		newMetaDiffCmd(g, stdout, stdin),
 		newAssetCmd(g, stdout, stdin),
 		newTypesCmd(stdout),
@@ -110,7 +123,11 @@ func paletteForOutput(w io.Writer, mode string) (format.Palette, error) {
 	if err != nil {
 		return format.Palette{}, err
 	}
-	return format.PaletteForTheme(w, mode, palette), nil
+	colorTarget := w
+	if sink, ok := w.(*outputSink); ok {
+		colorTarget = sink.colorTarget()
+	}
+	return format.PaletteForTheme(colorTarget, mode, palette), nil
 }
 
 func newVersionCmd(stdout io.Writer) *cobra.Command {

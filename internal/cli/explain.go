@@ -24,6 +24,7 @@ func newExplainCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Com
 		verbose    bool
 		failOnErr  bool
 		isolate    bool
+		resources  bool
 	)
 
 	cmd := &cobra.Command{
@@ -39,7 +40,9 @@ which is what actually answers "why did this fail".
 Use --isolate to pinpoint the exact failing operation and distinguish
 pre-operation check failures from operation execution failures.
 Use --meta / --meta-file to correlate trapped Soroban host invocations with
-diagnostic events and display contract panic messages.`,
+diagnostic events and display contract panic messages.
+Use --resources to add a Soroban resource and fee breakdown, including
+protocol-limit comparison and an explicit EXCEEDED marker.`,
 		Example: `  # Envelope alone: what would this transaction do?
   lens explain "$ENVELOPE"
 
@@ -59,7 +62,11 @@ diagnostic events and display contract panic messages.`,
   lens explain "$ENVELOPE" --result "$RESULT" --meta "$META"
 
   # In CI: exit non-zero when the transaction failed
-  lens explain "$ENVELOPE" --result "$RESULT" --fail-on-error`,
+  lens explain "$ENVELOPE" --result "$RESULT" --fail-on-error
+
+  # Soroban resource and fee breakdown against protocol limits
+  lens explain "$ENVELOPE" --resources
+  lens explain "$ENVELOPE" --meta "$META" --resources`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			payload, err := resolveInput(firstArg(args), g.file, stdin)
@@ -90,14 +97,37 @@ diagnostic events and display contract panic messages.`,
 				}
 			}
 
+			var breakdown *lens.ResourceBreakdown
+			if resources {
+				breakdown, err = lens.ExplainResourcesWithMeta(primary, metaVal, lens.DefaultResourceLimits())
+				if err != nil {
+					return err
+				}
+			}
+
 			if asMarkdown {
-				return format.NewMarkdownFormatter().FormatSummary(stdout, summary)
+				if err := format.NewMarkdownFormatter().FormatSummary(stdout, summary); err != nil {
+					return err
+				}
+				if breakdown != nil {
+					if _, err := fmt.Fprintf(stdout, "\n## Soroban Resources\n\n```\n%s```\n", breakdown.String()); err != nil {
+						return fmt.Errorf("writing resource breakdown: %w", err)
+					}
+				}
+				return nil
 			}
 
 			if asJSON {
+				doc := any(summary)
+				if breakdown != nil {
+					doc = struct {
+						*lens.Summary
+						Resources *lens.ResourceBreakdown `json:"resources,omitempty"`
+					}{Summary: summary, Resources: breakdown}
+				}
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
-				if err := enc.Encode(summary); err != nil {
+				if err := enc.Encode(doc); err != nil {
 					return fmt.Errorf("encoding summary: %w", err)
 				}
 			} else {
@@ -111,6 +141,12 @@ diagnostic events and display contract panic messages.`,
 				)
 				if err := f.Format(stdout, summary); err != nil {
 					return err
+				}
+
+				if breakdown != nil {
+					if _, err := fmt.Fprintf(stdout, "\n%s", breakdown.String()); err != nil {
+						return fmt.Errorf("writing resource breakdown: %w", err)
+					}
 				}
 
 				// If failure isolation requested, print the report
@@ -180,6 +216,8 @@ diagnostic events and display contract panic messages.`,
 		"include the underlying XDR result-code constants")
 	cmd.Flags().BoolVar(&failOnErr, "fail-on-error", false,
 		"exit with a non-zero status when the transaction failed")
+	cmd.Flags().BoolVar(&resources, "resources", false,
+		"add a Soroban resource and fee breakdown compared with protocol limits")
 
 	return cmd
 }

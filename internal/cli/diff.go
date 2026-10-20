@@ -21,7 +21,6 @@ func newDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Comman
 		unified          bool
 		sideBySide       bool
 		exitDiff         bool
-		quietMode        bool
 		alignLists       bool
 		semantic         bool
 		unorderedSigners bool
@@ -120,7 +119,7 @@ These are mutually exclusive with each other and with --json/--stats.`,
 			}
 
 			if footprintMode {
-				return runFootprintDiff(stdout, left, right, asJSON, quietMode, exitDiff)
+				return runFootprintDiff(stdout, left, right, asJSON, g.quiet, exitDiff)
 			}
 
 			filter, err := lens.NewPathFilter(includePaths, excludePaths)
@@ -155,7 +154,7 @@ These are mutually exclusive with each other and with --json/--stats.`,
 			}
 
 			switch {
-			case quietMode:
+			case g.quiet:
 				// Print nothing; the exit code carries the answer.
 			case statsOnly:
 				stats := lens.SummarizeDiff(result)
@@ -244,7 +243,7 @@ These are mutually exclusive with each other and with --json/--stats.`,
 				}
 			}
 
-			if (exitDiff || quietMode) && !result.Equal() {
+			if (exitDiff || g.quiet) && !result.Equal() {
 				return errValuesDiffer
 			}
 			return nil
@@ -281,8 +280,6 @@ These are mutually exclusive with each other and with --json/--stats.`,
 		"ignore scalar numeric differences below the given delta")
 	cmd.Flags().BoolVar(&exitDiff, "exit-code", false,
 		"exit with a non-zero status when the values differ")
-	cmd.Flags().BoolVarP(&quietMode, "quiet", "q", false,
-		"print nothing; report the answer only through the exit code")
 
 	return cmd
 }
