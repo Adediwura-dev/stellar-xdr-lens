@@ -53,6 +53,8 @@ internal/cli/          cobra commands — deliberately thin
   meta_diff.go         transaction metadata balance-diff command
   asset.go             asset command; network resolution for contract ids
   input.go             argument / --file / stdin resolution
+  exitcodes.go         installed exit-code policy (0 / 1 / 2 / 3)
+  completion.go        shell completion for bash/zsh/fish/powershell
   tui_tree.go          interactive terminal tree explorer (TUI)
 pkg/lens/              the library; this is the reusable surface
   errors.go            stable error kinds and errors.Is-compatible sentinels
@@ -108,6 +110,7 @@ pkg/lens/              the library; this is the reusable surface
   canonical.go         deterministic canonical XDR validation (RFC 4506) and serialization
   encode_errors.go     malformed input diagnostics, line/column tracking and error pointers
   stream_parser.go     stream-oriented XDR reader and chunk parser (RFC 5531, length-prefixed, base64)
+  stdin_pipe.go        stdin framing probe: text (base64/hex) vs binary streams
   spec_decode.go       Contract spec aware ScVal decoding (ScSpecEntry / WASM custom section)
   format/              output formats
     format.go          Formatter interface, colour palette, TTY detection
@@ -1247,4 +1250,127 @@ When JSON inputs fail syntax validation or schema parsing, `lens` computes exact
 - **Path Tracking**: Resolves dot-and-bracket paths (e.g. `operations[0].amount`) to token byte offsets.
 - **Visual Caret Indicators**: Generates source code snippets with surrounding line context and aligned caret indicators (`^~~~`).
 - **Error Chaining**: Diagnostic errors wrap base causes with full compatibility for `errors.Is` and `errors.As`.
+
+## Exit code policy (`internal/cli/exitcodes.go`)
+
+Every error the CLI can produce resolves to exactly one of four pinned exit
+codes, and scripts are entitled to rely on that table:
+
+| Code | Constant | Meaning |
+|------|----------|---------|
+| 0 | `ExitSuccess` | clean run |
+| 1 | `ExitError` | generic error: usage mistakes, missing files, unreadable environments — anything not caused by the payload |
+| 2 | `ExitDiffFound` | the "checked condition is false" slot: `diff --exit-code`/`--quiet` finding a difference, `explain --fail-on-error` seeing a failed transaction, `result-diff --exit-code` seeing a disagreement |
+| 3 | `ExitInvalidXDR` | the payload itself could not be decoded |
+
+Classification in `ExitCode(err)` (which returns the code plus whether the
+message is printable) is stable across wrapping:
+
+1. errors carrying an explicit code — `errTransactionFailed` and
+   `errValuesDiffer` are defined once here and shared by explain and diff —
+   resolve to their own code and are not printed (the command already
+   summarized its condition);
+2. decode failures are matched with `errors.Is` against the library sentinel
+   family — `ErrInvalidXDR`, `ErrInvalidBase64`, `ErrNoMatch`, `ErrNonCanonical`,
+   `ErrPrematureEOF`, `ErrInvalidFraming`, `ErrRecordTooLarge`,
+   `ErrCorruptMultiStreamRecord` — and exit 3;
+3. everything else, including `ErrUnknownType` and `ErrEmptyInput`, exits 1.
+
+The distinction that matters operationally: a CI gate that sees exit 2 knows
+its pipeline worked and the artifact really is different/failed; exit 3 means
+"the bytes you fed in are garbage", which is a caller bug, and exit 1 means the
+tooling itself was used wrongly. `IsInvalidXDRError` is re-exported for callers
+who need only the classification.
+
+## Stdin framing probe (`pkg/lens/stdin_pipe.go`)
+
+Standard input carries no metadata, so `ReadStdinPayload` (exposed as
+`NewStdinPipe` for direct use) probes the first bytes before committing to an
+interpretation:
+
+- **Text framing** — if the probe sees only base64 or hex alphabet characters,
+  whitespace or `#` comment markers, the payload is handled by
+  `MultiStreamDecoder`: newline-separated base64 records, comment lines and
+  blank lines all decode, matching `decode --multi` behaviour.
+- **Binary framing** — anything else goes to `StreamParser` with
+  `FramingAuto`, which recognizes RFC 5531 record marking and
+  length-prefixed framing and yields the first record.
+- `Framing()` reports what was detected (`StdinFramingLines`,
+  `StdinFramingBinary` or `StdinFramingUnknown`), `ReadPayload()` returns the
+  first record, and `Decode()`/`DecodeEach()` bind it to the registry.
+
+Two robustness details the probe guarantees: reads are chunked through a
+buffer that tolerates readers delivering fewer bytes than requested (the probe
+never misreads a partial first chunk), and the default lookahead size is
+configurable with `WithStdinPipeBuffer` so binary framing can be pinned before
+the data arrives. `internal/cli/input.go` routes every stdin invocation through
+this probe — there is exactly one stdin policy for all commands. Empty input
+surfaces as `lens.ErrEmptyInput`, which the CLI maps to a usage error rather
+than the invalid-XDR code.
+
+## Shell completion (`internal/cli/completion.go`)
+
+`lens` disables cobra's default completion command and installs its own:
+
+```
+lens completion bash|zsh|fish|powershell
+```
+
+`registerCompletions(root)` runs **after** the command tree is fully built in
+`newRootCmd` — running it earlier sees only `rootCmd` and silently completes
+nothing — and walks every command:
+
+- **Dynamic flag values**: `--type`/`-t` on `decode`, `explore`, `diff` and
+  `encode` complete from `lens.TypeNames()`, the same registry the `types`
+  command prints, so nothing can drift between them.
+- **Choice lists**: `--format` (tree/json/compact/summary/txrep/csv/yaml),
+  `--color`, `--network`, and the repeatable `--redact` prefix set are static
+  candidates.
+- **Shell scripts**: all four render through cobra's `Gen*Completion`, with the
+  whole feature covered by driving cobra's hidden `__complete` entry point from
+  tests (`completion_test.go`) — the same channel real shells use.
+
+Completion output is cached in the shell session; there is no network access
+in any of it.
+
+## Testdata corpus synchronizer (`pkg/lens/corpus_sync_test.go`)
+
+The captured fixtures in `testdata/` are the regression suite's ground truth,
+and `corpus_sync_test.go` is the tool that keeps that directory honest: every
+file must either appear in `manifest.json` (captured section by envelope file,
+synthetic section by key plus `.txt`) or the manifest check fails, and every
+captured record must decode and carry its transaction hash.
+
+The synchronizer reads the most recent transactions from public Testnet, but
+**only** when asked. The gated run behind `LENS_CORPUS_SYNC` implements
+three levels:
+
+| Value | Behaviour |
+|-------|-----------|
+| unset | no network, no writes: only the offline invariants run |
+| `1` | dry run: fetches the page, plans it, verifies kept envelopes decode, writes nothing |
+| `write` | additionally captures new `testnet_<hash16>.env.txt`/`.res.txt` fixtures and merges entries into `manifest.json` |
+
+Selection (`planCorpus`) is deterministic and network-free by construction:
+every candidate is decoded *before* selection (fixtures that fail to decode
+would be dead weight), records whose transaction hash is already in the
+manifest are dropped, and duplicates — the same envelope bytes under different
+hashes — collapse to the lexicographically smallest hash, so the plan depends
+only on the page content and the current manifest. Unit tests exercise the
+whole selection, naming and manifest-merge logic against an in-memory stub
+client (`stubCorpusClient`), which is why the default `go test` run never
+opens a socket. `internal/cli` is never involved; no fetch path exists in
+`pkg/lens` non-test code.
+
+```
+Horizon page ──► planCorpus (decode, dedupe, hash-name) ──► corpusPlan
+                     │                                        │
+        ┌────────────┴───────────┐            manifest.json ◄── writeCorpusPlan (write mode only)
+        │ stub (unit tests)      │                (merge, never overwrite)
+        │ HTTP (LENS_CORPUS_SYNC)│
+```
+
+`writeCorpusPlan` is deliberately conservative: fixture files are only created
+when absent (existing files are never overwritten) and manifest entries are
+merged — pre-existing provenance survives an updated capture.
 

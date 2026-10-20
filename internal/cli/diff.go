@@ -369,9 +369,9 @@ func writeKeySet(b *strings.Builder, set lens.FootprintKeySetDiff) {
 	}
 }
 
-// errValuesDiffer signals --exit-code, mirroring diff(1)'s convention of
-// exiting 1 when the inputs differ.
-var errValuesDiffer = &exitError{code: 1, msg: "values differ"}
+// errValuesDiffer now lives in exitcodes.go with the strict exit-code policy:
+// a detected difference is a "diff found" condition, not a generic error, so
+// it exits with ExitDiffFound (2).
 
 // diffChange is the stable JSON shape for one change.
 type diffChange struct {
