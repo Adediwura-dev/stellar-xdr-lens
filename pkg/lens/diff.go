@@ -345,8 +345,10 @@ func sameScalarWithOptions(a, b *Node, options DiffOptions) bool {
 	}
 
 	// 1. Direct scalar value and note match
-	if a.Note == b.Note && fmt.Sprintf("%v", a.Value) == fmt.Sprintf("%v", b.Value) {
-		return true
+	if a.Note == b.Note {
+		if reflect.DeepEqual(a.Value, b.Value) || fmt.Sprintf("%v", a.Value) == fmt.Sprintf("%v", b.Value) {
+			return true
+		}
 	}
 
 	// 2. Numeric delta threshold filter (--diff-threshold)
@@ -563,16 +565,6 @@ func nodesBinaryEqual(a, b *Node) bool {
 	}
 
 	return false
-	// Some enrichers keep the whole decoded value as the raw payload (a
-	// LedgerUpgrade, for example), and that value can contain arm pointers.
-	// Printing with %v would compare pointer addresses and report two
-	// identical values as different, so structural equality comes first.
-	if reflect.DeepEqual(a.Value, b.Value) {
-		return true
-	}
-	// Fall back to the printed form so a value that only differs in Go type
-	// (int64 versus uint64) still compares equal.
-	return fmt.Sprintf("%v", a.Value) == fmt.Sprintf("%v", b.Value)
 }
 
 // leafValue summarises a node for reporting in a change. Struct and list

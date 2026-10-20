@@ -49,6 +49,7 @@ func registerEnricher(t reflect.Type, fn Enricher) {
 
 func init() {
 	nodeHooks[reflect.TypeOf(xdr.LedgerFootprint{})] = decorateLedgerFootprint
+	registerDerivedNodeFields(reflect.TypeOf(xdr.LedgerFootprint{}), "Persistent", "Temporary", "Instance", "Other")
 }
 
 // enrich looks up and applies the Enricher registered for rv's type.
@@ -373,6 +374,8 @@ func enrichSignature(rv reflect.Value) (string, any, bool) {
 func init() {
 	nodeHooks[reflect.TypeOf(xdr.FeeBumpTransaction{})] = decorateFeeBumpTransaction
 	nodeHooks[reflect.TypeOf(xdr.FeeBumpTransactionEnvelope{})] = decorateFeeBumpEnvelope
+	registerDerivedNodeFields(reflect.TypeOf(xdr.FeeBumpTransaction{}), "FeeSourceHint", "InnerTxHash")
+	registerDerivedNodeFields(reflect.TypeOf(xdr.FeeBumpTransactionEnvelope{}), "SignatureHints")
 }
 
 // muxedAccountHint returns the 4-byte signature hint behind a muxed account:
@@ -506,6 +509,8 @@ func decorateFeeBumpEnvelope(n *Node, v any) {
 		})
 	}
 	n.Children = append(n.Children, list)
+}
+
 // A Soroban transaction declares the ledger entries it will touch in a
 // LedgerFootprint: two flat lists of LedgerKey unions, ReadOnly and ReadWrite.
 // The wire shape says nothing about storage level, and the only place a key's

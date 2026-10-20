@@ -424,7 +424,7 @@ func explainPreparedOperation(t *testing.T, op xdr.Operation, inner xdr.Operatio
 	}
 	opResults := []xdr.OperationResult{{
 		Code: xdr.OperationResultCodeOpInner,
-		Tr: &inner,
+		Tr:   &inner,
 	}}
 	res := xdr.TransactionResult{
 		FeeCharged: 100,
@@ -807,26 +807,26 @@ func TestExplainPairDeepensClawbackFailures(t *testing.T) {
 		wantInHint []string
 	}{
 		{
-			name: "not clawback enabled points to issuer flag",
-			op: xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
+			name:       "not clawback enabled points to issuer flag",
+			op:         xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
 			code:       xdr.ClawbackResultCodeClawbackNotClawbackEnabled,
 			wantCode:   "clawback_not_clawback_enabled",
 			wantInSumm: []string{"clawback-enabled", "trustline"},
 			wantInHint: []string{"trustline_clawback_enabled", "new trustline"},
 		},
 		{
-			name: "no trust names the missing trustline",
-			op:   xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
-			code: xdr.ClawbackResultCodeClawbackNoTrust,
-			wantCode: "clawback_no_trust",
+			name:       "no trust names the missing trustline",
+			op:         xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 1000},
+			code:       xdr.ClawbackResultCodeClawbackNoTrust,
+			wantCode:   "clawback_no_trust",
 			wantInSumm: []string{"no trustline", "USDC"},
 			wantInHint: []string{"Create the asset trustline"},
 		},
 		{
-			name: "underfunded names the amount over balance",
-			op:   xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 12345},
-			code: xdr.ClawbackResultCodeClawbackUnderfunded,
-			wantCode: "clawback_underfunded",
+			name:       "underfunded names the amount over balance",
+			op:         xdr.ClawbackOp{Asset: asset, From: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: target.Ed25519}, Amount: 12345},
+			code:       xdr.ClawbackResultCodeClawbackUnderfunded,
+			wantCode:   "clawback_underfunded",
 			wantInSumm: []string{"12345", "does not hold enough"},
 			wantInHint: []string{"Reduce the clawback amount"},
 		},
@@ -837,9 +837,9 @@ func TestExplainPairDeepensClawbackFailures(t *testing.T) {
 			t.Parallel()
 			got := explainPreparedOperation(t, xdr.Operation{
 				SourceAccount: &from,
-				Body: xdr.OperationBody{Type: xdr.OperationTypeClawback, ClawbackOp: &tc.op},
+				Body:          xdr.OperationBody{Type: xdr.OperationTypeClawback, ClawbackOp: &tc.op},
 			}, xdr.OperationResultTr{
-				Type:          xdr.OperationTypeClawback,
+				Type:           xdr.OperationTypeClawback,
 				ClawbackResult: &xdr.ClawbackResult{Code: tc.code},
 			})
 			if got.Code != tc.wantCode {
@@ -1387,24 +1387,24 @@ func TestExplainPairDeepensFootprintTTLFailures(t *testing.T) {
 		wantInHint []string
 	}{
 		{
-			name: "malformed names zero extend value",
-			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 0}}},
+			name:       "malformed names zero extend value",
+			op:         xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 0}}},
 			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlMalformed,
 			wantCode:   "extend_footprint_ttl_malformed",
 			wantInSumm: []string{"0 ledgers", "positive lifetime"},
 			wantInHint: []string{"extendTo", "positive number of ledgers"},
 		},
 		{
-			name: "resource limit exceeded names the footprint budget",
-			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 100}}},
+			name:       "resource limit exceeded names the footprint budget",
+			op:         xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 100}}},
 			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlResourceLimitExceeded,
 			wantCode:   "extend_footprint_ttl_resource_limit_exceeded",
 			wantInSumm: []string{"declared resource budget", "more ledger entries"},
 			wantInHint: []string{"Reduce the footprint", "resource limits"},
 		},
 		{
-			name: "insufficient refundable fee names the TTL extension cost",
-			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 500}}},
+			name:       "insufficient refundable fee names the TTL extension cost",
+			op:         xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 500}}},
 			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlInsufficientRefundableFee,
 			wantCode:   "extend_footprint_ttl_insufficient_refundable_fee",
 			wantInSumm: []string{"500 ledgers", "refundable fee"},
@@ -1441,16 +1441,16 @@ func TestExplainPairDeepensRestoreFootprintFailures(t *testing.T) {
 		wantInHint []string
 	}{
 		{
-			name: "resource limit exceeded names the restore budget",
-			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
+			name:       "resource limit exceeded names the restore budget",
+			op:         xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
 			code:       xdr.RestoreFootprintResultCodeRestoreFootprintResourceLimitExceeded,
 			wantCode:   "restore_footprint_resource_limit_exceeded",
 			wantInSumm: []string{"declared resource budget", "archived entries"},
 			wantInHint: []string{"Reduce the footprint", "split the restore"},
 		},
 		{
-			name: "insufficient refundable fee names restore cost",
-			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
+			name:       "insufficient refundable fee names restore cost",
+			op:         xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
 			code:       xdr.RestoreFootprintResultCodeRestoreFootprintInsufficientRefundableFee,
 			wantCode:   "restore_footprint_insufficient_refundable_fee",
 			wantInSumm: []string{"rent and restoration", "archived entries"},
@@ -1472,6 +1472,9 @@ func TestExplainPairDeepensRestoreFootprintFailures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
 func TestDiagnosePathPaymentStrictReceive(t *testing.T) {
 	t.Parallel()
 

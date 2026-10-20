@@ -1315,6 +1315,8 @@ func deepenClawbackClaimableBalanceFailure(o xdr.ClawbackClaimableBalanceOp, r R
 		r.Hint = "Verify the balance id and the correct network state before retrying."
 	}
 	return r
+}
+
 func describeSetTrustLineFlags(o xdr.SetTrustLineFlagsOp) string {
 	var parts []string
 	if o.SetFlags != 0 {
