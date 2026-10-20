@@ -303,6 +303,43 @@ func deepenOperationFailure(source string, op xdr.Operation, r Reason) Reason {
 		if body, ok := op.Body.GetClawbackClaimableBalanceOp(); ok {
 			return deepenClawbackClaimableBalanceFailure(body, r)
 		}
+	case strings.HasPrefix(r.Constant, "ExtendFootprintTtlResultCode"):
+		if body, ok := op.Body.GetExtendFootprintTtlOp(); ok {
+			return deepenExtendFootprintTtlFailure(body, r)
+		}
+	case strings.HasPrefix(r.Constant, "RestoreFootprintResultCode"):
+		if body, ok := op.Body.GetRestoreFootprintOp(); ok {
+			return deepenRestoreFootprintFailure(body, r)
+		}
+	}
+	return r
+}
+
+func deepenExtendFootprintTtlFailure(o xdr.ExtendFootprintTtlOp, r Reason) Reason {
+	switch r.Constant {
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlMalformed":
+		if o.ExtendTo == 0 {
+			r.Summary = "the operation asks to extend entries to 0 ledgers; a TTL extension must target a positive lifetime"
+			r.Hint = "Set extendTo to a positive number of ledgers and retry. A value of zero does not preserve any lifetime."
+		}
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlResourceLimitExceeded":
+		r.Summary = "the operation tries to extend the TTL of more ledger entries than the transaction's declared resource budget allows"
+		r.Hint = "Reduce the footprint or split the operation into smaller TTL extensions so the declared resource limits cover the work."
+	case "ExtendFootprintTtlResultCodeExtendFootprintTtlInsufficientRefundableFee":
+		r.Summary = fmt.Sprintf("the refundable fee is too small to cover extending the footprint TTL to %d ledgers", o.ExtendTo)
+		r.Hint = "Increase the refundable fee or reduce the number of entries in the footprint; simulation reports the rent this extension requires."
+	}
+	return r
+}
+
+func deepenRestoreFootprintFailure(o xdr.RestoreFootprintOp, r Reason) Reason {
+	switch r.Constant {
+	case "RestoreFootprintResultCodeRestoreFootprintResourceLimitExceeded":
+		r.Summary = "the operation tries to restore more archived entries than the transaction's declared resource budget allows"
+		r.Hint = "Reduce the footprint or split the restore into smaller operations so the declared resource limits fit the work."
+	case "RestoreFootprintResultCodeRestoreFootprintInsufficientRefundableFee":
+		r.Summary = "the refundable fee is too small to cover the rent and restoration of the archived entries"
+		r.Hint = "Increase the refundable fee to match the restore cost reported by simulation."
 	}
 	return r
 }
