@@ -194,8 +194,8 @@ func TestResultDiffJSONAndExitCode(t *testing.T) {
 
 	_, _, err = run(t, "", "result-diff", "--exit-code",
 		fixturePath("tx_failed.env"), fixturePath("tx_failed.res"))
-	if code, _ := cli.ExitCode(err); code != 1 {
-		t.Errorf("result-diff --exit-code exit = %d, want 1 (err=%v)", code, err)
+	if code, _ := cli.ExitCode(err); code != cli.ExitDiffFound {
+		t.Errorf("result-diff --exit-code exit = %d, want %d (err=%v)", code, cli.ExitDiffFound, err)
 	}
 
 	_, _, err = run(t, "", "result-diff", "--exit-code",
