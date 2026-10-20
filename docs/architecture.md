@@ -52,7 +52,8 @@ internal/cli/          cobra commands — deliberately thin
   diff.go              diff command
   meta_diff.go         transaction metadata balance-diff command
   asset.go             asset command; network resolution for contract ids
-  input.go             argument / --file / stdin resolution
+  input.go             argument / --file / stdin / --batch resolution
+  output.go            --quiet and atomic --output destination selection
   exitcodes.go         installed exit-code policy (0 / 1 / 2 / 3)
   completion.go        shell completion for bash/zsh/fish/powershell
   tui_tree.go          interactive terminal tree explorer (TUI)
@@ -93,6 +94,7 @@ pkg/lens/              the library; this is the reusable surface
   feebump_explain.go   Fee-bump inner-vs-outer failure separation
   claimable_explain.go  recursive claim-predicate evaluation with explicit ledger times
   resource_explain.go   Soroban resource rejection decoder from transaction results
+  resource_breakdown.go declared Soroban resources, fees and protocol-limit comparison
   sponsorship_explain.go sponsorship result and begin/end sequence diagnosis
   upgrade_explain.go   protocol-version boundary correlation for failed results
   diff.go              structural path diff and bounded opt-in LCS alignment

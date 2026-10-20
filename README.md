@@ -159,6 +159,33 @@ each operation's description, result, status, and hint. It is deterministic and
 offline, and can be redirected into an issue, pull request, or other Markdown
 document.
 
+#### Soroban resource and fee breakdown
+
+`lens explain --resources` adds a Soroban resource table to the summary. It
+compares the transaction's declared instructions, I/O, entry counts and
+footprint with the Mainnet Protocol 27 per-transaction limits, and marks any
+value over its limit as `EXCEEDED`:
+
+```console
+$ lens explain "$SOROBAN_ENVELOPE" --resources
+Soroban resource breakdown (per-transaction limits)
+RESOURCE                 USED       LIMIT           USAGE  STATUS
+Instructions (CPU)       6,688,817  400,000,000     1.7%   ok
+Memory                   n/a        41,943,040      -      not declared
+Disk read bytes          116        200,000         0.1%   ok
+Write bytes              116        132,096         0.1%   ok
+Disk read entries        10         200             5.0%   ok
+Write entries            6          200             3.0%   ok
+Footprint entries        16         400             4.0%   ok
+...
+```
+
+The table is derived from the envelope alone; add `--meta` (or `--meta-file`)
+to include the charged non-refundable, refundable and rent fees from
+transaction metadata. Soroban XDR does not declare memory usage, so that row is
+shown as `n/a` instead of pretending it is zero. In `--json` mode, `--resources`
+adds a top-level `resources` object next to the summary fields.
+
 ### `lens decode` — read the structure
 
 ```console
@@ -324,6 +351,28 @@ $ lens explore --file envelope.xdr
 # Contract spec-aware ScVal decoding from contract WASM or spec XDR
 $ lens decode --spec contract.wasm --file invocation.xdr
 ```
+
+#### Batch decoding
+
+`lens decode --batch` walks a directory or a shell-style glob and decodes every
+regular file it finds. Files are processed in sorted order, each one gets a
+`=== <path> ===` header, and one bad file does not stop the rest:
+
+```console
+$ lens decode --batch 'captures/*.env.txt' --json
+=== captures/002.env.txt ===
+{ "type": "TransactionEnvelope", ... }
+
+=== captures/003.bad.txt ===
+error: decoding base64: illegal base64 data at input byte 0
+
+Batch summary: 2 file(s) processed, 1 succeeded, 1 failed
+```
+
+The command exits non-zero when any file fails: `1` for read/format failures and
+`3` when every failure was invalid XDR, so pipelines can still distinguish
+garbage bytes from a broken path. `--batch` cannot be combined with `--stream`,
+`--multi`, `--interactive`, `--file` or a positional payload.
 
 #### CSV export
 
@@ -668,6 +717,18 @@ lens decode --yaml "$XDR"
 lens encode -f spec.yaml
 ```
 
+#### Global output controls
+
+`--quiet` / `-q` suppresses standard output without changing the exit status.
+It composes with the diff commands, so `lens diff --quiet a.xdr b.xdr` is a
+silent "do these differ?" check that exits `2` when they do.
+
+`--output` / `-o` writes the command's standard output to a file instead.
+The file is written through a temporary file in the same directory and renamed
+only after the command succeeds; a failed run leaves an existing file untouched.
+Use `-o -` as an explicit synonym for standard output, and `--quiet` takes
+precedence when both flags are supplied.
+
 `lens` itself only processes the XDR supplied to it and makes no network calls.
 The optional `curl` pipeline above is a caller-managed input step; use `--file`
 or standard input when working entirely with local data.
@@ -723,6 +784,8 @@ The CLI has a strict, pinned exit-code policy (`internal/cli/exitcodes.go`):
 Scripts therefore see exactly four outcomes: success, a check that returned
 false, XDR they cannot read, and everything else. The classification is
 `errors.Is`-based, so wrapped decode errors still resolve to code 3.
+A `--batch` run with mixed failures exits `1`; it exits `3` only when every
+failed file was invalid XDR.
 
 > **Migration note.** The "diff found" condition now exits with **2**, and
 > undecodable XDR exits with **3**. Earlier releases collapsed both into the

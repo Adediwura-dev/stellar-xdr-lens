@@ -18,26 +18,27 @@ import (
 
 func newDecodeCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
 	var (
-		asJSON      bool
-		asYAML      bool
-		isHex       bool
-		isMulti     bool
-		inspectWASM bool
-		asSummary   bool
-		asTxRep     bool
-		asCSV       bool
-		interactive bool
-		specPath    string
-		formatName  string
-		network     string
-		typeName    string
-		maxDepth    int
-		showTypes   bool
-		annotate    bool
-		listCands   bool
-		compactOut  bool
-		stream      bool
-		canonical   bool
+		asJSON       bool
+		asYAML       bool
+		isHex        bool
+		isMulti      bool
+		inspectWASM  bool
+		asSummary    bool
+		asTxRep      bool
+		asCSV        bool
+		interactive  bool
+		specPath     string
+		formatName   string
+		network      string
+		typeName     string
+		maxDepth     int
+		showTypes    bool
+		annotate     bool
+		listCands    bool
+		compactOut   bool
+		stream       bool
+		canonical    bool
+		batchPattern string
 	)
 
 	cmd := &cobra.Command{
@@ -75,6 +76,21 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
   echo "$XDR" | lens decode --depth 3`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if batchPattern != "" {
+				if stream || isMulti {
+					return fmt.Errorf("%w: --batch cannot be combined with --stream or --multi", lens.ErrInvalidArgument)
+				}
+				if interactive {
+					return fmt.Errorf("%w: --batch cannot be combined with --interactive", lens.ErrInvalidArgument)
+				}
+				if g.file != "" {
+					return fmt.Errorf("%w: --batch reads files itself; do not also pass --file", lens.ErrInvalidArgument)
+				}
+				if firstArg(args) != "" {
+					return fmt.Errorf("%w: --batch takes its own file pattern or directory; do not also pass a payload", lens.ErrInvalidArgument)
+				}
+			}
+
 			if stream {
 				return runStream(stdout, g, firstArg(args), stdin, typeName, asJSON, compactOut, annotate, maxDepth, showTypes, canonical)
 			}
@@ -97,128 +113,135 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 				return runMultiStream(r, stdout, g, typeName, isHex, asJSON, asYAML, compactOut, annotate, maxDepth, showTypes)
 			}
 
+			render := func(w io.Writer, payload string) error {
+				if isHex || strings.HasPrefix(payload, "0x") || strings.HasPrefix(payload, "0X") {
+					b64, convErr := lens.HexToBase64(payload)
+					if convErr == nil {
+						payload = b64
+					} else if isHex {
+						return fmt.Errorf("decoding hex input: %w", convErr)
+					}
+				}
+
+				if canonical {
+					raw, decErr := base64.StdEncoding.DecodeString(payload)
+					if decErr != nil {
+						return fmt.Errorf("decoding base64: %w", decErr)
+					}
+					if typeName != "" {
+						if err := lens.ValidateTypeCanonicalXDR(raw, typeName); err != nil {
+							return fmt.Errorf("canonical validation failed: %w", err)
+						}
+					} else {
+						if err := lens.ValidateCanonicalXDR(raw); err != nil {
+							return fmt.Errorf("canonical validation failed: %w", err)
+						}
+					}
+				}
+
+				if listCands {
+					return runCandidates(w, payload)
+				}
+
+				value, err := decodeValue(payload, typeName)
+				if err != nil {
+					if inspectWASM {
+						// Attempt direct WASM decode from payload
+						return runDirectWASM(w, payload, asJSON)
+					}
+					return err
+				}
+
+				if inspectWASM {
+					return runInspectWASM(w, value, payload, asJSON)
+				}
+
+				if asYAML {
+					yamlBytes, err := lens.ValueToYAML(value, annotate)
+					if err != nil {
+						return fmt.Errorf("formatting YAML: %w", err)
+					}
+					_, err = w.Write(yamlBytes)
+					return err
+				}
+
+				if specPath != "" {
+					spec, err := lens.LoadContractSpecFile(specPath)
+					if err != nil {
+						return fmt.Errorf("loading contract spec: %w", err)
+					}
+					spec.ApplyToValue(value)
+				}
+
+				if interactive {
+					palette, err := paletteForOutput(w, g.color)
+					if err != nil {
+						return err
+					}
+					tui := NewTUITree(value, stdin, w, palette)
+					return tui.Run()
+				}
+
+				if asSummary || formatName == "summary" {
+					palette, err := paletteForOutput(w, g.color)
+					if err != nil {
+						return err
+					}
+					f := format.NewCompactFormatter(
+						format.WithCompactPalette(palette),
+					)
+					return f.Format(w, value)
+				}
+
+				if asTxRep || formatName == "txrep" {
+					palette, err := paletteForOutput(w, g.color)
+					if err != nil {
+						return err
+					}
+					f := format.NewTxRepFormatter(
+						format.WithTxRepPalette(palette),
+						format.WithTxRepNetwork(network),
+					)
+					return f.Format(w, value)
+				}
+
+				if asCSV || formatName == "csv" {
+					return format.NewCSVFormatter().Format(w, value)
+				}
+
+				if asJSON || formatName == "json" {
+					indent := "  "
+					if compactOut {
+						indent = ""
+					}
+					f := format.NewJSONFormatter(
+						format.WithIndent(indent),
+						format.WithAnnotations(annotate),
+					)
+					return f.Format(w, value)
+				}
+
+				palette, err := paletteForOutput(w, g.color)
+				if err != nil {
+					return err
+				}
+				f := format.NewTreeFormatter(
+					format.WithPalette(palette),
+					format.WithMaxDepth(maxDepth),
+					format.WithTypeNames(showTypes),
+				)
+				return f.Format(w, value)
+			}
+
+			if batchPattern != "" {
+				return runBatchDecode(stdout, batchPattern, render)
+			}
+
 			payload, err := resolveInput(firstArg(args), g.file, stdin)
 			if err != nil {
 				return err
 			}
-
-			if isHex || strings.HasPrefix(payload, "0x") || strings.HasPrefix(payload, "0X") {
-				b64, convErr := lens.HexToBase64(payload)
-				if convErr == nil {
-					payload = b64
-				} else if isHex {
-					return fmt.Errorf("decoding hex input: %w", convErr)
-				}
-			}
-
-			if canonical {
-				raw, decErr := base64.StdEncoding.DecodeString(payload)
-				if decErr != nil {
-					return fmt.Errorf("decoding base64: %w", decErr)
-				}
-				if typeName != "" {
-					if err := lens.ValidateTypeCanonicalXDR(raw, typeName); err != nil {
-						return fmt.Errorf("canonical validation failed: %w", err)
-					}
-				} else {
-					if err := lens.ValidateCanonicalXDR(raw); err != nil {
-						return fmt.Errorf("canonical validation failed: %w", err)
-					}
-				}
-			}
-
-			if listCands {
-				return runCandidates(stdout, payload)
-			}
-
-			value, err := decodeValue(payload, typeName)
-			if err != nil {
-				if inspectWASM {
-					// Attempt direct WASM decode from payload
-					return runDirectWASM(stdout, payload, asJSON)
-				}
-				return err
-			}
-
-			if inspectWASM {
-				return runInspectWASM(stdout, value, payload, asJSON)
-			}
-
-			if asYAML {
-				yamlBytes, err := lens.ValueToYAML(value, annotate)
-				if err != nil {
-					return fmt.Errorf("formatting YAML: %w", err)
-				}
-				_, err = stdout.Write(yamlBytes)
-				return err
-			}
-
-			if specPath != "" {
-				spec, err := lens.LoadContractSpecFile(specPath)
-				if err != nil {
-					return fmt.Errorf("loading contract spec: %w", err)
-				}
-				spec.ApplyToValue(value)
-			}
-
-			if interactive {
-				palette, err := paletteForOutput(stdout, g.color)
-				if err != nil {
-					return err
-				}
-				tui := NewTUITree(value, stdin, stdout, palette)
-				return tui.Run()
-			}
-
-			if asSummary || formatName == "summary" {
-				palette, err := paletteForOutput(stdout, g.color)
-				if err != nil {
-					return err
-				}
-				f := format.NewCompactFormatter(
-					format.WithCompactPalette(palette),
-				)
-				return f.Format(stdout, value)
-			}
-
-			if asTxRep || formatName == "txrep" {
-				palette, err := paletteForOutput(stdout, g.color)
-				if err != nil {
-					return err
-				}
-				f := format.NewTxRepFormatter(
-					format.WithTxRepPalette(palette),
-					format.WithTxRepNetwork(network),
-				)
-				return f.Format(stdout, value)
-			}
-
-			if asCSV || formatName == "csv" {
-				return format.NewCSVFormatter().Format(stdout, value)
-			}
-
-			if asJSON || formatName == "json" {
-				indent := "  "
-				if compactOut {
-					indent = ""
-				}
-				f := format.NewJSONFormatter(
-					format.WithIndent(indent),
-					format.WithAnnotations(annotate),
-				)
-				return f.Format(stdout, value)
-			}
-
-			palette, err := paletteForOutput(stdout, g.color)
-			if err != nil {
-				return err
-			}
-			f := format.NewTreeFormatter(
-				format.WithPalette(palette),
-				format.WithMaxDepth(maxDepth),
-				format.WithTypeNames(showTypes),
-			)
-			return f.Format(stdout, value)
+			return render(stdout, payload)
 		},
 	}
 
@@ -243,6 +266,8 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 		"list every XDR type the input decodes as, best first")
 	cmd.Flags().BoolVar(&stream, "stream", false, "stream and decode framed XDR chunks (RFC 5531 or length-prefixed)")
 	cmd.Flags().BoolVar(&canonical, "canonical", false, "verify that input adheres strictly to canonical XDR serialization")
+	cmd.Flags().StringVar(&batchPattern, "batch", "",
+		"decode every file in a directory or matching a glob pattern, with per-file headers and a failure summary")
 
 	return cmd
 }
@@ -299,6 +324,78 @@ Use arrow keys or j/k to navigate, Enter or Space to toggle node expansion,
 		"path to contract WASM or ScSpecEntry file for spec-aware decoding")
 
 	return cmd
+}
+
+// runBatchDecode processes files sequentially, buffering each file's output so
+// a failure cannot leave a half-written report under a filename header. Every
+// file gets a header; failures are listed both in place and in an aggregated
+// summary returned as an error.
+func runBatchDecode(stdout io.Writer, pattern string, render func(io.Writer, string) error) error {
+	files, err := resolveBatchFiles(pattern)
+	if err != nil {
+		return err
+	}
+
+	failures := make([]batchFailure, 0)
+	succeeded := 0
+	for _, path := range files {
+		if _, err := fmt.Fprintf(stdout, "=== %s ===\n", path); err != nil {
+			return fmt.Errorf("writing batch header: %w", err)
+		}
+
+		data, readErr := os.ReadFile(path)
+		payload := strings.TrimSpace(string(data))
+		if readErr == nil && payload == "" {
+			readErr = fmt.Errorf("file is empty")
+		}
+		if readErr != nil {
+			failures = append(failures, batchFailure{path: path, err: readErr})
+			if _, err := fmt.Fprintf(stdout, "error: %v\n\n", readErr); err != nil {
+				return fmt.Errorf("writing batch error: %w", err)
+			}
+			continue
+		}
+
+		var buf bytes.Buffer
+		if err := render(&buf, payload); err != nil {
+			failures = append(failures, batchFailure{path: path, err: err})
+			if _, err := fmt.Fprintf(stdout, "error: %v\n\n", err); err != nil {
+				return fmt.Errorf("writing batch error: %w", err)
+			}
+			continue
+		}
+
+		body := buf.Bytes()
+		if _, err := stdout.Write(body); err != nil {
+			return fmt.Errorf("writing batch output: %w", err)
+		}
+		if len(body) > 0 && body[len(body)-1] != '\n' {
+			if _, err := fmt.Fprintln(stdout); err != nil {
+				return fmt.Errorf("writing batch output: %w", err)
+			}
+		}
+		if _, err := fmt.Fprintln(stdout); err != nil {
+			return fmt.Errorf("writing batch output: %w", err)
+		}
+		succeeded++
+	}
+
+	if len(failures) > 0 {
+		if _, err := fmt.Fprintf(stdout, "Batch summary: %d file(s) processed, %d succeeded, %d failed\n",
+			len(files), succeeded, len(failures)); err != nil {
+			return fmt.Errorf("writing batch summary: %w", err)
+		}
+		for _, failure := range failures {
+			if _, err := fmt.Fprintf(stdout, "  %s: %v\n", failure.path, failure.err); err != nil {
+				return fmt.Errorf("writing batch summary: %w", err)
+			}
+		}
+		return newBatchError(len(files), failures)
+	}
+	if _, err := fmt.Fprintf(stdout, "Batch summary: %d file(s) processed, all succeeded\n", len(files)); err != nil {
+		return fmt.Errorf("writing batch summary: %w", err)
+	}
+	return nil
 }
 
 func runStream(stdout io.Writer, g *globalFlags, arg string, stdin io.Reader, typeName string, asJSON, compactOut, annotate bool, maxDepth int, showTypes, canonical bool) error {
