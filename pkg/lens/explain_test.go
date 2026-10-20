@@ -424,7 +424,7 @@ func explainPreparedOperation(t *testing.T, op xdr.Operation, inner xdr.Operatio
 	}
 	opResults := []xdr.OperationResult{{
 		Code: xdr.OperationResultCodeOpInner,
-		Tr:   &inner,
+		Tr: &inner,
 	}}
 	res := xdr.TransactionResult{
 		FeeCharged: 100,
@@ -1375,6 +1375,103 @@ func TestDescribeLiquidityPoolOperations(t *testing.T) {
 	}
 }
 
+func TestExplainPairDeepensFootprintTTLFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		op         xdr.Operation
+		code       xdr.ExtendFootprintTtlResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name: "malformed names zero extend value",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 0}}},
+			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlMalformed,
+			wantCode:   "extend_footprint_ttl_malformed",
+			wantInSumm: []string{"0 ledgers", "positive lifetime"},
+			wantInHint: []string{"extendTo", "positive number of ledgers"},
+		},
+		{
+			name: "resource limit exceeded names the footprint budget",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 100}}},
+			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlResourceLimitExceeded,
+			wantCode:   "extend_footprint_ttl_resource_limit_exceeded",
+			wantInSumm: []string{"declared resource budget", "more ledger entries"},
+			wantInHint: []string{"Reduce the footprint", "resource limits"},
+		},
+		{
+			name: "insufficient refundable fee names the TTL extension cost",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlOp: &xdr.ExtendFootprintTtlOp{ExtendTo: 500}}},
+			code:       xdr.ExtendFootprintTtlResultCodeExtendFootprintTtlInsufficientRefundableFee,
+			wantCode:   "extend_footprint_ttl_insufficient_refundable_fee",
+			wantInSumm: []string{"500 ledgers", "refundable fee"},
+			wantInHint: []string{"Increase the refundable fee", "simulation"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainSingleOperation(t, tc.op.Body, xdr.OperationResultTr{Type: xdr.OperationTypeExtendFootprintTtl, ExtendFootprintTtlResult: &xdr.ExtendFootprintTtlResult{Code: tc.code}})
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
+			}
+		})
+	}
+}
+
+func TestExplainPairDeepensRestoreFootprintFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		op         xdr.Operation
+		code       xdr.RestoreFootprintResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name: "resource limit exceeded names the restore budget",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
+			code:       xdr.RestoreFootprintResultCodeRestoreFootprintResourceLimitExceeded,
+			wantCode:   "restore_footprint_resource_limit_exceeded",
+			wantInSumm: []string{"declared resource budget", "archived entries"},
+			wantInHint: []string{"Reduce the footprint", "split the restore"},
+		},
+		{
+			name: "insufficient refundable fee names restore cost",
+			op: xdr.Operation{Body: xdr.OperationBody{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintOp: &xdr.RestoreFootprintOp{}}},
+			code:       xdr.RestoreFootprintResultCodeRestoreFootprintInsufficientRefundableFee,
+			wantCode:   "restore_footprint_insufficient_refundable_fee",
+			wantInSumm: []string{"rent and restoration", "archived entries"},
+			wantInHint: []string{"Increase the refundable fee", "simulation"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := explainSingleOperation(t, tc.op.Body, xdr.OperationResultTr{Type: xdr.OperationTypeRestoreFootprint, RestoreFootprintResult: &xdr.RestoreFootprintResult{Code: tc.code}})
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			for _, w := range tc.wantInHint {
+				if !strings.Contains(got.Hint, w) {
+					t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+				}
+			}
+		})
 func TestDiagnosePathPaymentStrictReceive(t *testing.T) {
 	t.Parallel()
 
