@@ -230,6 +230,32 @@ LiquidityPoolEntry
       └─ PoolSharesTrustLineCount: 150  held by 150 trustlines
 ```
 
+A transaction's `LedgerFootprint` is flat on the wire, so `lens decode` also
+groups its keys by storage level after the untouched `ReadOnly` and `ReadWrite`
+lists. Each grouped entry points at its wire position and names the contract it
+belongs to (contract code keys show their WASM hash instead):
+
+```console
+$ lens decode --file soroban-envelope.xdr  # footprint excerpt
+Footprint
+├─ ReadOnly  [10]
+│  └─ ...
+├─ ReadWrite  [6]
+│  └─ ...
+├─ Instance  [3]
+│  ├─ [0]: readOnly[0]  contract data for CBGSBKYMYO6OMGHQXXNOBRGVUDFUDVC2XLC3SXON5R2SNXILR7XCKKY3
+│  └─ ...
+├─ Temporary  [10]
+│  └─ ...
+└─ Other  [3]
+   ├─ [0]: readOnly[8]  contract code 70fe44694c9fe6b0abc69a6da4858fc2aaba04fa10492a466a1d426d04ca8560
+   └─ ...
+```
+
+`Instance` holds persistent keys that use the contract instance key; `Other`
+holds keys with no Soroban durability, such as trust lines and contract code,
+so no entry is dropped.
+
 #### Alternative Formats and Interactive Explorer
 
 ```console
@@ -377,6 +403,23 @@ $ lens diff --exclude-paths Signatures,SeqNum before.xdr after.xdr
 $ lens diff --include-paths Result.Code,FeeCharged before.res after.res
 ```
 
+`--redact` normalizes the dynamic cryptographic values that a rebuild cannot
+reproduce — hashes, signatures and derived identifiers — before comparing, so
+two values that differ only in those fields compare equal. `--redact` accepts
+`hashes`, `signatures`, `identifiers` or `all` and is repeatable;
+`--redact-fields` adds named fields and accepts globs. The paths that were
+normalized are always reported, both in text and in the JSON `redacted` field.
+Redaction is rejected with `--footprint`, which compares sets rather than
+hydrated values.
+
+```console
+# Treat a rebuilt envelope's hashes and signatures as equal
+$ lens diff --redact hashes,signatures before.env.xdr after.env.xdr
+
+# Add a specific field to the redaction set (globs allowed)
+$ lens diff --redact all --redact-fields PrevHash,LedgerHash* a.xdr b.xdr
+```
+
 Three formats render the difference for other tools. Each is mutually exclusive
 with the others and with `--json`/`--stats`.
 
@@ -485,6 +528,12 @@ StellarMessage
 Encode simplified JSON specifications into base64-encoded XDR completely offline:
 
 ```console
+# Round-trip a decode document straight back to XDR
+$ lens decode --json "$XDR" | lens encode
+
+# Encode a bare value as any registered type
+$ lens encode --type ContractCodeEntry --file value.json
+
 # Encode a transaction envelope from a JSON template
 $ lens encode --tx '{
   "source_account": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
@@ -506,6 +555,13 @@ $ lens encode --scval '{"vec": [1, 2, 3]}'
 # Enforce strict schema validation (rejects unknown properties or invalid fields)
 $ lens encode --strict --file tx_template.json
 ```
+
+`lens encode` is symmetric with `lens decode`: it accepts the stable
+`{"type": ..., "value": ...}` document or a raw value with `--type`, and
+reproduces the canonical XDR. The `TransactionEnvelope` and `ScVal` simplified
+dialects remain supported. Enrichments that intentionally collapse structure
+into prose (notably claim predicates) return an error rather than inventing a
+value; pass the original decoded value to the library's `lens.Encode` instead.
 
 ### Piping and scripting
 
@@ -626,6 +682,20 @@ the read-only and read-write set differences of two Soroban footprints; and
 `lens.DiffEnvelopeResult` aligns an envelope with its result, operation by
 operation. None of them fetches or decodes anything beyond the values passed in.
 
+Diff redaction is a library feature as well as a CLI flag. Set
+`DiffOptions.Redaction` to a `lens.RedactionPolicy` (categories `Hashes`,
+`Signatures`, `Identifiers`, plus name globs in `Fields`) and the trees are
+deep-copied and normalized before the walk; the inputs are never mutated, and
+`DiffResult.Redacted` lists the normalized paths.
+
+The encoder and its round-trip verifier are public too. `lens.Encode` reverses
+`lens.Decode`, while `lens.EncodeJSON` and `lens.EncodeJSONAs` accept the
+stable decode document and return canonical base64 XDR. `lens.RoundTripBase64`
+and `lens.RoundTripJSONBase64` verify the `decode -> encode -> decode` property
+for a payload, `lens.RunRoundTripSuite` runs a named case list, and
+`lens.RoundTripRegistry` exercises every registered type. Reports distinguish a
+byte mismatch, a tree mismatch, and a route that is intentionally lossy.
+
 The output formatters are reusable too. `format.NewJSONPatchFormatter` and
 `format.NewUnifiedFormatter` turn a diff into an RFC 6902 patch or a unified
 diff, and `format.NewSideBySideFormatter` produces the two-column view. A
@@ -739,6 +809,21 @@ field of the canonical Protocol 22 header fixture (Protocols 20–23), so those
 results compare version values with an otherwise identical XDR structure.
 See [docs/architecture.md](docs/architecture.md#testing-approach) for fixture
 selection and benchmark details.
+
+Structural-diff benchmarks cover deep trees, wide lists (positional and
+aligned), real ledger-close envelopes, and the redaction prepass:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'BenchmarkDiff' -benchmem
+```
+
+The encoder's contract is checked as a property suite: every fixture is run
+through both the binary and JSON routes, and a synthesized value exercises every
+registered type. Known-lossy renderings are reported as skipped with a reason.
+
+```sh
+go test ./pkg/lens -run 'RoundTrip' -v
+```
 
 ## A note on type detection
 

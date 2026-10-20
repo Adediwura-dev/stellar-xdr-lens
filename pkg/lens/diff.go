@@ -93,6 +93,11 @@ type DiffResult struct {
 	RightType string
 	// Changes lists every difference, in document order.
 	Changes []Change
+	// Redacted lists the paths whose values were normalized away by
+	// DiffOptions.Redaction, in first-seen document order. It is nil unless
+	// redaction was requested, and is reported for transparency: those paths
+	// may still differ on the wire even though the diff does not show it.
+	Redacted []string
 }
 
 // DiffOptions configures structural comparison behavior.
@@ -117,6 +122,11 @@ type DiffOptions struct {
 	Threshold float64
 	// DiffThreshold is an alias for Threshold.
 	DiffThreshold float64
+	// Redaction normalizes dynamic cryptographic values — hashes, signatures
+	// and derived identifiers — before the walk, so that two values which
+	// differ only in those fields compare equal. The zero value redacts
+	// nothing and preserves the historical behavior. See diff_redact.go.
+	Redaction RedactionPolicy
 }
 
 // Equal reports whether the two values were structurally identical.
@@ -155,6 +165,12 @@ func DiffWithOptions(left, right *Value, options DiffOptions) (*DiffResult, erro
 		}
 	}
 	res := &DiffResult{LeftType: left.Type, RightType: right.Type}
+	if options.Redaction.Enabled() {
+		var leftPaths, rightPaths []string
+		leftNode = redactNode(leftNode, options.Redaction, "", &leftPaths)
+		rightNode = redactNode(rightNode, options.Redaction, "", &rightPaths)
+		res.Redacted = mergedPaths(leftPaths, rightPaths)
+	}
 	diffNodesWithOptions(leftNode, rightNode, "", &res.Changes, options)
 	if !options.Filter.Empty() {
 		res.Changes = FilterChanges(res.Changes, options.Filter)
@@ -547,6 +563,16 @@ func nodesBinaryEqual(a, b *Node) bool {
 	}
 
 	return false
+	// Some enrichers keep the whole decoded value as the raw payload (a
+	// LedgerUpgrade, for example), and that value can contain arm pointers.
+	// Printing with %v would compare pointer addresses and report two
+	// identical values as different, so structural equality comes first.
+	if reflect.DeepEqual(a.Value, b.Value) {
+		return true
+	}
+	// Fall back to the printed form so a value that only differs in Go type
+	// (int64 versus uint64) still compares equal.
+	return fmt.Sprintf("%v", a.Value) == fmt.Sprintf("%v", b.Value)
 }
 
 // leafValue summarises a node for reporting in a change. Struct and list
