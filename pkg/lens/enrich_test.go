@@ -1,6 +1,8 @@
 package lens
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
