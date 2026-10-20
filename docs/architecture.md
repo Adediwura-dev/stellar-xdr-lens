@@ -61,14 +61,17 @@ pkg/lens/              the library; this is the reusable surface
   node.go              the neutral Node tree — the only file using reflection
   enrich.go            per-type human rendering (strkey, amounts, timestamps)
   contract_data.go     contract data storage: durability and special storage keys
-  ledger_header.go     ledger-header field notes and protocol parameters
+  ledger_header.go     ledger-header field notes, LP flags and upgrade votes
   bucket_entry.go      bucket list, tombstone and hot archive terminology
   scp.go               consensus node identity and pledge names
   state_archival.go    TTL expiry and eviction rendering
+  trustline.go           trustline flag names and liability amount fields
   account_extensions.go liabilities, sponsorship counters and sequence-ledger notes
+  signer_thresholds.go  account threshold triplet, locked master, signer capacity
   data_entry.go        account data values: printable text vs hex
   survey.go            time-sliced survey command names and encrypted bodies
   contract_code.go     WASM section parsing: contract spec, env meta and meta
+  contract_executable.go contract executables: wasm hash, built-in token, external refs
   overlay.go           peer addresses, certificate keys, overlay message names
   tx_history.go        ledger-sequence field notes for history sets and batches
   asset_types.go       asset details and Stellar Asset Contract id derivation
@@ -76,7 +79,7 @@ pkg/lens/              the library; this is the reusable surface
   coerce.go            permissive type coercion & number parsing (stringified numbers, hex, assets)
   scval_encode.go      ScVal constructor from intuitive JSON literals
   tx_builder.go        TransactionEnvelope builder from JSON spec
-  explain.go           Summary, Outcome, per-operation descriptions
+  explain.go           Summary, Outcome, per-operation descriptions and failure deepening
   reason.go            all 208 result codes → plain English
   reason_lookup.go     O(1) short code lookup table (ReasonByCode)
   protocol21_reasons.go Protocol 21 & 22 error additions and Soroban host error decoder
@@ -86,9 +89,21 @@ pkg/lens/              the library; this is the reusable surface
   signature_explain.go Signature-threshold diagnosis (hint matching, missing weight)
   simulation_explain.go Simulation-failure root-cause decoder (footprint, CPU, fee)
   feebump_explain.go   Fee-bump inner-vs-outer failure separation
+  claimable_explain.go  recursive claim-predicate evaluation with explicit ledger times
+  resource_explain.go   Soroban resource rejection decoder from transaction results
+  sponsorship_explain.go sponsorship result and begin/end sequence diagnosis
+  upgrade_explain.go   protocol-version boundary correlation for failed results
   diff.go              structural path diff and bounded opt-in LCS alignment
+  diff_filter.go       include/exclude path filtering for structural diffs
+  diff_redact.go       opt-in hash/signature/identifier redaction for diffs
+  encode.go            symmetric JSON/value -> base64 XDR encoder (inverse of decode)
+  roundtrip.go         decode -> encode -> decode property verification engine
   scval_diff.go        recursive ScVal comparison with canonical map-key matching
   semantic_diff.go     exact wide-integer and type-aware semantic comparison
+  diff_stats.go        statistical summary of a diff: counts, sections, depth
+  signer_diff.go       unordered signer/signature multiset comparison
+  footprint_diff.go    Soroban footprint set-theoretic (Venn) diff
+  envelope_result_diff.go  aligned envelope/result operation pairing
   meta_diff.go         transaction metadata balance deltas (offline)
   canonical.go         deterministic canonical XDR validation (RFC 4506) and serialization
   encode_errors.go     malformed input diagnostics, line/column tracking and error pointers
@@ -105,6 +120,10 @@ pkg/lens/              the library; this is the reusable surface
     txrep.go           SEP-0011 human-readable TxRep format
     csv.go             flat CSV export for batch ledger envelopes
     markdown.go        GitHub-flavored Markdown transaction reports
+    linediff.go        shared line alignment for unified and side-by-side diffs
+    unified.go         standard unified diff for CI review comments
+    json_patch.go      RFC 6902 JSON Patch output
+    side_by_side.go    colourised two-column terminal diff
 testdata/              real captured mainnet XDR + manifest.json recording provenance
 ```
 
@@ -159,6 +178,207 @@ snapshot; create/remove changes use zero for the absent side. Metadata that
 does not include a baseline sets `BeforeKnown` false rather than inventing a
 balance. The CLI command `lens meta-diff` renders these records as text or
 JSON. It only inspects the supplied metadata and makes no network calls.
+
+## Statistical diff summaries
+
+`diff_stats.go` turns a `DiffResult` into a `DiffStats`: the total number of
+changes, a breakdown into modified, added, removed and type-changed paths, the
+changes grouped by their top-level path section, and the deepest changed path.
+`SummarizeDiff` accepts a `*DiffResult` and `SummarizeChanges` accepts a raw
+`[]Change`. Both produce deterministic output; sections are emitted in
+first-appearance order and the deepest path breaks ties by first occurrence.
+
+`DiffStats` is additive: it derives everything from an existing diff and runs
+no new decoding, so it adds no network path. The CLI exposes it as
+`lens diff --stats`, which prints `DiffStats.String()` or, with `--json`, the
+tagged JSON form.
+
+## Path filters for structural diffs
+
+Not every field is worth reporting. A rebuilt transaction changes its sequence
+number and signatures but should otherwise be identical, and those two paths
+drown out the change a reviewer actually wants to see.
+
+`diff_filter.go` narrows a diff to the paths a caller cares about.
+`NewPathFilter(include, exclude)` builds a validated `PathFilter` from
+dot-separated field patterns. Within a segment the shell glob metacharacters
+`*`, `?` and `[...]` apply, a segment of `**` spans any number of segments, and
+a pattern also matches everything beneath it, so `V1.Tx` selects the whole
+transaction subtree. An empty include set selects everything, and excludes
+always win over includes. Malformed patterns wrap `ErrInvalidArgument`.
+
+The filter is applied to the finished change list, so it never changes how the
+values are compared — it only narrows the output. `DiffOptions.Filter`
+integrates it with `DiffWithOptions`; `FilterChanges` and `DiffResult.Filter`
+are the standalone entry points. Because filtering happens last, a diff whose
+only changes are excluded reports as equal, which is what makes
+`lens diff --exclude-paths ... --exit-code` a usable CI gate. The CLI exposes
+it as `--include-paths` and `--exclude-paths` (comma-separated and
+repeatable), and the format-side `WithUnifiedFilter`/`WithSideBySideFilter`
+options apply the same selection to the line-based output.
+
+## Hash and signature redaction for structural diffs
+
+A rebuilt transaction or envelope is usually identical except for values that
+cannot be reproduced deterministically: transaction hashes, signatures and
+hints, and identifiers derived from them. `diff_redact.go` normalizes those
+values before the walk so `DiffWithOptions` reports only the differences a
+reviewer can act on.
+
+Redaction is opt-in through `DiffOptions.Redaction`, a `RedactionPolicy`:
+
+```go
+result, err := lens.DiffWithOptions(left, right, lens.DiffOptions{
+    Redaction: lens.RedactionPolicy{
+        Hashes:     true,
+        Signatures: true,
+        Fields:     []string{"PrevHash", "LedgerHash*"},
+    },
+})
+```
+
+`Hashes`, `Signatures` and `Identifiers` select categories by the decoded XDR
+type, not by a fixed path list. A `Hash` is recognized wherever it appears, a
+`Signature`/`SignatureHint` is recognized as a signature, and contract, pool
+and claimable-balance ids are recognized as derived identifiers. `Fields`
+adds name-based matching for values that are not self-describing, such as an
+anonymous byte array named `Hint`; a field pattern may be exact or use
+`path.Match` glob syntax. `RedactHashesAndSignatures()` is the convenience
+policy exposed by `lens diff --redact hashes,signatures`.
+
+The prepass deep-copies and normalizes the trees; the caller's `Value`s are
+never mutated. Each selected scalar is replaced with a stable placeholder
+(`<redacted hash>`, `<redacted signature>`, `<redacted identifier>` or
+`<redacted>`), and `DiffResult.Redacted` lists the normalized paths in
+first-seen order. Nothing is redacted silently: text output prints a redaction
+summary, and JSON output carries the same list in its `redacted` field. The CLI
+accepts repeatable `--redact` categories (`hashes`, `signatures`,
+`identifiers`, `all`) and repeatable `--redact-fields`; both are rejected with
+`--footprint`, which compares sets rather than hydrated values.
+
+## Symmetric JSON encoder and round-trip verification
+
+`encode.go` closes the loop opened by `decode`: it turns a decoded `Value`, or
+the stable JSON document `lens decode --json` emits, back into base64 XDR. The
+structural encoder walks the registered Go type rather than the JSON tree, so
+field names, union discriminants and enum values come from the generated XDR
+definitions rather than a hand-maintained schema.
+
+Two entry points cover the common cases:
+
+- `Encode(v)` re-serializes `v.Raw`, the concrete XDR value behind a decoded
+  tree. It is exact for every registered type and is the inverse of `Decode`.
+- `EncodeJSON(data)` / `EncodeJSONAs(typeName, data)` accept the stable
+  `{"type": ..., "value": ...}` document, a bare value with an explicit type,
+  or the simplified transaction-envelope and ScVal dialects. Documents with an
+  `xdr`, `base64`, `payload` or `raw` field pass through unchanged.
+
+The structural encoder understands the scalar forms the enrichers produce:
+StrKey accounts and contracts, canonical asset strings, `n/d` prices,
+`host:port` peer addresses, `A / B @ fee%` pool parameters, claimable-balance
+ids, named storage keys, wasm and external contract executables, hex or base64
+byte strings, and enum names or enriched labels. Derived annotations that the
+decoder appends (WASM sections, `Spec`, `EnvMeta`, `Meta`) are accepted and
+ignored because they are not XDR fields. Deliberately lossy renderings, notably
+`ClaimPredicate` expressions, return `ErrUnsupportedType` instead of inventing
+a value; callers that hold the decoded `Value` should use `Encode` for those.
+
+`roundtrip.go` turns the encoder contract into a property test that callers can
+run on their own payloads:
+
+```go
+report, err := lens.RoundTripBase64(payload, "TransactionEnvelope")
+if err != nil {
+    // The input could not be decoded or encoded at all.
+}
+if !report.OK() {
+    // report.Changes, report.BytesEqual and report.TreeEqual explain why.
+}
+```
+
+`RoundTripBinary` checks that re-serializing the decoded value reproduces the
+original bytes and tree. `RoundTripJSON` goes through the stable JSON document
+and `EncodeJSON` instead. `RunRoundTripSuite` runs a named set of cases, and
+`RoundTripRegistry` synthesizes a minimal value for every registered type and
+verifies it on the chosen route. Routes report `Skipped` with a reason for
+renderings that are intentionally lossy (claim predicates, and fields such as
+`PeerAddress.NumFailures` that the JSON contract does not carry). The engine is
+deterministic, offline and read-only.
+
+
+
+## Unified, JSON Patch and side-by-side diff output
+
+Three formatters turn a structural difference into a shape another tool or a
+reviewer can consume. All three are deterministic and make no network calls.
+
+- `format/unified.go` emits a standard unified diff (`---`/`+++` headers and
+  `@@` hunks with context). It is what a pull-request comment bot or a
+  `patch`-style consumer expects, so a structural change can be attached to a
+  review verbatim. Identical values produce no output, matching diff(1).
+- `format/json_patch.go` emits an RFC 6902 JSON Patch: an array of `add`,
+  `remove` and `replace` operations addressed by RFC 6901 JSON Pointers
+  relative to the decoded value. When the two decoded values are supplied with
+  `WithJSONPatchSources`, each operation carries the full JSON subtree from the
+  tree, so the patch is directly applicable; without them the scalar recorded
+  on the change is used.
+- `format/side_by_side.go` emits a colourised two-column view, pairing each
+  removed line with the added line that replaced it. Columns are padded before
+  colour is applied, so ANSI escapes never disturb the layout, and the palette
+  comes from the same environment-selected theme as the other terminal output.
+
+`format/linediff.go` provides the shared engine: it flattens a decoded value
+into a deterministic one-line-per-node stream and aligns two streams with an
+LCS pass whose dynamic-programming table is bounded to $2^{20}$ cells, falling
+back to a wholesale replacement above that. The same bounded-alignment
+discipline as the structural differ applies, so untrusted XDR cannot make the
+terminal formatters allocate without limit. Hunks are built by the standard
+context-merging algorithm. The CLI exposes the formats as `diff --unified`,
+`diff --json-patch` and `diff --side-by-side`; the three are mutually exclusive
+with each other and with `--json`/`--stats`.
+
+## Unordered signer and signature diffs
+
+Signatures and signers are sets, not sequences: a transaction signed by the
+same keys is the same transaction whatever order the signatures appear in.
+`signer_diff.go` compares these collections as multisets, matching duplicates
+by count, through `DiffSignerKeys`, `DiffSigners` and `DiffDecoratedSignatures`.
+Identity uses each element's canonical XDR encoding, so a reordered set is
+equal, a weight change is one removal plus one addition, and a genuine
+insertion or removal is reported as exactly that.
+
+The structural differ integrates the same behaviour through
+`DiffOptions.UnorderedSigners`: with it set, list fields named `Signatures`,
+`Signers` or `ExtraSigners` are compared as multisets and every other list
+stays positional. The CLI enables it with `lens diff --unordered-signers`.
+
+## Soroban footprint set diffs
+
+`footprint_diff.go` computes the read-only and read-write set differences
+between two Soroban ledger footprints. Keys are identified by their canonical
+XDR encoding and rendered with `ledgerKeySummary`, so the output names accounts,
+trustlines and contract data keys rather than opaque bytes. `DiffFootprintKeys`
+works on raw `[]LedgerKey`; `DiffFootprints` and `DiffSorobanFootprints` handle
+whole footprints and `SorobanTransactionData`; `FootprintFromEnvelope` and
+`FootprintFromValue` extract a footprint from a V1 or fee-bump envelope or a
+standalone data value. The CLI enables it with `lens diff --footprint`, which
+also accepts `--json`.
+
+## Envelope/result alignment
+
+`envelope_result_diff.go` is the pairwise counterpart to `ExplainPair`. Given a
+`TransactionEnvelope` and its `TransactionResult` it pairs every operation with
+the operation result at the same index and reports mismatched operation and
+result types, operations with no result of their own, results with no matching
+operation, and each failed operation's plain-English result code.
+`DiffEnvelopeResult`, `DiffEnvelopeResultValues` and
+`DiffEnvelopeResultBase64` cover the concrete, `Value` and base64 entry points.
+
+The result carries the aligned entries plus a `DiffResult` view
+(`DiffResult()`), a `DiffStats` view (`Summarize()`), a readable report
+(`String()`) and an aligned two-way `Node` tree (`Tree()`) that places each
+operation's subtree beside its result's. The CLI command `lens result-diff`
+renders the report, or the JSON form with `--json`.
 
 ## Runnable Go examples
 
@@ -314,6 +534,28 @@ afterwards, so it needs no locking.
   stroops, its price as a fraction, and its flags. An offer embedded in a
   `LedgerEntry` decodes the same way at `Data.Offer`.
 
+### Liquidity pools and share tokens
+
+`pkg/lens/liquidity_pool.go` covers the Protocol 18+ liquidity pool family:
+
+- `xdr.PoolId` renders as its 64-character hex value with a
+  `constant product pool id` note. Protocol 18 defines a single pool formula,
+  so the note is always accurate.
+- `xdr.LiquidityPoolConstantProductParameters` collapses into the asset pair
+  and fee, for example `native / USDC:GA... @ 0.3%`; the fee is stored in
+  basis points and rendered as a percentage.
+- A `LiquidityPoolEntry` node hook annotates the `LiquidityPoolId` leaf with
+  the pair and fee from `Body.ConstantProduct`, so the id line answers "which
+  market is this?" without descending into the body.
+- `TotalPoolShares` renders as decimal pool share tokens next to its stroop
+  count (`200000.0000000 pool share tokens (stroops: 2000000000000)`) rather
+  than as lumens, and `PoolSharesTrustLineCount` renders as
+  `held by 150 trustlines`. Both notes are registered per containing type, so
+  no other `Int64` field picks them up.
+
+Every rendering is a pure function of the decoded value: no clock, no
+environment and no network access.
+
 ### Contract data and storage levels
 
 `pkg/lens/contract_data.go` decodes Soroban contract data and makes the three
@@ -352,61 +594,37 @@ ContractDataEntry
 └─ Val
    ├─ Type: ScValTypeScvContractInstance
    └─ Instance
-      └─ Executable
-         ... 1 more level(s) hidden
+      └─ Executable: deadbeef…0c0d  wasm:deadbeef…0c0d
 ```
 
 `ContractDataEntry` is registered (priority 5), so `lens decode --type
 ContractDataEntry` decodes a standalone blob, and an entry embedded in a
 `LedgerEntry` decodes the same way at `Data.ContractData`.
 
-### Ledger footprint storage groups
+### Ledger headers, flags and upgrade votes
 
-A Soroban transaction declares the entries it will touch in a
-`LedgerFootprint`: two flat lists of `LedgerKey` unions, `ReadOnly` and
-`ReadWrite`. Durability is only visible by descending into each key's
-`ContractData` arm, and instance storage shares persistent durability, so the
-wire shape does not answer "what does this transaction read persistently?".
+`pkg/lens/ledger_header.go` teaches the tool about the parts of a ledger
+header that are opaque integers on the wire:
 
-`enrich.go` registers a node hook for `xdr.LedgerFootprint` that appends
-derived children after the declared lists. The lists themselves are untouched:
+- **BaseReserve and BaseFee** are Uint32 protocol parameters denominated in
+  stroops. They join the shared `amountFields` list, so `BaseReserve: 5000000`
+  renders as `0.5000000 (stroops: 5000000)` — the same decimal form used for
+  balances and fees everywhere else.
+- **Liquidity-pool control flags** live in `LedgerHeaderExtensionV1.Flags`.
+  The three `DISABLE_LIQUIDITY_POOL_*` bits expand to their Horizon-style
+  names (`disable_liquidity_pool_trading`, `disable_liquidity_pool_deposit`,
+  `disable_liquidity_pool_withdrawal`), joined with ` | ` when several are
+  set. The note is keyed on the extension type, so other `Flags` fields in the
+  protocol are untouched.
+- **Upgrade votes** in `StellarValue.Upgrades` are opaque `UpgradeType` blobs.
+  Each blob is a serialized `LedgerUpgrade`; the registered enricher
+  unmarshals it and names the proposed change — `protocol version 23`,
+  `base fee 0.0000200 XLM (200 stroops)`, `max tx set size 1200`, and so on.
+  Blobs that do not parse decline and keep the generic hex rendering, so a
+  malformed proposal is still visible.
 
-- `Persistent`, `Temporary`, `Instance` and `Other` are the storage groups, in
-  that fixed order; a group with no entries is omitted.
-- `Instance` holds the persistent entries whose key is the contract instance
-  key — the same signal that names instance storage in a standalone contract
-  data entry.
-- `Other` collects keys that carry no Soroban durability — accounts, trust
-  lines, offers, contract code, config settings and TTL records — so every
-  footprint entry appears in exactly one group.
-
-Each group entry references its wire position (`readOnly[2]`, `readWrite[0]`)
-rather than duplicating the key tree, and its note names the key kind plus the
-contract id (`C...`) when the key carries one. Contract code keys have no
-contract id, so the note shows the WASM hash instead:
-
-```console
-$ lens decode --type TransactionEnvelope "$SOROBAN_ENVELOPE"  # excerpt
-Footprint
-├─ ReadOnly  [10]
-│  └─ ...
-├─ ReadWrite  [6]
-│  └─ ...
-├─ Instance  [3]
-│  ├─ [0]: readOnly[0]  contract data for CBGSBKYMYO6OMGHQXXNOBRGVUDFUDVC2XLC3SXON5R2SNXILR7XCKKY3
-│  └─ ...
-├─ Temporary  [10]
-│  ├─ [0]: readOnly[2]  contract data for CDL74RF5BLYR2YBLCCI7F5FB6TPSCLKEJUBSD2RSVWZ4YHF3VMFAIGWA
-│  └─ ...
-└─ Other  [3]
-   ├─ [0]: readOnly[8]  contract code 70fe44694c9fe6b0abc69a6da4858fc2aaba04fa10492a466a1d426d04ca8560
-   ├─ [1]: readOnly[9]  contract code db2c14290d4964e3805f2527dd132939ba5fb3fccac56b30bfab8fd091011627
-   └─ [2]: readWrite[0]  trustline
-```
-
-The grouping is derived and offline: it reads the decoded value, makes no
-network calls, and leaves the machine-readable `ReadOnly`/`ReadWrite` fields
-unchanged so `--json` consumers keep the raw footprint.
+A ledger header is intentionally not collapsed into a single scalar: the tree
+keeps every field, and the human reading is the sum of its per-field notes.
 
 ### Field-name enrichment
 
@@ -465,8 +683,9 @@ payloads; `--type LedgerUpgrade` pins the interpretation. Votes nested in a
 
 `fieldNotes` is the same idea for anything that is not an amount — a hint
 attached to a field rendered alongside it. `LedgerVersion: 22` becomes
-`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N`.
-Feature files register notes from `init`:
+`protocol 22`, and `LiveUntilLedgerSeq` becomes `live through ledger N` plus
+an estimated close date (see the state archival section). Feature files
+register notes from `init`:
 
 ```go
 func init() {
@@ -596,6 +815,32 @@ The rest of `explain.go` uses the concrete SDK types, because
 `Preconditions`, `IsFeeBump`) that already normalise across v0, v1 and fee-bump
 envelopes. Using them is both clearer and more correct than re-deriving that
 logic from the tree.
+
+### Deepening failures with the operation body
+
+[`reason.go`](../pkg/lens/reason.go) explains every result code on its own.
+Some failures deserve more. When an envelope is paired with its result,
+`attachResult` hands each failed operation's reason to
+`deepenOperationFailure`, which rewrites only the summary and hint for codes
+whose cause is provable from the operation's own parameters:
+
+- **`set_options`**: which threshold weight exceeded 255, which flag bit is
+  both set and cleared, which unrecognised bits were submitted, whether the
+  signer is the source account itself (resolved through any operation-level
+  source override), and whether a new signer subentry outran the account's
+  reserve. Every condition mirrors stellar-core's `doCheckValid`, which checks
+  them from the operation body alone.
+- **`liquidity_pool_deposit` / `liquidity_pool_withdraw`**: slippage against
+  the accepted price window (flagging an exact-ratio window and amounts that
+  already sit outside it), which deposit parameter is malformed, and how the
+  requested amounts map to `underfunded`, `pool_full`, `line_full` and
+  `under_minimum`.
+
+It never touches `Code` or `Constant`, never invents ledger state, and a code
+it cannot pin down keeps the generic per-code text — a result explained
+without its envelope produces the same explanations as before. All analysis is
+pure arithmetic on supplied XDR (exact `big.Int` for price comparisons): no
+network calls, deterministic output.
 
 ## Reason lookup table (ReasonByCode)
 
@@ -752,6 +997,59 @@ transaction's. Fixing the wrong half wastes a rebuild.
 Verified against the canonical `tx_failed` (inner failure), `tx_soroban`
 (inner success) and `tx_success` (non-fee-bump) fixtures.
 
+## Claimable-balance predicate failures
+
+`claim_claimable_balance_cannot_claim` means at least one claimant's
+`ClaimPredicate` evaluated false at the ledger close time. Predicates may nest
+absolute and relative time checks under `and`, `or` and `not`.
+
+[`claimable_explain.go`](../pkg/lens/claimable_explain.go) evaluates that tree
+locally through `DiagnoseClaimablePredicate`. The caller supplies both the
+current ledger close time and the ledger close time when the balance was
+created; the entry itself does not carry the latter. Relative predicates use
+`created close time + relBefore`, with the protocol's strict less-than
+comparison. Malformed unions and excessively deep trees return classified
+errors instead of panicking.
+
+Tests evaluate the predicate from the canonical `claimable_balance_entry`
+fixture and construct nested predicates for boolean and time-boundary cases.
+
+## Soroban resource-limit rejection
+
+[`resource_explain.go`](../pkg/lens/resource_explain.go) inspects a
+`TransactionResult` with `DiagnoseResourceFailure`, distinguishing invalid
+resource declarations (`tx_soroban_invalid`), host resource-limit exhaustion,
+and insufficient refundable fees. CPU and memory counters are not present in
+those XDR result codes; when simulation provides used/limit values,
+`DiagnoseSimulationResponse` remains the API that reports the exact binding
+resource. The result explainer reads only supplied XDR and returns no diagnosis
+for unrelated result codes.
+
+## Sponsorship authorization and revocation
+
+[`sponsorship_explain.go`](../pkg/lens/sponsorship_explain.go) combines
+sponsorship operation result codes with the transaction's begin/end/revoke
+operations. `DiagnoseSponsorship` identifies a failing operation and flags
+unmatched or overlapping begin/end instructions, while retaining operation
+indexes and sources for correlation. It does not infer ledger sponsorship
+ownership without ledger-entry input; revoke ownership and reserve errors are
+reported from their exact XDR result codes.
+
+## Protocol-upgrade ledger boundaries
+
+[`upgrade_explain.go`](../pkg/lens/upgrade_explain.go) compares adjacent
+`LedgerHeader` values and a transaction result. `DiagnoseProtocolUpgrade`
+returns no diagnosis unless the protocol version changes and the transaction
+fails. Unsupported-feature result codes are marked as likely related; other
+codes are reported as coincident with, but not specifically implicating, the
+upgrade. This is a deterministic correlation, not proof of causation, and
+requires no ledger or RPC lookup.
+
+These four context-dependent diagnosers are library APIs. The existing
+`lens explain` flags and output contracts are unchanged; use `lens explain`
+for the standard result-code report, and call the library helpers when the
+relevant ledger context or claim-balance creation time is already available.
+
 ## Testing approach
 
 Fixtures in `testdata/` are **real captured mainnet transactions**, with
@@ -787,6 +1085,27 @@ ledger-header fixture and re-encodes its `LedgerVersion` as Protocols 20–23.
 Those cases deliberately keep the header's XDR shape and all other fields
 constant: they compare decoder cost across the version values, not historical
 wire-schema changes. No benchmark or library decode path makes network calls.
+
+Structural-diff benchmarks live in
+[`pkg/lens/diff_bench_test.go`](../pkg/lens/diff_bench_test.go). They cover
+deeply nested trees, the worst-case single change at the deepest leaf, wide
+lists with and without the opt-in LCS aligner, real ledger-close envelopes, and
+the redaction prepass:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'BenchmarkDiff' -benchmem
+```
+
+The same package verifies the encoder contract as a property: `roundtrip_test.go`
+runs every checked-in fixture through both `RoundTripBinary` and
+`RoundTripJSON`, and `RoundTripRegistry` synthesizes a minimal value for every
+registered type. Cases that cannot be represented by the stable JSON contract
+are asserted as skipped with a reason rather than silently passed. Run the
+property suite with the regular tests:
+
+```sh
+go test ./pkg/lens -run 'RoundTrip' -v
+```
 
 The suite deliberately targets properties that would break the tool if violated:
 

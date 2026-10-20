@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
 
@@ -352,5 +354,742 @@ func TestExplainCodeNeverRestatesTheConstant(t *testing.T) {
 		if strings.EqualFold(strings.ReplaceAll(got.Summary, " ", ""), got.Code) {
 			t.Errorf("ExplainCode(%q).Summary merely restates the code", c)
 		}
+	}
+}
+
+// ---- Context-aware failure deepening (issues #116 and #117) -------------
+//
+// When an envelope is paired with its result, a failed operation's
+// explanation is deepened with the operation's own parameters. The helpers
+// below build a one-operation transaction and its failing result so each
+// deepened code can be driven from the operation body alone.
+
+// explainTestKey builds a deterministic 32-byte key for test accounts and
+// signers.
+func explainTestKey(seed byte) *xdr.Uint256 {
+	var k xdr.Uint256
+	for i := range k {
+		k[i] = seed
+	}
+	return &k
+}
+
+func explainTestAccount(seed byte) xdr.AccountId {
+	return xdr.AccountId{
+		Type:    xdr.PublicKeyTypePublicKeyTypeEd25519,
+		Ed25519: explainTestKey(seed),
+	}
+}
+
+func optUint32(v uint32) *xdr.Uint32 {
+	u := xdr.Uint32(v)
+	return &u
+}
+
+func mustDecodeForExplain(t *testing.T, payload, typ string) *lens.Value {
+	t.Helper()
+	v, err := lens.DecodeAs(payload, typ)
+	if err != nil {
+		t.Fatalf("DecodeAs(%s) error = %v", typ, err)
+	}
+	return v
+}
+
+// explainSingleOperation builds a one-operation transaction whose only
+// operation carries body, pairs it with a tx_failed result carrying inner as
+// the operation result, and returns the operation's Reason.
+func explainSingleOperation(t *testing.T, body xdr.OperationBody, inner xdr.OperationResultTr) lens.Reason {
+	t.Helper()
+	return explainPreparedOperation(t, xdr.Operation{Body: body}, inner)
+}
+
+// explainPreparedOperation is explainSingleOperation for a fully assembled
+// operation, so tests can also exercise an operation-level source override.
+func explainPreparedOperation(t *testing.T, op xdr.Operation, inner xdr.OperationResultTr) lens.Reason {
+	t.Helper()
+	source := explainTestAccount(0xA1)
+	env := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MuxedAccount{
+					Type:    xdr.CryptoKeyTypeKeyTypeEd25519,
+					Ed25519: source.Ed25519,
+				},
+				Fee:        100,
+				SeqNum:     4242,
+				Operations: []xdr.Operation{op},
+			},
+		},
+	}
+	opResults := []xdr.OperationResult{{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr:   &inner,
+	}}
+	res := xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxFailed,
+			Results: &opResults,
+		},
+	}
+
+	envVal := mustDecodeForExplain(t, mustMarshal(t, env), "TransactionEnvelope")
+	resVal := mustDecodeForExplain(t, mustMarshal(t, res), "TransactionResult")
+	summary, err := lens.ExplainPair(envVal, resVal)
+	if err != nil {
+		t.Fatalf("ExplainPair() error = %v", err)
+	}
+	if summary.Outcome == nil || summary.Outcome.Success {
+		t.Fatalf("Outcome = %+v, want a failed outcome", summary.Outcome)
+	}
+	if len(summary.Operations) != 1 || summary.Operations[0].Result == nil {
+		t.Fatalf("Operations = %+v, want one operation carrying a result", summary.Operations)
+	}
+	return *summary.Operations[0].Result
+}
+
+// assertReasonContains fails unless every want substring appears in the
+// summary (and the hint, when checkHint is set).
+func assertReasonContains(t *testing.T, r lens.Reason, checkHint bool, wants ...string) {
+	t.Helper()
+	for _, w := range wants {
+		if !strings.Contains(r.Summary, w) {
+			t.Errorf("Summary = %q, want it to contain %q", r.Summary, w)
+		}
+		if checkHint && !strings.Contains(r.Hint, w) {
+			t.Errorf("Hint = %q, want it to contain %q", r.Hint, w)
+		}
+	}
+}
+
+// TestExplainPairDeepensSetOptionsFailures covers issue #117: each set_options
+// failure mode is diagnosed from the operation body, not just named.
+func TestExplainPairDeepensSetOptionsFailures(t *testing.T) {
+	t.Parallel()
+
+	source := explainTestAccount(0xA1)
+	distinctSigner := xdr.Signer{
+		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypeEd25519, Ed25519: explainTestKey(0x2B)},
+		Weight: 1,
+	}
+	preAuthSigner := xdr.Signer{
+		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypePreAuthTx, PreAuthTx: explainTestKey(0x3C)},
+		Weight: 1,
+	}
+	hashXSigner := xdr.Signer{
+		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypeHashX, HashX: explainTestKey(0x4D)},
+		Weight: 1,
+	}
+	payloadSigner := xdr.Signer{
+		Key: xdr.SignerKey{
+			Type: xdr.SignerKeyTypeSignerKeyTypeEd25519SignedPayload,
+			Ed25519SignedPayload: &xdr.SignerKeyEd25519SignedPayload{
+				Ed25519: *explainTestKey(0x5E),
+				Payload: []byte("payload"),
+			},
+		},
+		Weight: 1,
+	}
+	selfSigner := xdr.Signer{
+		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypeEd25519, Ed25519: source.Ed25519},
+		Weight: 1,
+	}
+
+	tests := []struct {
+		name       string
+		op         xdr.SetOptionsOp
+		code       xdr.SetOptionsResultCode
+		wantCode   string
+		wantInSumm []string
+	}{
+		{
+			name:       "threshold out of range names the offending field",
+			op:         xdr.SetOptionsOp{MasterWeight: optUint32(300)},
+			code:       xdr.SetOptionsResultCodeSetOptionsThresholdOutOfRange,
+			wantCode:   "set_options_threshold_out_of_range",
+			wantInSumm: []string{"master weight 300", "0–255"},
+		},
+		{
+			name: "bad flags names the contradictory bits",
+			op: xdr.SetOptionsOp{
+				SetFlags:   optUint32(0x2),
+				ClearFlags: optUint32(0x2),
+			},
+			code:       xdr.SetOptionsResultCodeSetOptionsBadFlags,
+			wantCode:   "set_options_bad_flags",
+			wantInSumm: []string{"sets and clears", "auth_revocable (0x2)"},
+		},
+		{
+			name:       "unknown flag names the unrecognised bits",
+			op:         xdr.SetOptionsOp{SetFlags: optUint32(0x20)},
+			code:       xdr.SetOptionsResultCodeSetOptionsUnknownFlag,
+			wantCode:   "set_options_unknown_flag",
+			wantInSumm: []string{"0x20", "auth_clawback_enabled (0x8)"},
+		},
+		{
+			name:       "clearing the immutable flag is impossible",
+			op:         xdr.SetOptionsOp{ClearFlags: optUint32(0x4)},
+			code:       xdr.SetOptionsResultCodeSetOptionsCantChange,
+			wantCode:   "set_options_cant_change",
+			wantInSumm: []string{"auth-immutable", "permanent"},
+		},
+		{
+			name: "changing flags on an immutable account",
+			op: xdr.SetOptionsOp{
+				SetFlags: optUint32(0x1),
+			},
+			code:       xdr.SetOptionsResultCodeSetOptionsCantChange,
+			wantCode:   "set_options_cant_change",
+			wantInSumm: []string{"auth_required (0x1)", "auth-immutable set", "locks"},
+		},
+		{
+			name:       "low reserve points at the new signer subentry",
+			op:         xdr.SetOptionsOp{Signer: &distinctSigner},
+			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
+			wantCode:   "set_options_low_reserve",
+			wantInSumm: []string{"signer", "base reserve"},
+		},
+		{
+			name:       "low reserve labels a pre-auth signer",
+			op:         xdr.SetOptionsOp{Signer: &preAuthSigner},
+			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
+			wantCode:   "set_options_low_reserve",
+			wantInSumm: []string{"pre-auth signer"},
+		},
+		{
+			name:       "low reserve labels a hash-x signer",
+			op:         xdr.SetOptionsOp{Signer: &hashXSigner},
+			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
+			wantCode:   "set_options_low_reserve",
+			wantInSumm: []string{"hash-x signer"},
+		},
+		{
+			name:       "low reserve labels a signed-payload signer",
+			op:         xdr.SetOptionsOp{Signer: &payloadSigner},
+			code:       xdr.SetOptionsResultCodeSetOptionsLowReserve,
+			wantCode:   "set_options_low_reserve",
+			wantInSumm: []string{"signed-payload signer"},
+		},
+		{
+			name:       "bad signer detects the account signing for itself",
+			op:         xdr.SetOptionsOp{Signer: &selfSigner},
+			code:       xdr.SetOptionsResultCodeSetOptionsBadSigner,
+			wantCode:   "set_options_bad_signer",
+			wantInSumm: []string{"itself"},
+		},
+		{
+			name:       "bad signer flags an oversized weight",
+			op:         xdr.SetOptionsOp{Signer: &xdr.Signer{Key: distinctSigner.Key, Weight: 300}},
+			code:       xdr.SetOptionsResultCodeSetOptionsBadSigner,
+			wantCode:   "set_options_bad_signer",
+			wantInSumm: []string{"signer weight 300", "0–255"},
+		},
+		{
+			name:       "too many signers explains the five-signer cap",
+			op:         xdr.SetOptionsOp{Signer: &distinctSigner},
+			code:       xdr.SetOptionsResultCodeSetOptionsTooManySigners,
+			wantCode:   "set_options_too_many_signers",
+			wantInSumm: []string{"maximum of five signers"},
+		},
+		{
+			name:       "invalid home domain quotes the value",
+			op:         xdr.SetOptionsOp{HomeDomain: string32Ptr("not a domain")},
+			code:       xdr.SetOptionsResultCodeSetOptionsInvalidHomeDomain,
+			wantCode:   "set_options_invalid_home_domain",
+			wantInSumm: []string{`"not a domain"`},
+		},
+		{
+			name: "auth revocable required explains the clawback pairing",
+			op: xdr.SetOptionsOp{
+				SetFlags: optUint32(0x8),
+			},
+			code:       xdr.SetOptionsResultCodeSetOptionsAuthRevocableRequired,
+			wantCode:   "set_options_auth_revocable_required",
+			wantInSumm: []string{"auth-clawback", "auth-revocable"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := explainSingleOperation(t,
+				xdr.OperationBody{Type: xdr.OperationTypeSetOptions, SetOptionsOp: &tc.op},
+				xdr.OperationResultTr{
+					Type:             xdr.OperationTypeSetOptions,
+					SetOptionsResult: &xdr.SetOptionsResult{Code: tc.code},
+				})
+
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			if got.Hint == "" {
+				t.Error("Hint is empty, want actionable advice for this failure")
+			}
+		})
+	}
+}
+
+func string32Ptr(s string) *xdr.String32 {
+	d := xdr.String32(s)
+	return &d
+}
+
+// TestExplainPairUsesOperationSourceOverride ensures the self-signer check
+// resolves the effective source through the operation-level override, not
+// just the transaction source.
+func TestExplainPairUsesOperationSourceOverride(t *testing.T) {
+	t.Parallel()
+
+	override := explainTestAccount(0xB2)
+	selfSigner := xdr.Signer{
+		Key:    xdr.SignerKey{Type: xdr.SignerKeyTypeSignerKeyTypeEd25519, Ed25519: override.Ed25519},
+		Weight: 1,
+	}
+	got := explainPreparedOperation(t, xdr.Operation{
+		SourceAccount: &xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: override.Ed25519},
+		Body: xdr.OperationBody{
+			Type:         xdr.OperationTypeSetOptions,
+			SetOptionsOp: &xdr.SetOptionsOp{Signer: &selfSigner},
+		},
+	}, xdr.OperationResultTr{
+		Type:             xdr.OperationTypeSetOptions,
+		SetOptionsResult: &xdr.SetOptionsResult{Code: xdr.SetOptionsResultCodeSetOptionsBadSigner},
+	})
+	if got.Code != "set_options_bad_signer" {
+		t.Errorf("Code = %q, want %q", got.Code, "set_options_bad_signer")
+	}
+	assertReasonContains(t, got, false, "itself")
+}
+
+var (
+	testPoolID = xdr.PoolId{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+		17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}
+)
+
+// TestExplainPairDeepensLiquidityPoolDepositFailures covers issue #116: each
+// deposit failure mode is diagnosed from the operation's own amounts and
+// price bounds.
+func TestExplainPairDeepensLiquidityPoolDepositFailures(t *testing.T) {
+	t.Parallel()
+
+	validBounds := xdr.LiquidityPoolDepositOp{
+		LiquidityPoolId: testPoolID,
+		MaxAmountA:      100000000, // 10 XLM
+		MaxAmountB:      200000000, // 20 units of the other asset
+		MinPrice:        xdr.Price{N: 1, D: 10},
+		MaxPrice:        xdr.Price{N: 3, D: 10},
+	}
+
+	tests := []struct {
+		name       string
+		op         xdr.LiquidityPoolDepositOp
+		code       xdr.LiquidityPoolDepositResultCode
+		wantCode   string
+		wantInSumm []string
+		wantInHint []string
+	}{
+		{
+			name:       "bad price diagnoses slippage against the window",
+			op:         validBounds,
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositBadPrice,
+			wantCode:   "liquidity_pool_deposit_bad_price",
+			wantInSumm: []string{"slippage", "1/10", "3/10"},
+		},
+		{
+			name: "bad price flags an exact-ratio window",
+			op: xdr.LiquidityPoolDepositOp{
+				LiquidityPoolId: testPoolID,
+				MaxAmountA:      100000000,
+				MaxAmountB:      100000000,
+				MinPrice:        xdr.Price{N: 1, D: 1},
+				MaxPrice:        xdr.Price{N: 1, D: 1},
+			},
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositBadPrice,
+			wantCode:   "liquidity_pool_deposit_bad_price",
+			wantInSumm: []string{"slippage", "1/1 and 1/1"},
+			wantInHint: []string{"exact ratio", "min == max"},
+		},
+		{
+			name: "bad price flags amounts outside the window",
+			op: xdr.LiquidityPoolDepositOp{
+				LiquidityPoolId: testPoolID,
+				MaxAmountA:      100000000,
+				MaxAmountB:      100000000, // implied 1:1, window is 2/10..3/10
+				MinPrice:        xdr.Price{N: 2, D: 10},
+				MaxPrice:        xdr.Price{N: 3, D: 10},
+			},
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositBadPrice,
+			wantCode:   "liquidity_pool_deposit_bad_price",
+			wantInSumm: []string{"falls above the window"},
+		},
+		{
+			name:       "underfunded names both deposit amounts",
+			op:         validBounds,
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositUnderfunded,
+			wantCode:   "liquidity_pool_deposit_underfunded",
+			wantInSumm: []string{"10.0000000", "20.0000000", "spendable"},
+		},
+		{
+			name:       "pool full explains the protocol cap",
+			op:         validBounds,
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositPoolFull,
+			wantCode:   "liquidity_pool_deposit_pool_full",
+			wantInSumm: []string{"cap", "protocol maximum"},
+		},
+		{
+			name:       "line full points at the pool-share trustline",
+			op:         validBounds,
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositLineFull,
+			wantCode:   "liquidity_pool_deposit_line_full",
+			wantInSumm: []string{"pool-share trustline limit"},
+		},
+		{
+			name:       "no trust points at change_trust",
+			op:         validBounds,
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositNoTrust,
+			wantCode:   "liquidity_pool_deposit_no_trust",
+			wantInSumm: []string{"pool-share trustline", "01020304…1f20"},
+			wantInHint: []string{"change_trust"},
+		},
+		{
+			name:       "not authorized blames the issuer",
+			op:         validBounds,
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositNotAuthorized,
+			wantCode:   "liquidity_pool_deposit_not_authorized",
+			wantInSumm: []string{"issuer", "authorised"},
+		},
+		{
+			name:       "frozen names the frozen trustline",
+			op:         validBounds,
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositTrustlineFrozen,
+			wantCode:   "liquidity_pool_deposit_trustline_frozen",
+			wantInSumm: []string{"frozen"},
+		},
+		{
+			name:       "malformed names a zero max amount A",
+			op:         xdr.LiquidityPoolDepositOp{LiquidityPoolId: testPoolID, MaxAmountB: 1, MinPrice: xdr.Price{N: 1, D: 1}, MaxPrice: xdr.Price{N: 1, D: 1}},
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositMalformed,
+			wantCode:   "liquidity_pool_deposit_malformed",
+			wantInSumm: []string{"maxAmountA", "positive"},
+		},
+		{
+			name:       "malformed names a zero max amount B",
+			op:         xdr.LiquidityPoolDepositOp{LiquidityPoolId: testPoolID, MaxAmountA: 1, MinPrice: xdr.Price{N: 1, D: 1}, MaxPrice: xdr.Price{N: 1, D: 1}},
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositMalformed,
+			wantCode:   "liquidity_pool_deposit_malformed",
+			wantInSumm: []string{"maxAmountB", "positive"},
+		},
+		{
+			name: "malformed names a non-positive min price",
+			op: xdr.LiquidityPoolDepositOp{
+				LiquidityPoolId: testPoolID,
+				MaxAmountA:      1,
+				MaxAmountB:      1,
+				MinPrice:        xdr.Price{N: 0, D: 1},
+				MaxPrice:        xdr.Price{N: 1, D: 1},
+			},
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositMalformed,
+			wantCode:   "liquidity_pool_deposit_malformed",
+			wantInSumm: []string{"minPrice 0/1", "strictly positive"},
+		},
+		{
+			name: "malformed names a non-positive max price",
+			op: xdr.LiquidityPoolDepositOp{
+				LiquidityPoolId: testPoolID,
+				MaxAmountA:      1,
+				MaxAmountB:      1,
+				MinPrice:        xdr.Price{N: 1, D: 1},
+				MaxPrice:        xdr.Price{N: 1, D: 0},
+			},
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositMalformed,
+			wantCode:   "liquidity_pool_deposit_malformed",
+			wantInSumm: []string{"maxPrice 1/0", "strictly positive"},
+		},
+		{
+			name: "malformed names an empty price window",
+			op: xdr.LiquidityPoolDepositOp{
+				LiquidityPoolId: testPoolID,
+				MaxAmountA:      1,
+				MaxAmountB:      1,
+				MinPrice:        xdr.Price{N: 3, D: 10},
+				MaxPrice:        xdr.Price{N: 2, D: 10},
+			},
+			code:       xdr.LiquidityPoolDepositResultCodeLiquidityPoolDepositMalformed,
+			wantCode:   "liquidity_pool_deposit_malformed",
+			wantInSumm: []string{"3/10 exceeds", "empty price window"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			op := tc.op
+			got := explainSingleOperation(t,
+				xdr.OperationBody{Type: xdr.OperationTypeLiquidityPoolDeposit, LiquidityPoolDepositOp: &op},
+				xdr.OperationResultTr{
+					Type:                       xdr.OperationTypeLiquidityPoolDeposit,
+					LiquidityPoolDepositResult: &xdr.LiquidityPoolDepositResult{Code: tc.code},
+				})
+
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			if len(tc.wantInHint) > 0 {
+				for _, w := range tc.wantInHint {
+					if !strings.Contains(got.Hint, w) {
+						t.Errorf("Hint = %q, want it to contain %q", got.Hint, w)
+					}
+				}
+			}
+			if got.Hint == "" {
+				t.Error("Hint is empty, want actionable advice for this failure")
+			}
+		})
+	}
+}
+
+// TestExplainPairDeepensLiquidityPoolWithdrawFailures covers issue #116 for
+// the withdraw side: share burn and minimum-return bounds drive the diagnosis.
+func TestExplainPairDeepensLiquidityPoolWithdrawFailures(t *testing.T) {
+	t.Parallel()
+
+	valid := xdr.LiquidityPoolWithdrawOp{
+		LiquidityPoolId: testPoolID,
+		Amount:          100000000,
+		MinAmountA:      5000000,
+		MinAmountB:      7000000,
+	}
+
+	tests := []struct {
+		name       string
+		op         xdr.LiquidityPoolWithdrawOp
+		code       xdr.LiquidityPoolWithdrawResultCode
+		wantCode   string
+		wantInSumm []string
+	}{
+		{
+			name:       "underfunded names the share burn",
+			op:         valid,
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawUnderfunded,
+			wantCode:   "liquidity_pool_withdraw_underfunded",
+			wantInSumm: []string{"10.0000000", "pool shares", "liabilities"},
+		},
+		{
+			name:       "under minimum diagnoses slippage and names the minimums",
+			op:         valid,
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawUnderMinimum,
+			wantCode:   "liquidity_pool_withdraw_under_minimum",
+			wantInSumm: []string{"slippage", "0.5000000", "0.7000000"},
+		},
+		{
+			name:       "line full points at trustline capacity",
+			op:         valid,
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawLineFull,
+			wantCode:   "liquidity_pool_withdraw_line_full",
+			wantInSumm: []string{"trustline"},
+		},
+		{
+			name:       "no trust points at the missing pool-share trustline",
+			op:         valid,
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawNoTrust,
+			wantCode:   "liquidity_pool_withdraw_no_trust",
+			wantInSumm: []string{"pool-share trustline", "01020304…1f20"},
+		},
+		{
+			name:       "frozen names the frozen trustline",
+			op:         valid,
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawTrustlineFrozen,
+			wantCode:   "liquidity_pool_withdraw_trustline_frozen",
+			wantInSumm: []string{"frozen"},
+		},
+		{
+			name:       "malformed names a non-positive share burn",
+			op:         xdr.LiquidityPoolWithdrawOp{LiquidityPoolId: testPoolID, MinAmountA: 1, MinAmountB: 1},
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawMalformed,
+			wantCode:   "liquidity_pool_withdraw_malformed",
+			wantInSumm: []string{"pool shares", "positive"},
+		},
+		{
+			name:       "malformed names a negative minAmountA",
+			op:         xdr.LiquidityPoolWithdrawOp{LiquidityPoolId: testPoolID, Amount: 1, MinAmountA: -1, MinAmountB: 1},
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawMalformed,
+			wantCode:   "liquidity_pool_withdraw_malformed",
+			wantInSumm: []string{"minAmountA", "negative"},
+		},
+		{
+			name:       "malformed names a negative minAmountB",
+			op:         xdr.LiquidityPoolWithdrawOp{LiquidityPoolId: testPoolID, Amount: 1, MinAmountA: 1, MinAmountB: -1},
+			code:       xdr.LiquidityPoolWithdrawResultCodeLiquidityPoolWithdrawMalformed,
+			wantCode:   "liquidity_pool_withdraw_malformed",
+			wantInSumm: []string{"minAmountB", "negative"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			op := tc.op
+			got := explainSingleOperation(t,
+				xdr.OperationBody{Type: xdr.OperationTypeLiquidityPoolWithdraw, LiquidityPoolWithdrawOp: &op},
+				xdr.OperationResultTr{
+					Type:                        xdr.OperationTypeLiquidityPoolWithdraw,
+					LiquidityPoolWithdrawResult: &xdr.LiquidityPoolWithdrawResult{Code: tc.code},
+				})
+
+			if got.Code != tc.wantCode {
+				t.Errorf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			assertReasonContains(t, got, false, tc.wantInSumm...)
+			if got.Hint == "" {
+				t.Error("Hint is empty, want actionable advice for this failure")
+			}
+		})
+	}
+}
+
+// TestExplainResultWithoutEnvelopeKeepsGenericReason guards the invariant that
+// deepening only happens where the operation body is actually available: a
+// result explained on its own must fall back to the generic per-code text.
+func TestExplainResultWithoutEnvelopeKeepsGenericReason(t *testing.T) {
+	t.Parallel()
+
+	opResults := []xdr.OperationResult{{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypeSetOptions,
+			SetOptionsResult: &xdr.SetOptionsResult{
+				Code: xdr.SetOptionsResultCodeSetOptionsThresholdOutOfRange,
+			},
+		},
+	}}
+	res := xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxFailed,
+			Results: &opResults,
+		},
+	}
+
+	got, err := lens.Explain(mustDecodeForExplain(t, mustMarshal(t, res), "TransactionResult"))
+	if err != nil {
+		t.Fatalf("Explain(result-only) error = %v", err)
+	}
+	if got.Outcome == nil || len(got.Operations) != 1 || got.Operations[0].Result == nil {
+		t.Fatalf("summary = %+v, want one operation carrying a result", got)
+	}
+	opReason := *got.Operations[0].Result
+	generic := lens.ExplainCode("SetOptionsResultCodeSetOptionsThresholdOutOfRange")
+	if opReason.Summary != generic.Summary {
+		t.Errorf("Summary = %q, want the generic %q without an operation body", opReason.Summary, generic.Summary)
+	}
+}
+
+// TestExplainPairLeavesUnrelatedCodesGeneric keeps the deepening tightly
+// scoped: a set_options failure whose cause is not provable from the
+// operation body (here, an inflation destination that does not exist) keeps
+// the shared explanation.
+func TestExplainPairLeavesUnrelatedCodesGeneric(t *testing.T) {
+	t.Parallel()
+
+	op := xdr.SetOptionsOp{InflationDest: &xdr.AccountId{
+		Type:    xdr.PublicKeyTypePublicKeyTypeEd25519,
+		Ed25519: explainTestKey(0x9E),
+	}}
+	got := explainSingleOperation(t,
+		xdr.OperationBody{Type: xdr.OperationTypeSetOptions, SetOptionsOp: &op},
+		xdr.OperationResultTr{
+			Type:             xdr.OperationTypeSetOptions,
+			SetOptionsResult: &xdr.SetOptionsResult{Code: xdr.SetOptionsResultCodeSetOptionsInvalidInflation},
+		})
+	generic := lens.ExplainCode("SetOptionsResultCodeSetOptionsInvalidInflation")
+	if got.Summary != generic.Summary || got.Hint != generic.Hint {
+		t.Errorf("Reason = %+v, want the generic %+v for a code with nothing to deepen", got, generic)
+	}
+}
+
+// TestDescribeLiquidityPoolOperations pins the one-line operation details that
+// feed the failure headline: pool id and the amounts involved.
+func TestDescribeLiquidityPoolOperations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     xdr.OperationBody
+		wantType string
+		wantIn   []string
+	}{
+		{
+			name: "deposit",
+			body: xdr.OperationBody{
+				Type: xdr.OperationTypeLiquidityPoolDeposit,
+				LiquidityPoolDepositOp: &xdr.LiquidityPoolDepositOp{
+					LiquidityPoolId: testPoolID,
+					MaxAmountA:      100000000,
+					MaxAmountB:      200000000,
+					MinPrice:        xdr.Price{N: 1, D: 10},
+					MaxPrice:        xdr.Price{N: 3, D: 10},
+				},
+			},
+			wantType: "liquidity_pool_deposit",
+			wantIn:   []string{"deposit up to", "10.0000000", "20.0000000", "01020304…1f20", "1/10..3/10"},
+		},
+		{
+			name: "withdraw",
+			body: xdr.OperationBody{
+				Type: xdr.OperationTypeLiquidityPoolWithdraw,
+				LiquidityPoolWithdrawOp: &xdr.LiquidityPoolWithdrawOp{
+					LiquidityPoolId: testPoolID,
+					Amount:          100000000,
+					MinAmountA:      5000000,
+					MinAmountB:      7000000,
+				},
+			},
+			wantType: "liquidity_pool_withdraw",
+			wantIn:   []string{"burn 10.0000000 pool shares", "01020304…1f20", "0.5000000", "0.7000000"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			source := explainTestAccount(0xA1)
+			env := xdr.TransactionEnvelope{
+				Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+				V1: &xdr.TransactionV1Envelope{
+					Tx: xdr.Transaction{
+						SourceAccount: xdr.MuxedAccount{
+							Type:    xdr.CryptoKeyTypeKeyTypeEd25519,
+							Ed25519: source.Ed25519,
+						},
+						Fee:        100,
+						SeqNum:     4242,
+						Operations: []xdr.Operation{{Body: tc.body}},
+					},
+				},
+			}
+			got, err := lens.Explain(mustDecodeForExplain(t, mustMarshal(t, env), "TransactionEnvelope"))
+			if err != nil {
+				t.Fatalf("Explain(envelope) error = %v", err)
+			}
+			if len(got.Operations) != 1 {
+				t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+			}
+			op := got.Operations[0]
+			if op.Type != tc.wantType {
+				t.Errorf("Type = %q, want %q", op.Type, tc.wantType)
+			}
+			for _, w := range tc.wantIn {
+				if !strings.Contains(op.Detail, w) {
+					t.Errorf("Detail = %q, want it to contain %q", op.Detail, w)
+				}
+			}
+		})
 	}
 }

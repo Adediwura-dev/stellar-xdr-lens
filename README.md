@@ -121,8 +121,14 @@ Outcome
     → Check the per-operation results: the transaction itself is fine, the failure is inside an operation.
 ```
 
-All 208 protocol result codes have a written explanation. Use `--fail-on-error`
-to exit non-zero when the transaction failed, which makes this usable as a CI gate.
+All 208 protocol result codes have a written explanation. When an envelope is
+paired with its result, `set_options` and liquidity-pool failures are also
+diagnosed from the operation's own parameters: which threshold weight exceeded
+255, which flag bit is contradictory or unrecognised, whether the signer is
+the source account itself, whether the pool's price bounds left any room for
+slippage, and which deposit or withdrawal bound is malformed. Use
+`--fail-on-error` to exit non-zero when the transaction failed, which makes
+this usable as a CI gate.
 
 For a GitHub-flavored Markdown report with transaction details and one row per
 operation, add `--markdown`:
@@ -163,6 +169,24 @@ TransactionEnvelope
 Accounts render as strkey, amounts as XLM, timestamps as RFC 3339, and enums as
 their constant names — not raw byte arrays and integers.
 
+Claimable balances render their predicate trees as boolean expressions instead
+of nested union arms, and the balance id carries its claimant count and asset:
+
+```console
+$ lens decode --type ClaimableBalanceEntry "$BALANCE"
+ClaimableBalanceEntry
+├─ BalanceId: BAAEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQQSBM  3 claimants; asset USDC:GA2J…FHVAW
+├─ Claimants  [3]
+│  ├─ [0]
+│  │  └─ V0
+│  │     ├─ Destination: GAPB7YMUQ6MPQ23PTFDNBZP7HGGTZPI2DT5JJURUOIXNPLGHW2O3WYXZ
+│  │     └─ Predicate: before 2025-01-01T00:00:00Z
+│  └─ [2]
+│     └─ V0
+│        └─ Predicate: (before 2026-01-01T00:00:00Z or unconditional)
+└─ Asset: USDC:GA2J…FHVAW
+```
+
 `lens decode --type ContractDataEntry` decodes Soroban contract data and names
 its storage level. `persistent` and `temporary` come from the wire durability;
 instance storage keeps persistent durability on the wire and is recognised by
@@ -185,7 +209,26 @@ ContractDataEntry
 
 For an instance entry the same fields render as `Key: instance storage key`
 with `Durability: persistent`, which is what separates instance storage from an
-ordinary persistent entry.
+ordinary persistent entry. A contract instance's `Executable` also names its
+implementation — `wasm:<hex>` for a WASM module, `stellar asset contract
+(built-in token)` for the built-in token, and the owner plus tag for Protocol
+23 external references — instead of stopping at a union discriminant.
+
+`lens decode --type LiquidityPoolEntry` names the market a constant product
+pool trades and renders its share supply as pool share tokens, not lumens:
+
+```console
+$ lens decode --type LiquidityPoolEntry "$POOL"
+LiquidityPoolEntry
+├─ LiquidityPoolId: 41…41  constant product pool: USDC:GA2J… / native @ 0.3%
+└─ Body
+   └─ ConstantProduct
+      ├─ Params: USDC:GA2J… / native @ 0.3%
+      ├─ ReserveA: 1000000000000  100000.0000000 (stroops: 1000000000000)
+      ├─ ReserveB: 5000000000000  500000.0000000 (stroops: 5000000000000)
+      ├─ TotalPoolShares: 2000000000000  200000.0000000 pool share tokens (stroops: 2000000000000)
+      └─ PoolSharesTrustLineCount: 150  held by 150 trustlines
+```
 
 A transaction's `LedgerFootprint` is flat on the wire, so `lens decode` also
 groups its keys by storage level after the untouched `ReadOnly` and `ReadWrite`
@@ -319,6 +362,109 @@ XDR keys. These options can be combined:
 $ lens diff --align --semantic before.xdr after.xdr
 ```
 
+Three modes compare the values differently rather than printing them
+differently:
+
+```console
+# Signatures and signers are sets, not sequences: reordering them is not a diff
+$ lens diff --unordered-signers before.xdr after.xdr
+
+# Set-theoretic (Venn) difference of two Soroban ledger footprints
+$ lens diff --footprint before.env.xdr after.env.xdr
+
+# Just the statistics: how many changes, of what kind, in which section
+$ lens diff --stats before.xdr after.xdr
+TransactionResult
+6 change(s): 5 modified, 1 removed
+  FeeCharged: 1
+  Result: 5
+```
+
+`--stats` derives everything from an existing diff, so it stays deterministic
+and offline. It has a stable JSON form (`--stats --json`) with the total, the
+per-kind counts, the per-section breakdown and the deepest changed path.
+
+`--include-paths` and `--exclude-paths` narrow which changed paths are reported,
+which is how a rebuilt envelope's sequence number and signatures stop drowning
+out the change you care about. A pattern is a dot-separated field path; `*` and
+`?` are glob metacharacters within a segment, `**` spans segments, and a pattern
+also matches everything beneath it. Excludes win over includes.
+
+```console
+# Ignore the noise of a rebuild and report only what really changed
+$ lens diff --exclude-paths Signatures,SeqNum before.xdr after.xdr
+
+# Report only the top-level result code and the fee charged
+$ lens diff --include-paths Result.Code,FeeCharged before.res after.res
+```
+
+`--redact` normalizes the dynamic cryptographic values that a rebuild cannot
+reproduce — hashes, signatures and derived identifiers — before comparing, so
+two values that differ only in those fields compare equal. `--redact` accepts
+`hashes`, `signatures`, `identifiers` or `all` and is repeatable;
+`--redact-fields` adds named fields and accepts globs. The paths that were
+normalized are always reported, both in text and in the JSON `redacted` field.
+Redaction is rejected with `--footprint`, which compares sets rather than
+hydrated values.
+
+```console
+# Treat a rebuilt envelope's hashes and signatures as equal
+$ lens diff --redact hashes,signatures before.env.xdr after.env.xdr
+
+# Add a specific field to the redaction set (globs allowed)
+$ lens diff --redact all --redact-fields PrevHash,LedgerHash* a.xdr b.xdr
+```
+
+Three formats render the difference for other tools. Each is mutually exclusive
+with the others and with `--json`/`--stats`.
+
+```console
+# An RFC 6902 JSON Patch of the difference, ready for any JSON Patch consumer
+$ lens diff --json-patch before.xdr after.xdr
+[
+  {"op": "replace", "path": "/Result/Code", "value": "TransactionResultCodeTxFailed"},
+  {"op": "remove", "path": "/Result/InnerResultPair/Result/Result/Results/0/Tr/InvokeHostFunctionResult/Success"}
+]
+
+# A standard unified diff, suitable for posting as a pull-request review comment
+$ lens diff --unified before.xdr after.xdr
+--- a/TransactionResult
++++ b/TransactionResult
+@@ -1,6 +1,6 @@
+ . = TransactionResult
+-FeeCharged = 35438 (0.0035438 (stroops: 35438))
++FeeCharged = 13355 (0.0013355 (stroops: 13355))
+
+# A colourised two-column terminal view, removed on the left, added on the right
+$ lens diff --side-by-side before.xdr after.xdr
+```
+
+Use `--context N` to bound the context lines for `--unified` and `--side-by-side`
+(default 3), and `--side-by-side-width N` to set the total column width.
+
+### `lens result-diff` — align an envelope with its result
+
+`lens diff` compares like with like. `result-diff` compares a transaction with
+the result it produced, pairing each operation with the operation result at the
+same index and naming every place they disagree:
+
+```console
+$ lens result-diff envelope.xdr result.xdr
+tx_fee_bump_inner_failed
+  The fee-bump wrapper was valid, but the inner transaction it paid for failed.
+  inner: tx_failed
+Operations (1)
+  ✗ [0] invoke_host_function — call harvest on contract CBGSB…KKY3 with 2 argument(s)
+      invoke_host_function_trapped: The contract trapped: it panicked, or explicitly returned an error.
+      → This is a failure inside the contract itself, not a protocol-level rejection. Run the call through simulation and read the diagnostic events to find the contract-level cause.
+```
+
+It reports mismatched operation and result types, operations that have no result
+of their own, results with no matching operation, and each failed operation's
+result code in plain English. `--json` emits the alignment as camelCase JSON and
+`--exit-code` exits non-zero when the two disagree. Everything is computed from
+the two supplied blobs; no network call is made.
+
 ### `lens meta-diff` — how did ledger balances change?
 
 Transaction metadata carries ledger-entry state and changes. `meta-diff`
@@ -377,6 +523,12 @@ StellarMessage
 Encode simplified JSON specifications into base64-encoded XDR completely offline:
 
 ```console
+# Round-trip a decode document straight back to XDR
+$ lens decode --json "$XDR" | lens encode
+
+# Encode a bare value as any registered type
+$ lens encode --type ContractCodeEntry --file value.json
+
 # Encode a transaction envelope from a JSON template
 $ lens encode --tx '{
   "source_account": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
@@ -399,6 +551,13 @@ $ lens encode --scval '{"vec": [1, 2, 3]}'
 $ lens encode --strict --file tx_template.json
 ```
 
+`lens encode` is symmetric with `lens decode`: it accepts the stable
+`{"type": ..., "value": ...}` document or a raw value with `--type`, and
+reproduces the canonical XDR. The `TransactionEnvelope` and `ScVal` simplified
+dialects remain supported. Enrichments that intentionally collapse structure
+into prose (notably claim predicates) return an error rather than inventing a
+value; pass the original decoded value to the library's `lens.Encode` instead.
+
 ### Piping and scripting
 
 `lens` reads from an argument, a `--file`, or stdin, so it composes:
@@ -414,6 +573,21 @@ lens decode --json "$XDR" | jq -r '.value.V1.Tx.Fee'
 
 # Gate a deployment on the transaction having succeeded
 lens explain "$ENV" --result "$RES" --fail-on-error || exit 1
+
+# Hexadecimal input support
+lens decode --hex "0x00000000..."
+
+# Decode concatenated newline-separated streams (NDJSON or multi-document YAML)
+lens decode --multi -f transactions.txt --json --compact
+
+# Extract and disassemble embedded WebAssembly from Soroban transactions
+lens decode --wasm -f contract_upload.xdr
+
+# Decode into clean YAML
+lens decode --yaml "$XDR"
+
+# Encode YAML specification into XDR
+lens encode -f spec.yaml
 ```
 
 `lens` itself only processes the XDR supplied to it and makes no network calls.
@@ -495,15 +669,45 @@ func main() {
 }
 ```
 
+The diff helpers compose with the same decoded values. `lens.SummarizeDiff`
+turns a `*lens.DiffResult` into counts and per-section statistics;
+`lens.DiffSigners` and `lens.DiffDecoratedSignatures` compare signer and
+signature collections as unordered multisets; `lens.DiffFootprints` computes
+the read-only and read-write set differences of two Soroban footprints; and
+`lens.DiffEnvelopeResult` aligns an envelope with its result, operation by
+operation. None of them fetches or decodes anything beyond the values passed in.
+
+Diff redaction is a library feature as well as a CLI flag. Set
+`DiffOptions.Redaction` to a `lens.RedactionPolicy` (categories `Hashes`,
+`Signatures`, `Identifiers`, plus name globs in `Fields`) and the trees are
+deep-copied and normalized before the walk; the inputs are never mutated, and
+`DiffResult.Redacted` lists the normalized paths.
+
+The encoder and its round-trip verifier are public too. `lens.Encode` reverses
+`lens.Decode`, while `lens.EncodeJSON` and `lens.EncodeJSONAs` accept the
+stable decode document and return canonical base64 XDR. `lens.RoundTripBase64`
+and `lens.RoundTripJSONBase64` verify the `decode -> encode -> decode` property
+for a payload, `lens.RunRoundTripSuite` runs a named case list, and
+`lens.RoundTripRegistry` exercises every registered type. Reports distinguish a
+byte mismatch, a tree mismatch, and a route that is intentionally lossy.
+
+The output formatters are reusable too. `format.NewJSONPatchFormatter` and
+`format.NewUnifiedFormatter` turn a diff into an RFC 6902 patch or a unified
+diff, and `format.NewSideBySideFormatter` produces the two-column view. A
+`lens.NewPathFilter(include, exclude)` narrows any of them to the paths you care
+about, either through `DiffOptions.Filter` before the diff or the formatter's
+filter option afterwards.
+
 See the [API reference](https://pkg.go.dev/github.com/stellar-optics/stellar-xdr-lens/pkg/lens)
 and [docs/architecture.md](docs/architecture.md).
 
 ### Failure diagnostics library
 
-Beyond `ExplainPair`, `pkg/lens` ships four offline diagnostics for the
-failures developers hit most often. All take decoded XDR (or captured RPC
-text) and make no network calls; existing CLI flags and output formats are
-unchanged.
+Beyond `ExplainPair`, `pkg/lens` ships offline diagnostics for common failure
+classes. They take decoded XDR, captured RPC text, and any required ledger
+context from the caller; they make no network calls. Existing `lens explain`
+flags and output formats are unchanged, and these context-dependent
+helpers are available through the Go library.
 
 ```go
 // 1. Insufficient balance: available = balance - selling liabilities - reserve.
@@ -521,7 +725,39 @@ fmt.Println(sim.Kind, sim.Hint) // e.g. missing_footprint + "use the footprint i
 // 4. Fee-bump: did the outer wrapper or the inner transaction fail?
 fb, _ := lens.DiagnoseFeeBump(envelope, result)
 fmt.Println(fb.Stage, fb.Summary) // inner vs outer, with fee-charged accounting.
+
+// 5. Claimable balance: evaluate nested predicates at explicit ledger times.
+claim, _ := lens.DiagnoseClaimablePredicate(predicate, lens.ClaimablePredicateContext{
+  LedgerCloseTime: ledgerCloseTime, BalanceCreatedCloseTime: createdCloseTime,
+})
+fmt.Println(claim.Satisfied, claim.FailedConditions)
+
+// 6. Soroban resources: classify tx_soroban_invalid / host resource failures.
+resource, _ := lens.DiagnoseResourceFailure(transactionResult)
+if resource != nil {
+  fmt.Println(resource.Kind, resource.Hint)
+}
+
+// 7. Sponsorship: correlate operation errors with begin/end/revoke operations.
+sponsor, _ := lens.DiagnoseSponsorship(envelope, transactionResult)
+if sponsor != nil {
+  fmt.Println(sponsor.Summary, sponsor.Conflicts)
+}
+
+// 8. Protocol upgrade: correlate adjacent headers with a failed result.
+upgrade, _ := lens.DiagnoseProtocolUpgrade(previousHeader, currentHeader, transactionResult)
+if upgrade != nil {
+  fmt.Println(upgrade.LikelyUpgradeRelated, upgrade.Summary)
+}
 ```
+
+Claim-predicate evaluation requires the creation-ledger close time because
+that value is not stored in the claimable-balance entry. Protocol-upgrade
+analysis requires adjacent headers and reports correlation rather than proof
+that an upgrade caused a rejection. Resource result codes do not include CPU or
+memory counters; use `DiagnoseSimulationResponse` when simulation reports
+those values. These APIs complement the CLI's standard result-code explanation
+without adding flags or changing its output contract.
 
 ### Error handling
 
@@ -568,6 +804,21 @@ field of the canonical Protocol 22 header fixture (Protocols 20–23), so those
 results compare version values with an otherwise identical XDR structure.
 See [docs/architecture.md](docs/architecture.md#testing-approach) for fixture
 selection and benchmark details.
+
+Structural-diff benchmarks cover deep trees, wide lists (positional and
+aligned), real ledger-close envelopes, and the redaction prepass:
+
+```sh
+go test ./pkg/lens -run '^$' -bench 'BenchmarkDiff' -benchmem
+```
+
+The encoder's contract is checked as a property suite: every fixture is run
+through both the binary and JSON routes, and a synthesized value exercises every
+registered type. Known-lossy renderings are reported as skipped with a reason.
+
+```sh
+go test ./pkg/lens -run 'RoundTrip' -v
+```
 
 ## A note on type detection
 
