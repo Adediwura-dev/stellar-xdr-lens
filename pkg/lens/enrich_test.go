@@ -10,8 +10,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/amount"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
+
+// testCreditAsset builds a classic credit asset for the internal tests, which
+// cannot use the lens_test package helpers.
+func testCreditAsset(t *testing.T, code, issuer string) xdr.Asset {
+	t.Helper()
+	var aid xdr.AccountId
+	if err := aid.SetAddress(issuer); err != nil {
+		t.Fatalf("parsing issuer %s: %v", issuer, err)
+	}
+	var a xdr.Asset
+	if err := a.SetCredit(code, aid); err != nil {
+		t.Fatalf("building asset %s: %v", code, err)
+	}
+	return a
+}
 
 func TestEnrichHash(t *testing.T) {
 	hash := xdr.Hash{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20}
@@ -33,17 +49,134 @@ func TestEnrichHash(t *testing.T) {
 func TestEnrichPoolID(t *testing.T) {
 	poolID := xdr.PoolId{0x0A, 0x0B, 0x0C} // Rest are zero
 
-	display, raw, ok := enrichPoolID(reflect.ValueOf(poolID))
+	note, raw, ok := enrichPoolID(reflect.ValueOf(poolID))
 	if !ok {
 		t.Fatal("enrichPoolID failed")
 	}
 
-	expected := "0a0b0c0000000000000000000000000000000000000000000000000000000000"
-	if display != expected {
-		t.Errorf("got %q, want %q", display, expected)
+	if note != "constant product pool id" {
+		t.Errorf("note = %q, want %q", note, "constant product pool id")
 	}
-	if raw != poolID {
-		t.Errorf("raw value altered")
+	expected := "0a0b0c0000000000000000000000000000000000000000000000000000000000"
+	if raw != expected {
+		t.Errorf("raw = %v, want hex %q", raw, expected)
+	}
+}
+
+func TestEnrichPoolIDRejectsWrongType(t *testing.T) {
+	t.Parallel()
+
+	if _, _, ok := enrichPoolID(reflect.ValueOf("not a pool id")); ok {
+		t.Error("enrichPoolID accepted a non-PoolId value")
+	}
+}
+
+func TestPoolShareBalanceNote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		value    any
+		wantNote string
+		wantOK   bool
+	}{
+		{"shares format as decimal tokens", xdr.Int64(2_000_000_000_000), "200000.0000000 pool share tokens (stroops: 2000000000000)", true},
+		{"fractional shares", xdr.Int64(15_000_000), "1.5000000 pool share tokens (stroops: 15000000)", true},
+		{"zero shares", xdr.Int64(0), "0.0000000 pool share tokens (stroops: 0)", true},
+		{"negative declines", xdr.Int64(-1), "", false},
+		{"wrong type declines", xdr.Uint32(5), "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			note, ok := poolShareBalanceNote(reflect.ValueOf(tc.value))
+			if ok != tc.wantOK || note != tc.wantNote {
+				t.Errorf("poolShareBalanceNote(%v) = (%q, %v), want (%q, %v)",
+					tc.value, note, ok, tc.wantNote, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestPoolSharesTrustLineCountNote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		value    any
+		wantNote string
+		wantOK   bool
+	}{
+		{"plural", xdr.Int64(150), "held by 150 trustlines", true},
+		{"singular", xdr.Int64(1), "held by 1 trustline", true},
+		{"zero", xdr.Int64(0), "held by 0 trustlines", true},
+		{"negative declines", xdr.Int64(-2), "", false},
+		{"wrong type declines", xdr.Uint32(3), "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			note, ok := poolSharesTrustLineCountNote(reflect.ValueOf(tc.value))
+			if ok != tc.wantOK || note != tc.wantNote {
+				t.Errorf("poolSharesTrustLineCountNote(%v) = (%q, %v), want (%q, %v)",
+					tc.value, note, ok, tc.wantNote, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestDecorateLiquidityPoolEntry(t *testing.T) {
+	t.Parallel()
+
+	entry := xdr.LiquidityPoolEntry{
+		LiquidityPoolId: xdr.PoolId{0x41},
+		Body: xdr.LiquidityPoolEntryBody{
+			Type: xdr.LiquidityPoolTypeLiquidityPoolConstantProduct,
+			ConstantProduct: &xdr.LiquidityPoolEntryConstantProduct{
+				Params: xdr.LiquidityPoolConstantProductParameters{
+					AssetA: xdr.MustNewNativeAsset(),
+					AssetB: testCreditAsset(t, "USDC", "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"),
+					Fee:    xdr.Int32(30),
+				},
+			},
+		},
+	}
+	node := buildNode("LiquidityPoolEntry", reflect.ValueOf(entry), 0)
+	if node == nil {
+		t.Fatal("buildNode(LiquidityPoolEntry) returned nil")
+	}
+	id := node.Child("LiquidityPoolId")
+	if id == nil {
+		t.Fatal("LiquidityPoolId child not found")
+	}
+	want := "constant product pool: native / USDC:"
+	if len(id.Note) < len(want) || id.Note[:len(want)] != want {
+		t.Errorf("LiquidityPoolId note = %q, want prefix %q", id.Note, want)
+	}
+	if !strings.Contains(id.Note, "@ 0.3%") {
+		t.Errorf("LiquidityPoolId note = %q, want fee", id.Note)
+	}
+}
+
+func TestDecorateLiquidityPoolEntryLeavesMalformedEntryAlone(t *testing.T) {
+	t.Parallel()
+
+	entry := xdr.LiquidityPoolEntry{
+		LiquidityPoolId: xdr.PoolId{0x41},
+		Body:            xdr.LiquidityPoolEntryBody{Type: xdr.LiquidityPoolTypeLiquidityPoolConstantProduct},
+	}
+	node := buildNode("LiquidityPoolEntry", reflect.ValueOf(entry), 0)
+	if node == nil {
+		t.Fatal("buildNode(LiquidityPoolEntry) returned nil")
+	}
+	id := node.Child("LiquidityPoolId")
+	if id == nil {
+		t.Fatal("LiquidityPoolId child not found")
+	}
+	if id.Note != "constant product pool id" {
+		t.Errorf("LiquidityPoolId note = %q, want the plain pool id note", id.Note)
 	}
 }
 
@@ -79,6 +212,8 @@ func TestDomainEnrichersRejectWrongType(t *testing.T) {
 		"enrichClaimableBalanceID": enrichClaimableBalanceID,
 		"enrichContractID":         enrichContractID,
 		"enrichScAddress":          enrichScAddress,
+		"enrichUpgradeType":        enrichUpgradeType,
+		"enrichLedgerUpgrade":      enrichLedgerUpgrade,
 	}
 	for name, fn := range enrichers {
 		if _, _, ok := fn(wrong); ok {
@@ -116,6 +251,101 @@ func TestTrustLineFlagNote(t *testing.T) {
 	}
 }
 
+// TestTrustLineFlagNoteCombinations pins the expansion of every documented
+// trustline flag bit, including the combined bitmask used by a clawback-
+// enabled, fully authorized line.
+func TestTrustLineFlagNoteCombinations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		flags xdr.Uint32
+		want  string
+		ok    bool
+	}{
+		{"zero declines", 0, "", false},
+		{
+			"authorized",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag),
+			"authorized",
+			true,
+		},
+		{
+			"maintain liabilities only",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag),
+			"authorized_to_maintain_liabilities",
+			true,
+		},
+		{
+			"clawback only",
+			xdr.Uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag),
+			"trustline_clawback_enabled",
+			true,
+		},
+		{
+			"authorized and clawback",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag |
+				xdr.TrustLineFlagsTrustlineClawbackEnabledFlag),
+			"authorized | trustline_clawback_enabled",
+			true,
+		},
+		{
+			"all three flags",
+			xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag |
+				xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag |
+				xdr.TrustLineFlagsTrustlineClawbackEnabledFlag),
+			"authorized | authorized_to_maintain_liabilities | trustline_clawback_enabled",
+			true,
+		},
+		{"unknown bits alone decline", xdr.Uint32(0x8), "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			note, ok := trustLineFlagNote(reflect.ValueOf(tc.flags))
+			if ok != tc.ok || note != tc.want {
+				t.Errorf("trustLineFlagNote(%d) = (%q, %v), want (%q, %v)",
+					tc.flags, note, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// TestTrustLineLiabilitiesAmountFormatting pins the shared amount-field
+// enricher for the V1 liabilities: Buying and Selling are Int64 token
+// balances and must render as decimal units alongside the raw stroop integer,
+// exactly like every other amount field in the protocol.
+func TestTrustLineLiabilitiesAmountFormatting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		field string
+		value xdr.Int64
+		want  string
+	}{
+		{"buying", "Buying", xdr.Int64(100 * amount.One), "100.0000000 (stroops: 1000000000)"},
+		{"selling", "Selling", xdr.Int64(200 * amount.One), "200.0000000 (stroops: 2000000000)"},
+		{"zero buying", "Buying", xdr.Int64(0), "0.0000000 (stroops: 0)"},
+		{"balance", "Balance", xdr.Int64(50 * amount.One), "50.0000000 (stroops: 500000000)"},
+		{"limit", "Limit", xdr.Int64(1000 * amount.One), "1000.0000000 (stroops: 10000000000)"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			note, ok := enrichAmountField(tc.field, reflect.ValueOf(tc.value))
+			if !ok || note != tc.want {
+				t.Errorf("enrichAmountField(%q, %d) = (%q, %v), want (%q, true)",
+					tc.field, tc.value, note, ok, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaimableBalanceFlagNote(t *testing.T) {
 	t.Parallel()
 
@@ -131,306 +361,120 @@ func TestClaimableBalanceFlagNote(t *testing.T) {
 	}
 }
 
-// feeBumpChildNames lists a node's child names, scoped to the fee-bump tests
-// so the derivation stands alone in this file.
-func feeBumpChildNames(node *Node) []string {
-	names := make([]string, 0, len(node.Children))
-	for _, child := range node.Children {
-		names = append(names, child.Name)
-	}
-	return names
-}
-
-// decodeFixtureValue reads a checked-in fixture and runs it through the same
-// decode path the CLI uses.
-func decodeFixtureValue(t *testing.T, name string) *Value {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", name))
-	if err != nil {
-		t.Fatalf("reading fixture %s: %v", name, err)
-	}
-	value, err := Decode(strings.TrimSpace(string(data)))
-	if err != nil {
-		t.Fatalf("decoding fixture %s: %v", name, err)
-	}
-	return value
-}
-
-// decodeFeeBumpFixture loads the canonical mainnet fee-bump envelope both as
-// the decoded tree and as the concrete SDK value, which is what the derived
-// fee-source hint and inner hash have to be checked against.
-func decodeFeeBumpFixture(t *testing.T) (*xdr.TransactionEnvelope, *Value) {
-	t.Helper()
-	value := decodeFixtureValue(t, "tx_feebump.env.txt")
-	env, ok := value.Raw.(*xdr.TransactionEnvelope)
-	if !ok {
-		t.Fatalf("fixture decoded as %T, want *xdr.TransactionEnvelope", value.Raw)
-	}
-	return env, value
-}
-
-// expectedInnerDigest independently recomputes the inner transaction digest:
-// sha256 over the four bytes of ENVELOPE_TYPE_TX followed by the inner
-// Transaction's XDR, without the network id.
-func expectedInnerDigest(t *testing.T, inner xdr.FeeBumpTransactionInnerTx) string {
-	t.Helper()
-	if inner.V1 == nil {
-		t.Fatal("fixture inner union carries no v1 arm")
-	}
-	txBytes, err := inner.V1.Tx.MarshalBinary()
-	if err != nil {
-		t.Fatalf("marshalling inner transaction: %v", err)
-	}
-	preimage := make([]byte, 4, 4+len(txBytes))
-	binary.BigEndian.PutUint32(preimage, uint32(xdr.EnvelopeTypeEnvelopeTypeTx))
-	preimage = append(preimage, txBytes...)
-	sum := sha256.Sum256(preimage)
-	return hex.EncodeToString(sum[:])
-}
-
-func TestMuxedAccountHint(t *testing.T) {
+func TestEnrichContractExecutableWasm(t *testing.T) {
 	t.Parallel()
 
-	var key xdr.Uint256
-	for i := range key {
-		key[i] = byte(i + 1)
+	hash := xdr.Hash{0x4F}
+	exec := xdr.ContractExecutable{
+		Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+		WasmHash: &hash,
 	}
-	want := xdr.SignatureHint{key[28], key[29], key[30], key[31]}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined a wasm executable")
+	}
+	wantHex := hash.HexString()
+	if note != "wasm:"+wantHex {
+		t.Errorf("note = %q, want %q", note, "wasm:"+wantHex)
+	}
+	if raw != wantHex {
+		t.Errorf("raw = %v, want %q", raw, wantHex)
+	}
+}
 
-	tests := []struct {
-		name    string
-		account xdr.MuxedAccount
-		want    xdr.SignatureHint
-		ok      bool
-	}{
-		{
-			name:    "ed25519 arm",
-			account: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: &key},
-			want:    want,
-			ok:      true,
+func TestEnrichContractExecutableStellarAsset(t *testing.T) {
+	t.Parallel()
+
+	exec := xdr.ContractExecutable{Type: xdr.ContractExecutableTypeContractExecutableStellarAsset}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined the stellar asset arm")
+	}
+	if note != "stellar asset contract (built-in token)" {
+		t.Errorf("note = %q, want the built-in token description", note)
+	}
+	if raw != "stellar_asset" {
+		t.Errorf("raw = %v, want stellar_asset", raw)
+	}
+}
+
+func TestEnrichContractExecutableExternalRef(t *testing.T) {
+	t.Parallel()
+
+	owner := xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeContract}
+	var contractID xdr.ContractId
+	contractID[0] = 0xCA
+	owner.ContractId = &contractID
+
+	ownerStr, err := owner.String()
+	if err != nil {
+		t.Fatalf("encoding owner: %v", err)
+	}
+
+	exec := xdr.ContractExecutable{
+		Type: xdr.ContractExecutableTypeContractExecutableExternalRef,
+		ExternalRef: &xdr.ContractExecutableExternalRef{
+			ExecutableOwner: owner,
+			Tag:             "evm:1",
 		},
-		{
-			name: "muxed ed25519 arm",
-			account: xdr.MuxedAccount{
-				Type:     xdr.CryptoKeyTypeKeyTypeMuxedEd25519,
-				Med25519: &xdr.MuxedAccountMed25519{Id: 42, Ed25519: key},
+	}
+	note, raw, ok := enrichContractExecutable(reflect.ValueOf(exec))
+	if !ok {
+		t.Fatal("enrichContractExecutable declined the external ref arm")
+	}
+	if note != "external contract reference" {
+		t.Errorf("note = %q, want 'external contract reference'", note)
+	}
+	if raw != ownerStr+" tag: evm:1" {
+		t.Errorf("raw = %v, want owner and tag", raw)
+	}
+}
+
+func TestEnrichContractExecutableDeclinesMalformed(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]xdr.ContractExecutable{
+		"unknown type":         {Type: xdr.ContractExecutableType(99)},
+		"missing wasm hash":    {Type: xdr.ContractExecutableTypeContractExecutableWasm},
+		"missing external ref": {Type: xdr.ContractExecutableTypeContractExecutableExternalRef},
+		"unknown owner type": {
+			Type: xdr.ContractExecutableTypeContractExecutableExternalRef,
+			ExternalRef: &xdr.ContractExecutableExternalRef{
+				ExecutableOwner: xdr.ScAddress{Type: xdr.ScAddressType(99)},
+				Tag:             "x",
 			},
-			want: want,
-			ok:   true,
 		},
-		{name: "unset ed25519 arm", account: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519}},
-		{name: "unset muxed arm", account: xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeMuxedEd25519}},
-		{name: "zero account", account: xdr.MuxedAccount{}},
-		{name: "unknown key type", account: xdr.MuxedAccount{Type: xdr.CryptoKeyType(99)}},
 	}
-	for _, tc := range tests {
-		got, ok := muxedAccountHint(tc.account)
-		if ok != tc.ok {
-			t.Errorf("%s: muxedAccountHint ok = %v, want %v", tc.name, ok, tc.ok)
+	for name, exec := range cases {
+		if _, _, ok := enrichContractExecutable(reflect.ValueOf(exec)); ok {
+			t.Errorf("%s: enrichContractExecutable produced a rendering, want decline", name)
 		}
-		if got != tc.want {
-			t.Errorf("%s: muxedAccountHint = %v, want %v", tc.name, got, tc.want)
-		}
+	}
+	if _, _, ok := enrichContractExecutable(reflect.ValueOf("not an executable")); ok {
+		t.Error("enrichContractExecutable accepted a non-ContractExecutable value")
 	}
 }
 
-func TestInnerTransactionDigest(t *testing.T) {
+func TestBuildNodeContractExecutableWasm(t *testing.T) {
 	t.Parallel()
 
-	env, _ := decodeFeeBumpFixture(t)
-	digest, ok := innerTransactionDigest(env.FeeBump.Tx.InnerTx)
-	if !ok {
-		t.Fatal("innerTransactionDigest declined the fixture's inner transaction")
-	}
-	if want := expectedInnerDigest(t, env.FeeBump.Tx.InnerTx); digest != want {
-		t.Errorf("innerTransactionDigest = %q, want %q", digest, want)
-	}
-	if digest == "" || len(digest) != 64 {
-		t.Errorf("innerTransactionDigest = %q, want 64 hex characters", digest)
-	}
-
-	noArm := xdr.FeeBumpTransactionInnerTx{Type: xdr.EnvelopeTypeEnvelopeTypeTx}
-	if _, ok := innerTransactionDigest(noArm); ok {
-		t.Error("innerTransactionDigest accepted a fee-bump union with no v1 arm")
-	}
-	wrongArm := xdr.FeeBumpTransactionInnerTx{Type: xdr.EnvelopeTypeEnvelopeTypeTxFeeBump}
-	if _, ok := innerTransactionDigest(wrongArm); ok {
-		t.Error("innerTransactionDigest accepted a non-tx envelope arm")
-	}
-}
-
-func TestFeeBumpTransactionDerivedChildren(t *testing.T) {
-	t.Parallel()
-
-	env, value := decodeFeeBumpFixture(t)
-	tx := value.Node.Find("FeeBump.Tx")
-	if tx == nil {
-		t.Fatal("FeeBump.Tx not found in decoded fixture")
-	}
-
-	// Declared fields first, derived children appended after: the wire shape
-	// machine-readable output keeps is byte-faithful.
-	wantOrder := []string{"FeeSource", "Fee", "InnerTx", "Ext", "FeeSourceHint", "InnerTxHash"}
-	if got := feeBumpChildNames(tx); !reflect.DeepEqual(got, wantOrder) {
-		t.Errorf("FeeBump.Tx children = %v, want %v", got, wantOrder)
-	}
-
-	feeHint, ok := muxedAccountHint(env.FeeBump.Tx.FeeSource)
-	if !ok {
-		t.Fatal("fee source carries no key")
-	}
-	hintNode := tx.Child("FeeSourceHint")
-	if hintNode == nil {
-		t.Fatal("FeeSourceHint missing from FeeBump.Tx")
-	}
-	if got, want := hintNode.Value, hex.EncodeToString(feeHint[:]); got != want {
-		t.Errorf("FeeSourceHint = %v, want %q", got, want)
-	}
-	addr := addressOf(env.FeeBump.Tx.FeeSource)
-	if want := "4-byte key hint of fee source " + shortAddr(addr); hintNode.Note != want {
-		t.Errorf("FeeSourceHint note = %q, want %q", hintNode.Note, want)
-	}
-
-	hashNode := tx.Child("InnerTxHash")
-	if hashNode == nil {
-		t.Fatal("InnerTxHash missing from FeeBump.Tx")
-	}
-	if got, want := hashNode.Value, expectedInnerDigest(t, env.FeeBump.Tx.InnerTx); got != want {
-		t.Errorf("InnerTxHash = %v, want %q", got, want)
-	}
-	if !strings.Contains(hashNode.Note, "network id") {
-		t.Errorf("InnerTxHash note = %q, want it to say the network id is not prefixed", hashNode.Note)
-	}
-}
-
-func TestFeeBumpEnvelopeSignatureHints(t *testing.T) {
-	t.Parallel()
-
-	env, value := decodeFeeBumpFixture(t)
-	list := value.Node.Find("FeeBump.SignatureHints")
-	if list == nil {
-		t.Fatal("SignatureHints missing from decoded envelope")
-	}
-	if len(list.Children) != len(env.FeeBump.Signatures) {
-		t.Fatalf("SignatureHints has %d entries, want %d", len(list.Children), len(env.FeeBump.Signatures))
-	}
-	feeHint, ok := muxedAccountHint(env.FeeBump.Tx.FeeSource)
-	if !ok {
-		t.Fatal("fee source carries no key")
-	}
-	feeAddr := shortAddr(addressOf(env.FeeBump.Tx.FeeSource))
-	matched := false
-	for i, sig := range env.FeeBump.Signatures {
-		got, ok := list.Children[i].Value.(string)
-		if !ok {
-			t.Fatalf("SignatureHints[%d] value has type %T, want string", i, list.Children[i].Value)
-		}
-		if want := hex.EncodeToString(sig.Hint[:]); got != want {
-			t.Errorf("SignatureHints[%d] = %q, want %q", i, got, want)
-		}
-		wantNote := "does not match " + feeAddr + " key hint; another fee-source signer"
-		if sig.Hint == feeHint {
-			wantNote = "matches " + feeAddr + " key hint"
-			matched = true
-		}
-		if note := list.Children[i].Note; note != wantNote {
-			t.Errorf("SignatureHints[%d] note = %q, want %q", i, note, wantNote)
-		}
-	}
-	if !matched {
-		t.Error("no fixture signature matches the fee source key hint; stale test input")
-	}
-}
-
-func TestFeeBumpEnvelopeSignatureHintMatch(t *testing.T) {
-	t.Parallel()
-
-	var key xdr.Uint256
-	key[31] = 0xAB
-	feeSource := xdr.MuxedAccount{Type: xdr.CryptoKeyTypeKeyTypeEd25519, Ed25519: &key}
-	feeHint, ok := muxedAccountHint(feeSource)
-	if !ok {
-		t.Fatal("muxedAccountHint declined an ed25519 account")
-	}
-
-	node := &Node{Name: "FeeBump", Kind: KindStruct}
-	decorateFeeBumpEnvelope(node, xdr.FeeBumpTransactionEnvelope{
-		Tx: xdr.FeeBumpTransaction{FeeSource: feeSource},
-		Signatures: []xdr.DecoratedSignature{
-			{Hint: xdr.SignatureHint{1, 2, 3, 4}},
-			{Hint: feeHint},
+	hash := xdr.Hash{0xAB}
+	instance := xdr.ScContractInstance{
+		Executable: xdr.ContractExecutable{
+			Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+			WasmHash: &hash,
 		},
-	})
-
-	list := node.Child("SignatureHints")
-	if list == nil || len(list.Children) != 2 {
-		t.Fatalf("SignatureHints = %v, want exactly two entries", list)
-	}
-	addr := shortAddr(addressOf(feeSource))
-	if got, want := list.Children[0].Note, "does not match "+addr+" key hint; another fee-source signer"; got != want {
-		t.Errorf("unmatched note = %q, want %q", got, want)
-	}
-	if got, want := list.Children[1].Note, "matches "+addr+" key hint"; got != want {
-		t.Errorf("matched note = %q, want %q", got, want)
-	}
-}
-
-func TestFeeBumpEnvelopeOmitsHintsWhenNothingCanMatch(t *testing.T) {
-	t.Parallel()
-
-	node := &Node{Name: "FeeBump", Kind: KindStruct}
-	decorateFeeBumpEnvelope(node, xdr.FeeBumpTransactionEnvelope{})
-	if len(node.Children) != 0 {
-		t.Errorf("envelope without signatures gained %d derived children", len(node.Children))
 	}
 
-	node = &Node{Name: "FeeBump", Kind: KindStruct}
-	decorateFeeBumpEnvelope(node, xdr.FeeBumpTransactionEnvelope{
-		Signatures: []xdr.DecoratedSignature{{Hint: xdr.SignatureHint{9, 9, 9, 9}}},
-	})
-	list := node.Child("SignatureHints")
-	if list == nil || len(list.Children) != 1 {
-		t.Fatalf("SignatureHints = %v, want one entry for a keyless fee source", list)
+	node := buildNode("Instance", reflect.ValueOf(instance), 0)
+	if node == nil {
+		t.Fatal("buildNode(ScContractInstance) returned nil")
 	}
-	if got, want := list.Children[0].Note, "fee source carries no key; hint not matched"; got != want {
-		t.Errorf("note = %q, want %q", got, want)
+	exec := node.Child("Executable")
+	if exec == nil {
+		t.Fatal("Executable child not found")
 	}
-}
-
-func TestFeeBumpHooksIgnoresOtherValues(t *testing.T) {
-	t.Parallel()
-
-	node := &Node{Name: "Tx", Kind: KindStruct}
-	decorateFeeBumpTransaction(node, "not a fee bump")
-	decorateFeeBumpEnvelope(node, 42)
-	if len(node.Children) != 0 {
-		t.Errorf("fee-bump hooks accepted foreign values and added %d children", len(node.Children))
-	}
-}
-
-func TestFeeBumpTransactionStandaloneDecode(t *testing.T) {
-	t.Parallel()
-
-	env, _ := decodeFeeBumpFixture(t)
-	value, err := DecodeAs(TestMarshalBase64(&env.FeeBump.Tx), "FeeBumpTransaction")
-	if err != nil {
-		t.Fatalf("decoding standalone FeeBumpTransaction: %v", err)
-	}
-	if value.Node.Child("FeeSourceHint") == nil || value.Node.Child("InnerTxHash") == nil {
-		t.Errorf("standalone decode children = %v, want FeeSourceHint and InnerTxHash", feeBumpChildNames(value.Node))
-	}
-	if value.Node.Child("SignatureHints") != nil {
-		t.Error("standalone FeeBumpTransaction gained envelope-level SignatureHints")
-	}
-}
-
-func TestNonFeeBumpEnvelopeGainsNoDerivedNodes(t *testing.T) {
-	t.Parallel()
-
-	value := decodeFixtureValue(t, "tx_success.env.txt")
-	for _, name := range []string{"FeeSourceHint", "InnerTxHash", "SignatureHints"} {
-		if value.Node.Find(name) != nil {
-			t.Errorf("non fee-bump envelope carries derived node %q", name)
-		}
+	if exec.Note != "wasm:"+hash.HexString() {
+		t.Errorf("Executable Note = %q, want the wasm annotation", exec.Note)
 	}
 }
