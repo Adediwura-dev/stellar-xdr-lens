@@ -1,6 +1,7 @@
 package format
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -46,6 +47,12 @@ func (f *DiffFormatter) Format(w io.Writer, d *lens.DiffResult) error {
 
 	if d.Equal() {
 		fmt.Fprintf(&b, "%sno differences%s\n", p.Add, p.Reset)
+		if len(d.Warnings) > 0 {
+			fmt.Fprintf(&b, "\n")
+			for _, warn := range d.Warnings {
+				fmt.Fprintf(&b, "%swarning: %s%s\n", p.Change, warn, p.Reset)
+			}
+		}
 		if _, err := io.WriteString(w, b.String()); err != nil {
 			return fmt.Errorf("format: write diff: %w", err)
 		}
@@ -54,6 +61,13 @@ func (f *DiffFormatter) Format(w io.Writer, d *lens.DiffResult) error {
 
 	for _, c := range d.Changes {
 		f.change(&b, c)
+	}
+
+	if len(d.Warnings) > 0 {
+		fmt.Fprintf(&b, "\n")
+		for _, warn := range d.Warnings {
+			fmt.Fprintf(&b, "%swarning: %s%s\n", p.Change, warn, p.Reset)
+		}
 	}
 
 	fmt.Fprintf(&b, "\n%s%s%s\n", p.Dim, d.Summary(), p.Reset)
@@ -72,6 +86,9 @@ func (f *DiffFormatter) change(b *strings.Builder, c lens.Change) {
 		fmt.Fprintf(b, "%s+ %s%s = %s\n", p.Add, c.Path, p.Reset, f.value(c.After, c.AfterNote))
 	case lens.ChangeRemoved:
 		fmt.Fprintf(b, "%s- %s%s = %s\n", p.Remove, c.Path, p.Reset, f.value(c.Before, c.BeforeNote))
+	case lens.ChangeReordered:
+		fmt.Fprintf(b, "%s~ %s%s: reordered from index %v to %v\n",
+			p.Change, c.Path, p.Reset, c.Before, c.After)
 	default:
 		fmt.Fprintf(b, "%s~ %s%s\n", p.Change, c.Path, p.Reset)
 		fmt.Fprintf(b, "    %s- %s%s\n", p.Remove, f.value(c.Before, c.BeforeNote), p.Reset)
@@ -91,4 +108,90 @@ func (f *DiffFormatter) value(v any, note string) string {
 		return s + " " + f.palette.Note + note + f.palette.Reset
 	}
 	return s
+}
+
+// DiffChangeDoc represents a single difference in the structured JSON diff schema.
+type DiffChangeDoc struct {
+	Path       string `json:"path"`
+	Op         string `json:"op"`
+	Before     any    `json:"before,omitempty"`
+	After      any    `json:"after,omitempty"`
+	BeforeNote string `json:"before_note,omitempty"`
+	AfterNote  string `json:"after_note,omitempty"`
+}
+
+// DiffDocument represents the full structured diff in the stable JSON schema.
+type DiffDocument struct {
+	LeftType  string          `json:"left_type"`
+	RightType string          `json:"right_type"`
+	Equal     bool            `json:"equal"`
+	Summary   string          `json:"summary"`
+	Changes   []DiffChangeDoc `json:"changes"`
+	Redacted  []string        `json:"redacted,omitempty"`
+	Warnings  []string        `json:"warnings,omitempty"`
+}
+
+// BuildDiffDocument converts a lens.DiffResult into the stable JSON DiffDocument.
+func BuildDiffDocument(d *lens.DiffResult) DiffDocument {
+	if d == nil {
+		return DiffDocument{}
+	}
+	changes := make([]DiffChangeDoc, 0, len(d.Changes))
+	for _, c := range d.Changes {
+		changes = append(changes, DiffChangeDoc{
+			Path:       c.Path,
+			Op:         c.Op.String(),
+			Before:     c.Before,
+			After:      c.After,
+			BeforeNote: c.BeforeNote,
+			AfterNote:  c.AfterNote,
+		})
+	}
+	return DiffDocument{
+		LeftType:  d.LeftType,
+		RightType: d.RightType,
+		Equal:     d.Equal(),
+		Summary:   d.Summary(),
+		Changes:   changes,
+		Redacted:  d.Redacted,
+		Warnings:  d.Warnings,
+	}
+}
+
+// DiffJSONFormatter renders a lens.DiffResult as structured JSON adhering to the stable schema.
+type DiffJSONFormatter struct {
+	indent string
+}
+
+// DiffJSONOption configures a DiffJSONFormatter.
+type DiffJSONOption func(*DiffJSONFormatter)
+
+// WithDiffJSONIndent configures indentation for DiffJSONFormatter.
+func WithDiffJSONIndent(indent string) DiffJSONOption {
+	return func(f *DiffJSONFormatter) { f.indent = indent }
+}
+
+// NewDiffJSONFormatter returns a new DiffJSONFormatter.
+func NewDiffJSONFormatter(opts ...DiffJSONOption) *DiffJSONFormatter {
+	f := &DiffJSONFormatter{indent: "  "}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
+}
+
+// Format writes structured JSON representation of the diff result to w.
+func (f *DiffJSONFormatter) Format(w io.Writer, d *lens.DiffResult) error {
+	if d == nil {
+		return fmt.Errorf("format: nil diff")
+	}
+	doc := BuildDiffDocument(d)
+	enc := json.NewEncoder(w)
+	if f.indent != "" {
+		enc.SetIndent("", f.indent)
+	}
+	if err := enc.Encode(doc); err != nil {
+		return fmt.Errorf("format: encoding json diff: %w", err)
+	}
+	return nil
 }

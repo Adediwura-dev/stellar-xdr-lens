@@ -186,6 +186,18 @@ Comparing XDR structures often involves equivalent binary payloads (such as tran
 
 When diffing ledger headers, transactions, or state trees, minor differences in timestamps, base fees, or sequence counters can clutter output when only major state changes are of interest. The `--diff-threshold <value>` flag (and `DiffOptions.Threshold` / `DiffOptions.DiffThreshold`) instructs the differ to suppress scalar numeric differences where the absolute difference $|left - right| \le \text{threshold}$.
 
+### Operation permutation detection
+
+When comparing transactions where operations were reordered (e.g. operations 0 and 1 swapped), naive positional diffs report complete body replacements, while standard alignment reports delete/insert pairs. `pkg/lens/diff.go` performs permutation matching across the `Operations` list, identifying operations whose bodies match structurally but appear at shifted indices. These are reported with `ChangeOp` `ChangeReordered` (e.g., `~ Tx.Operations[0]: reordered from index 1 to 0`), preserving document order and keeping true modifications isolated.
+
+### Soroban ContractEvent log comparison
+
+Simulation diagnostic events and contract events (`ContractEvent` / `DiagnosticEvent`) emitted during contract invocations are compared using dedicated event-matching in `pkg/lens/diff.go` (and through `DiffContractEvents`). Events are paired across executions by Contract ID and topic signatures. Changes within matched pairs pinpoint altered data values (`Body.V0.Data`) and topic mutations (`Body.V0.Topics`), avoiding spurious cascade diffs caused by event reordering or insertions.
+
+### Account signer configuration and quorum drift
+
+Security auditing requires comparing account entries before and after key rotation to ensure multisig quorums have not been weakened. `pkg/lens/diff.go` computes effective signing power changes (combining master key weight and active cosigner weights) via `AnalyzeAccountSigners` / `DiffAccountSigners` and records effective power deltas (`Thresholds.EffectiveSigningPower`). If the post-rotation signing power drops below the medium or high threshold required by the account, explicit warnings are emitted in both terminal reports and the structured diff result (`DiffResult.Warnings`).
+
 `DiffTransactionMetaBalances` accepts decoded `TransactionMeta` versions 0
 through 4 and returns deterministic deltas for account XLM balances, trustline
 balances, and claimable-balance amounts. A `STATE` entry supplies the before
@@ -351,6 +363,18 @@ terminal formatters allocate without limit. Hunks are built by the standard
 context-merging algorithm. The CLI exposes the formats as `diff --unified`,
 `diff --json-patch` and `diff --side-by-side`; the three are mutually exclusive
 with each other and with `--json`/`--stats`.
+
+### Structured JSON diff output (`--format json`)
+
+For automated CI tools, bots, and machine consumption, `pkg/lens/format/diff.go` provides `DiffJSONFormatter` which formats diff results into a stable JSON schema:
+- `left_type` and `right_type`: the XDR types compared;
+- `equal`: boolean indicator of structural identity;
+- `summary`: human-readable one-line change tally;
+- `changes`: array of changes, each specifying `path`, `op` (`modified`, `added`, `removed`, `type_changed`, `reordered`), `before`, `after`, and enriched string notes;
+- `redacted`: list of normalized cryptographic paths (if redaction was applied);
+- `warnings`: list of non-fatal security warnings, such as quorum degradation below thresholds.
+
+The CLI exposes this format via `lens diff --format json` (as well as `--json`).
 
 ## Unordered signer and signature diffs
 

@@ -569,3 +569,187 @@ func keys(m map[string]any) []string {
 	}
 	return out
 }
+
+func TestDiffJSONFormatter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty diff schema adherence", func(t *testing.T) {
+		t.Parallel()
+
+		d := &lens.DiffResult{
+			LeftType:  "Price",
+			RightType: "Price",
+		}
+		var buf bytes.Buffer
+		f := format.NewDiffJSONFormatter()
+		if err := f.Format(&buf, d); err != nil {
+			t.Fatalf("Format() error = %v", err)
+		}
+
+		var doc format.DiffDocument
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatalf("unmarshal json: %v\nJSON:\n%s", err, buf.String())
+		}
+		if doc.LeftType != "Price" || doc.RightType != "Price" {
+			t.Errorf("types = %s/%s, want Price/Price", doc.LeftType, doc.RightType)
+		}
+		if !doc.Equal {
+			t.Errorf("Equal = false, want true")
+		}
+		if doc.Summary != "no differences" {
+			t.Errorf("Summary = %q, want 'no differences'", doc.Summary)
+		}
+		if len(doc.Changes) != 0 {
+			t.Errorf("Changes len = %d, want 0", len(doc.Changes))
+		}
+	})
+
+	t.Run("diff with changes, reordered operations, and warnings", func(t *testing.T) {
+		t.Parallel()
+
+		d := &lens.DiffResult{
+			LeftType:  "TransactionEnvelope",
+			RightType: "TransactionEnvelope",
+			Changes: []lens.Change{
+				{
+					Path:       "Tx.Operations[0]",
+					Op:         lens.ChangeReordered,
+					Before:     1,
+					After:      0,
+					BeforeNote: "index 1",
+					AfterNote:  "index 0",
+				},
+				{
+					Path:       "Tx.Fee",
+					Op:         lens.ChangeModified,
+					Before:     uint32(100),
+					After:      uint32(200),
+					BeforeNote: "100",
+					AfterNote:  "200",
+				},
+				{
+					Path:      "Tx.Memo",
+					Op:        lens.ChangeAdded,
+					After:     "test",
+					AfterNote: "text memo",
+				},
+				{
+					Path:       "Tx.Signatures[0]",
+					Op:         lens.ChangeRemoved,
+					Before:     "sig",
+					BeforeNote: "sig note",
+				},
+			},
+			Redacted: []string{"Signatures[0].Signature"},
+			Warnings: []string{"warning: quorum weakened"},
+		}
+
+		var buf bytes.Buffer
+		f := format.NewDiffJSONFormatter(format.WithDiffJSONIndent("  "))
+		if err := f.Format(&buf, d); err != nil {
+			t.Fatalf("Format() error = %v", err)
+		}
+
+		var doc format.DiffDocument
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatalf("unmarshal json: %v\nJSON:\n%s", err, buf.String())
+		}
+		if doc.Equal {
+			t.Error("Equal = true, want false")
+		}
+		if len(doc.Changes) != 4 {
+			t.Fatalf("Changes len = %d, want 4", len(doc.Changes))
+		}
+		if doc.Changes[0].Op != "reordered" {
+			t.Errorf("Change[0].Op = %q, want 'reordered'", doc.Changes[0].Op)
+		}
+		if len(doc.Redacted) != 1 || doc.Redacted[0] != "Signatures[0].Signature" {
+			t.Errorf("Redacted = %v, want ['Signatures[0].Signature']", doc.Redacted)
+		}
+		if len(doc.Warnings) != 1 || doc.Warnings[0] != "warning: quorum weakened" {
+			t.Errorf("Warnings = %v, want ['warning: quorum weakened']", doc.Warnings)
+		}
+
+		// Also verify via generic map to confirm json tag names
+		var m map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+			t.Fatalf("unmarshal map: %v", err)
+		}
+		for _, key := range []string{"left_type", "right_type", "equal", "summary", "changes", "redacted", "warnings"} {
+			if _, ok := m[key]; !ok {
+				t.Errorf("JSON schema missing expected key %q", key)
+			}
+		}
+	})
+
+	t.Run("nil diff returns error", func(t *testing.T) {
+		t.Parallel()
+
+		f := format.NewDiffJSONFormatter()
+		var buf bytes.Buffer
+		if err := f.Format(&buf, nil); err == nil {
+			t.Error("Format(nil) returned nil, want error")
+		}
+	})
+
+	t.Run("text diff formatter with reordered, warnings, and type difference", func(t *testing.T) {
+		t.Parallel()
+
+		d := &lens.DiffResult{
+			LeftType:  "TransactionV0",
+			RightType: "TransactionV1",
+			Changes: []lens.Change{
+				{
+					Path:       "Operations[0]",
+					Op:         lens.ChangeReordered,
+					Before:     1,
+					After:      0,
+					BeforeNote: "index 1",
+					AfterNote:  "index 0",
+				},
+				{
+					Path:      "Operations[1]",
+					Op:        lens.ChangeAdded,
+					After:     "op_val",
+					AfterNote: "added op",
+				},
+				{
+					Path:   "Operations[2]",
+					Op:     lens.ChangeRemoved,
+					Before: "old_op",
+				},
+			},
+			Warnings: []string{"warning: quorum dropped below medium threshold"},
+		}
+
+		var buf bytes.Buffer
+		f := format.NewDiffFormatter(format.WithDiffPalette(format.NoColor))
+		if err := f.Format(&buf, d); err != nil {
+			t.Fatalf("Format() error = %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "type differs") {
+			t.Errorf("output missing type differs: %s", out)
+		}
+		if !strings.Contains(out, "reordered from index 1 to 0") {
+			t.Errorf("output missing reordered text: %s", out)
+		}
+		if !strings.Contains(out, "warning: quorum dropped") {
+			t.Errorf("output missing warning: %s", out)
+		}
+
+		// Also test identical with warnings
+		dEqual := &lens.DiffResult{
+			LeftType:  "AccountEntry",
+			RightType: "AccountEntry",
+			Warnings:  []string{"warning: quorum drift"},
+		}
+		var bufEq bytes.Buffer
+		if err := f.Format(&bufEq, dEqual); err != nil {
+			t.Fatalf("Format() error = %v", err)
+		}
+		if !strings.Contains(bufEq.String(), "no differences") || !strings.Contains(bufEq.String(), "warning: quorum drift") {
+			t.Errorf("equal diff format with warning mismatch: %s", bufEq.String())
+		}
+	})
+}
