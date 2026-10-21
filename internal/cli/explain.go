@@ -17,15 +17,15 @@ import (
 
 func newExplainCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
 	var (
-		resultArg  string
-		resultFile string
-		metaArg    string
-		metaFile   string
-		asJSON     bool
-		asMarkdown bool
-		verbose    bool
-		failOnErr  bool
-		isolate    bool
+		resultArg   string
+		resultFile  string
+		metaArg     string
+		metaFile    string
+		asJSON      bool
+		asMarkdown  bool
+		verbose     bool
+		failOnErr   bool
+		isolate     bool
 		resources   bool
 		checkExpiry bool
 		refTimeStr  string

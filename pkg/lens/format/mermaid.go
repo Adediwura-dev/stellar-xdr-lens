@@ -126,6 +126,9 @@ func (f *MermaidFormatter) formatNodeGraph(b *strings.Builder, root *lens.Node) 
 	if rootName == "" {
 		rootName = "Root"
 	}
+	if root.Kind == lens.KindScalar && root.Value != nil {
+		rootName = fmt.Sprintf("%s: %v", rootName, root.Value)
+	}
 	fmt.Fprintf(b, "  %s[\"%s\"]\n", rootID, sanitizeLabel(rootName))
 
 	for i, child := range root.Children {

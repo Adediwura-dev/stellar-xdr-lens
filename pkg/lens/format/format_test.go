@@ -479,8 +479,18 @@ func TestMermaidFormatter(t *testing.T) {
 	if err := f.Format(&assetBuf, assetVal); err != nil {
 		t.Fatalf("MermaidFormatter.Format(asset) error = %v", err)
 	}
-	if !strings.Contains(assetBuf.String(), "AlphaNum4") && !strings.Contains(assetBuf.String(), "ChangeTrustAsset") {
+	if !strings.Contains(assetBuf.String(), "Asset") || !strings.Contains(assetBuf.String(), "USDC") {
 		t.Errorf("Mermaid fallback does not render node structure:\n%s", assetBuf.String())
+	}
+
+	// Test fallback for non-envelope type with children
+	resVal := loadValue(t, "tx_failed.res")
+	var resBuf bytes.Buffer
+	if err := f.Format(&resBuf, resVal); err != nil {
+		t.Fatalf("MermaidFormatter.Format(res) error = %v", err)
+	}
+	if !strings.Contains(resBuf.String(), "TransactionResult") {
+		t.Errorf("Mermaid fallback does not render TransactionResult:\n%s", resBuf.String())
 	}
 
 	// Test nil value handling
