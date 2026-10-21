@@ -217,6 +217,10 @@ Use --interactive (or 'lens explore') for an interactive terminal tree viewer.`,
 					return format.NewMermaidFormatter().Format(w, value)
 				}
 
+				if formatName == "yaml" {
+					return format.NewYAMLFormatter(format.WithYAMLNotes(annotate)).Format(w, value)
+				}
+
 				if asJSON || formatName == "json" {
 					indent := "  "
 					if compactOut {

@@ -1305,6 +1305,16 @@ the [README](../README.md#lens-explain--why-did-this-fail) for usage.
 - Provides fallback rendering of node hierarchies for general XDR types.
 - Reachable from the CLI as `lens decode --format mermaid`.
 
+## YAML formatter (`pkg/lens/format/yaml.go`)
+
+`YAMLFormatter` renders a decoded XDR value as a clean, valid YAML document.
+- Output is deterministic: the bytes depend only on the Node tree, never on the environment, clock, or network.
+- Within "value", struct nodes become YAML mappings keyed by field name in XDR declaration order, list nodes become sequences, and scalars become YAML strings, numbers or booleans.
+- Absent union arms and nil optionals are omitted entirely rather than emitted as null.
+- Enricher notes — strkey addresses, formatted amounts, expanded flag names — are emitted as inline YAML comments (`# ...`), which are discarded by every YAML parser so the document decodes to exactly the same value whether notes are shown or not.
+- Output is written through `gopkg.in/yaml.v3`, so a memo containing the delimiter, a quote or a newline is quoted per YAML spec and round-trips through any standard reader.
+- Reachable from the CLI as `lens decode --format yaml`.
+
 ## Precondition Expiry Verification (`pkg/lens/timebounds_explain.go`)
 
 `VerifyPreconditionExpiry` and `CheckPreconditionExpiry` verify transaction preconditions (`TimeBounds` and `LedgerBounds`) against a reference timestamp.
