@@ -3,6 +3,7 @@ package lens_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
@@ -2638,4 +2639,117 @@ func accountMergeResult(t *testing.T, code xdr.AccountMergeResultCode) *lens.Val
 		},
 	}
 	return &lens.Value{Type: "TransactionResult", Raw: res}
+}
+
+func TestVerifyPreconditionExpiry(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil envelope check
+	if got := lens.VerifyPreconditionExpiry(nil, time.Now()); got != nil {
+		t.Errorf("VerifyPreconditionExpiry(nil) = %v, want nil", got)
+	}
+
+	source := "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
+	sourceID := mustAccountID(t, source)
+
+	makeTxWithCond := func(cond xdr.Preconditions) *xdr.TransactionEnvelope {
+		return &xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: sourceID.ToMuxedAccount(),
+					Fee:           100,
+					SeqNum:        1,
+					Cond:          cond,
+					Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+				},
+			},
+		}
+	}
+
+	refTime := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	refUnix := refTime.Unix()
+
+	// 2. PrecondNone: satisfied without bounds
+	noneEnv := makeTxWithCond(xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone})
+	res := lens.VerifyPreconditionExpiry(noneEnv, refTime)
+	if !res.Valid || res.Expired || res.NotYetValid || res.Warning != "" {
+		t.Errorf("PrecondNone unexpected result: %+v", res)
+	}
+
+	// 3. TimeBounds: expired
+	expiredTB := makeTxWithCond(xdr.Preconditions{
+		Type: xdr.PreconditionTypePrecondTime,
+		TimeBounds: &xdr.TimeBounds{
+			MinTime: xdr.TimePoint(refUnix - 2000),
+			MaxTime: xdr.TimePoint(refUnix - 1000),
+		},
+	})
+	resExpired := lens.VerifyPreconditionExpiry(expiredTB, refTime)
+	if resExpired.Valid || !resExpired.Expired || resExpired.NotYetValid {
+		t.Errorf("Expected expired, got: %+v", resExpired)
+	}
+	if !strings.Contains(resExpired.Warning, "EXPIRED") {
+		t.Errorf("Warning missing EXPIRED: %s", resExpired.Warning)
+	}
+
+	// 4. TimeBounds: not yet valid
+	futureTB := makeTxWithCond(xdr.Preconditions{
+		Type: xdr.PreconditionTypePrecondTime,
+		TimeBounds: &xdr.TimeBounds{
+			MinTime: xdr.TimePoint(refUnix + 1000),
+			MaxTime: xdr.TimePoint(refUnix + 2000),
+		},
+	})
+	resFuture := lens.VerifyPreconditionExpiry(futureTB, refTime)
+	if resFuture.Valid || resFuture.Expired || !resFuture.NotYetValid {
+		t.Errorf("Expected not yet valid, got: %+v", resFuture)
+	}
+	if !strings.Contains(resFuture.Warning, "NOT YET VALID") {
+		t.Errorf("Warning missing NOT YET VALID: %s", resFuture.Warning)
+	}
+
+	// 5. TimeBounds: currently valid
+	validTB := makeTxWithCond(xdr.Preconditions{
+		Type: xdr.PreconditionTypePrecondTime,
+		TimeBounds: &xdr.TimeBounds{
+			MinTime: xdr.TimePoint(refUnix - 1000),
+			MaxTime: xdr.TimePoint(refUnix + 1000),
+		},
+	})
+	resValid := lens.VerifyPreconditionExpiry(validTB, refTime)
+	if !resValid.Valid || resValid.Expired || resValid.NotYetValid || resValid.Warning != "" {
+		t.Errorf("Expected valid, got: %+v", resValid)
+	}
+
+	// 6. PreconditionsV2 with LedgerBounds: expired
+	expiredLB := makeTxWithCond(xdr.Preconditions{
+		Type: xdr.PreconditionTypePrecondV2,
+		V2: &xdr.PreconditionsV2{
+			LedgerBounds: &xdr.LedgerBounds{
+				MinLedger: 1,
+				MaxLedger: 100, // much lower than ~64 million
+			},
+		},
+	})
+	resExpiredLB := lens.VerifyPreconditionExpiry(expiredLB, refTime)
+	if resExpiredLB.Valid || !resExpiredLB.Expired {
+		t.Errorf("Expected expired LedgerBounds, got: %+v", resExpiredLB)
+	}
+
+	// 7. CheckPreconditionExpiry helper on *lens.Value
+	val := &lens.Value{Type: "TransactionEnvelope", Raw: validTB}
+	checkRes, err := lens.CheckPreconditionExpiry(val, refTime)
+	if err != nil || !checkRes.Valid {
+		t.Errorf("CheckPreconditionExpiry failed: res=%+v, err=%v", checkRes, err)
+	}
+
+	// 8. CheckPreconditionExpiry with invalid arguments
+	if _, err := lens.CheckPreconditionExpiry(nil, refTime); err == nil {
+		t.Error("CheckPreconditionExpiry(nil) error = nil, want error")
+	}
+	resVal := &lens.Value{Type: "TransactionResult", Raw: &xdr.TransactionResult{}}
+	if _, err := lens.CheckPreconditionExpiry(resVal, refTime); err == nil {
+		t.Error("CheckPreconditionExpiry(TransactionResult) error = nil, want error")
+	}
 }

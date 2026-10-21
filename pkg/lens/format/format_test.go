@@ -368,6 +368,145 @@ func TestShouldColorHonoursNoColor(t *testing.T) {
 	if format.ShouldColor(os.Stdout) {
 		t.Error("ShouldColor() = true with NO_COLOR set, want false")
 	}
+
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "dumb")
+	if format.ShouldColor(os.Stdout) {
+		t.Error("ShouldColor() = true with TERM=dumb, want false")
+	}
+}
+
+func TestHTMLFormatter(t *testing.T) {
+	t.Parallel()
+
+	v := loadValue(t, "tx_success.env")
+
+	var buf bytes.Buffer
+	f := format.NewHTMLFormatter(format.WithHTMLTitle("Test Audit Report"))
+	if err := f.Format(&buf, v); err != nil {
+		t.Fatalf("HTMLFormatter.Format() error = %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"<!DOCTYPE html>",
+		"<title>Test Audit Report - TransactionEnvelope</title>",
+		"<h1>Test Audit Report</h1>",
+		"Transaction Overview",
+		"Decoded Node Tree",
+		"tree-container",
+		"SourceAccount",
+		"Generated offline",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("HTML output missing expected string %q", want)
+		}
+	}
+
+	// Verify nil value handling
+	if err := f.Format(&buf, nil); err == nil {
+		t.Error("HTMLFormatter.Format(nil) error = nil, want error")
+	}
+	if err := f.FormatSummary(&buf, nil); err == nil {
+		t.Error("HTMLFormatter.FormatSummary(nil) error = nil, want error")
+	}
+
+	// Verify FormatSummary
+	summary, err := lens.Explain(v)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+	var sumBuf bytes.Buffer
+	if err := f.FormatSummary(&sumBuf, summary); err != nil {
+		t.Fatalf("FormatSummary() error = %v", err)
+	}
+	if !strings.Contains(sumBuf.String(), "Transaction Overview") {
+		t.Error("FormatSummary output missing overview section")
+	}
+}
+
+func TestHTMLFormatterFailedTx(t *testing.T) {
+	t.Parallel()
+
+	v := loadValue(t, "tx_failed.res")
+	var buf bytes.Buffer
+	f := format.NewHTMLFormatter()
+	if err := f.Format(&buf, v); err != nil {
+		t.Fatalf("HTMLFormatter.Format() error = %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "TransactionResult") {
+		t.Errorf("HTML output missing TransactionResult type badge")
+	}
+}
+
+func TestMermaidFormatter(t *testing.T) {
+	t.Parallel()
+
+	v := loadValue(t, "tx_success.env")
+
+	var buf bytes.Buffer
+	f := format.NewMermaidFormatter(format.WithMermaidDirection("TD"))
+	if err := f.Format(&buf, v); err != nil {
+		t.Fatalf("MermaidFormatter.Format() error = %v", err)
+	}
+	out := buf.String()
+
+	if !strings.HasPrefix(out, "graph TD\n") {
+		t.Errorf("Mermaid output does not start with 'graph TD', got:\n%s", out)
+	}
+	if !strings.Contains(out, "Source") {
+		t.Errorf("Mermaid output does not contain source account:\n%s", out)
+	}
+	if !strings.Contains(out, "-->|") {
+		t.Errorf("Mermaid output does not contain operation arrow:\n%s", out)
+	}
+
+	// Test custom direction
+	var lrBuf bytes.Buffer
+	fLR := format.NewMermaidFormatter(format.WithMermaidDirection("LR"))
+	if err := fLR.Format(&lrBuf, v); err != nil {
+		t.Fatalf("MermaidFormatter.Format(LR) error = %v", err)
+	}
+	if !strings.HasPrefix(lrBuf.String(), "graph LR\n") {
+		t.Errorf("Mermaid output with LR does not start with 'graph LR'")
+	}
+
+	// Test fallback for non-envelope type
+	assetVal := loadValue(t, "asset_usdc")
+	var assetBuf bytes.Buffer
+	if err := f.Format(&assetBuf, assetVal); err != nil {
+		t.Fatalf("MermaidFormatter.Format(asset) error = %v", err)
+	}
+	if !strings.Contains(assetBuf.String(), "Asset") || !strings.Contains(assetBuf.String(), "USDC") {
+		t.Errorf("Mermaid fallback does not render node structure:\n%s", assetBuf.String())
+	}
+
+	// Test transaction result with operations
+	resVal := loadValue(t, "tx_failed.res")
+	var resBuf bytes.Buffer
+	if err := f.Format(&resBuf, resVal); err != nil {
+		t.Fatalf("MermaidFormatter.Format(res) error = %v", err)
+	}
+	if !strings.Contains(resBuf.String(), "op_0") {
+		t.Errorf("Mermaid output missing op_0:\n%s", resBuf.String())
+	}
+
+	// Test fallback for non-transaction struct with children
+	hdrVal := loadValue(t, "ledger_header")
+	var hdrBuf bytes.Buffer
+	if err := f.Format(&hdrBuf, hdrVal); err != nil {
+		t.Fatalf("MermaidFormatter.Format(ledger_header) error = %v", err)
+	}
+	if !strings.Contains(hdrBuf.String(), "LedgerHeader") || !strings.Contains(hdrBuf.String(), "root --> child_") {
+		t.Errorf("Mermaid fallback does not render node children:\n%s", hdrBuf.String())
+	}
+
+	// Test nil value handling
+	if err := f.Format(&buf, nil); err == nil {
+		t.Error("MermaidFormatter.Format(nil) error = nil, want error")
+	}
 }
 
 // TestFormattersRenderOperationContext ensures the argument-specific
