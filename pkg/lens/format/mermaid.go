@@ -47,16 +47,16 @@ func (f *MermaidFormatter) Format(w io.Writer, v *lens.Value) error {
 		direction = "TD"
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "graph %s\n", direction)
+	b := &strings.Builder{}
+	fmt.Fprintf(b, "graph %s\n", direction)
 
 	// Attempt high-level transaction operation explanation first
 	summary, err := lens.Explain(v)
 	if err == nil && summary != nil && (summary.Source != "" || len(summary.Operations) > 0) {
-		f.formatTransactionGraph(&b, summary)
+		f.formatTransactionGraph(b, summary)
 	} else {
 		// Fallback for non-transaction XDR types: render top-level node hierarchy
-		f.formatNodeGraph(&b, v.Node)
+		f.formatNodeGraph(b, v.Node)
 	}
 
 	_, writeErr := io.WriteString(w, b.String())

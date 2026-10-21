@@ -49,28 +49,28 @@ func (f *HTMLFormatter) Format(w io.Writer, v *lens.Value) error {
 		summary = s
 	}
 
-	var b strings.Builder
+	b := &strings.Builder{}
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
 	b.WriteString("<meta charset=\"utf-8\">\n")
 	b.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
-	fmt.Fprintf(&b, "<title>%s - %s</title>\n", html.EscapeString(f.title), html.EscapeString(v.Type))
+	fmt.Fprintf(b, "<title>%s - %s</title>\n", html.EscapeString(f.title), html.EscapeString(v.Type))
 	b.WriteString("<style>\n")
 	b.WriteString(htmlStyles)
 	b.WriteString("</style>\n</head>\n<body>\n")
 
 	b.WriteString("<header class=\"report-header\">\n")
-	fmt.Fprintf(&b, "<h1>%s</h1>\n", html.EscapeString(f.title))
-	fmt.Fprintf(&b, "<div class=\"badge-type\">%s</div>\n", html.EscapeString(v.Type))
+	fmt.Fprintf(b, "<h1>%s</h1>\n", html.EscapeString(f.title))
+	fmt.Fprintf(b, "<div class=\"badge-type\">%s</div>\n", html.EscapeString(v.Type))
 	b.WriteString("</header>\n\n<main>\n")
 
 	if summary != nil {
-		f.renderSummary(&b, summary)
+		f.renderSummary(b, summary)
 	}
 
 	b.WriteString("<section class=\"tree-section\">\n")
 	b.WriteString("<h2>Decoded Node Tree</h2>\n")
 	b.WriteString("<div class=\"tree-container\">\n")
-	f.renderNode(&b, v.Node, 0)
+	f.renderNode(b, v.Node, 0)
 	b.WriteString("</div>\n</section>\n")
 
 	b.WriteString("</main>\n")
@@ -87,21 +87,21 @@ func (f *HTMLFormatter) FormatSummary(w io.Writer, s *lens.Summary) error {
 		return fmt.Errorf("format: nil summary")
 	}
 
-	var b strings.Builder
+	b := &strings.Builder{}
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
 	b.WriteString("<meta charset=\"utf-8\">\n")
 	b.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
-	fmt.Fprintf(&b, "<title>%s - %s</title>\n", html.EscapeString(f.title), html.EscapeString(s.Kind))
+	fmt.Fprintf(b, "<title>%s - %s</title>\n", html.EscapeString(f.title), html.EscapeString(s.Kind))
 	b.WriteString("<style>\n")
 	b.WriteString(htmlStyles)
 	b.WriteString("</style>\n</head>\n<body>\n")
 
 	b.WriteString("<header class=\"report-header\">\n")
-	fmt.Fprintf(&b, "<h1>%s</h1>\n", html.EscapeString(f.title))
-	fmt.Fprintf(&b, "<div class=\"badge-type\">%s</div>\n", html.EscapeString(s.Kind))
+	fmt.Fprintf(b, "<h1>%s</h1>\n", html.EscapeString(f.title))
+	fmt.Fprintf(b, "<div class=\"badge-type\">%s</div>\n", html.EscapeString(s.Kind))
 	b.WriteString("</header>\n\n<main>\n")
 
-	f.renderSummary(&b, s)
+	f.renderSummary(b, s)
 
 	b.WriteString("</main>\n")
 	b.WriteString("<footer>\n<p>Generated offline by <code>stellar-xdr-lens</code></p>\n</footer>\n")
@@ -117,7 +117,7 @@ func (f *HTMLFormatter) renderSummary(b *strings.Builder, s *lens.Summary) {
 
 	if s.Headline != "" {
 		b.WriteString("<div class=\"headline-card\">\n")
-		fmt.Fprintf(&b, "<p class=\"headline\">%s</p>\n", html.EscapeString(s.Headline))
+		fmt.Fprintf(b, "<p class=\"headline\">%s</p>\n", html.EscapeString(s.Headline))
 		b.WriteString("</div>\n")
 	}
 
@@ -131,12 +131,12 @@ func (f *HTMLFormatter) renderSummary(b *strings.Builder, s *lens.Summary) {
 		}
 		b.WriteString("<div class=\"detail-card\">\n")
 		b.WriteString("<span class=\"label\">Outcome</span>\n")
-		fmt.Fprintf(&b, "<span class=\"badge %s\">%s</span>\n", statusClass, statusText)
+		fmt.Fprintf(b, "<span class=\"badge %s\">%s</span>\n", statusClass, statusText)
 		b.WriteString("</div>\n")
 
 		b.WriteString("<div class=\"detail-card full-width\">\n")
 		b.WriteString("<span class=\"label\">Result Reason</span>\n")
-		fmt.Fprintf(&b, "<span class=\"value\"><code>%s</code>: %s</span>\n",
+		fmt.Fprintf(b, "<span class=\"value\"><code>%s</code>: %s</span>\n",
 			html.EscapeString(s.Outcome.Reason.Code),
 			html.EscapeString(s.Outcome.Reason.Summary),
 		)
@@ -146,42 +146,42 @@ func (f *HTMLFormatter) renderSummary(b *strings.Builder, s *lens.Summary) {
 	if s.Source != "" {
 		b.WriteString("<div class=\"detail-card full-width\">\n")
 		b.WriteString("<span class=\"label\">Source Account</span>\n")
-		fmt.Fprintf(&b, "<span class=\"value monospace\">%s</span>\n", html.EscapeString(s.Source))
+		fmt.Fprintf(b, "<span class=\"value monospace\">%s</span>\n", html.EscapeString(s.Source))
 		b.WriteString("</div>\n")
 	}
 
 	if s.FeeBumpSource != "" {
 		b.WriteString("<div class=\"detail-card full-width\">\n")
 		b.WriteString("<span class=\"label\">Fee Bump Source</span>\n")
-		fmt.Fprintf(&b, "<span class=\"value monospace\">%s</span>\n", html.EscapeString(s.FeeBumpSource))
+		fmt.Fprintf(b, "<span class=\"value monospace\">%s</span>\n", html.EscapeString(s.FeeBumpSource))
 		b.WriteString("</div>\n")
 	}
 
 	if s.Fee != 0 {
 		b.WriteString("<div class=\"detail-card\">\n")
 		b.WriteString("<span class=\"label\">Fee Bid</span>\n")
-		fmt.Fprintf(&b, "<span class=\"value\">%d stroops</span>\n", s.Fee)
+		fmt.Fprintf(b, "<span class=\"value\">%d stroops</span>\n", s.Fee)
 		b.WriteString("</div>\n")
 	}
 
 	if s.FeeCharged != 0 {
 		b.WriteString("<div class=\"detail-card\">\n")
 		b.WriteString("<span class=\"label\">Fee Charged</span>\n")
-		fmt.Fprintf(&b, "<span class=\"value\">%d stroops</span>\n", s.FeeCharged)
+		fmt.Fprintf(b, "<span class=\"value\">%d stroops</span>\n", s.FeeCharged)
 		b.WriteString("</div>\n")
 	}
 
 	if s.SeqNum != 0 {
 		b.WriteString("<div class=\"detail-card\">\n")
 		b.WriteString("<span class=\"label\">Sequence Number</span>\n")
-		fmt.Fprintf(&b, "<span class=\"value\">%d</span>\n", s.SeqNum)
+		fmt.Fprintf(b, "<span class=\"value\">%d</span>\n", s.SeqNum)
 		b.WriteString("</div>\n")
 	}
 
 	if s.Memo != "" {
 		b.WriteString("<div class=\"detail-card full-width\">\n")
 		b.WriteString("<span class=\"label\">Memo</span>\n")
-		fmt.Fprintf(&b, "<span class=\"value\">%s</span>\n", html.EscapeString(s.Memo))
+		fmt.Fprintf(b, "<span class=\"value\">%s</span>\n", html.EscapeString(s.Memo))
 		b.WriteString("</div>\n")
 	}
 
@@ -191,7 +191,7 @@ func (f *HTMLFormatter) renderSummary(b *strings.Builder, s *lens.Summary) {
 		b.WriteString("<div class=\"preconds-card\">\n")
 		b.WriteString("<h3>Preconditions</h3>\n<ul>\n")
 		for _, pc := range s.Preconds {
-			fmt.Fprintf(&b, "<li>%s</li>\n", html.EscapeString(pc))
+			fmt.Fprintf(b, "<li>%s</li>\n", html.EscapeString(pc))
 		}
 		b.WriteString("</ul>\n</div>\n")
 	}
@@ -203,14 +203,14 @@ func (f *HTMLFormatter) renderSummary(b *strings.Builder, s *lens.Summary) {
 		b.WriteString("<thead><tr><th>#</th><th>Type</th><th>Source</th><th>Details</th><th>Result</th></tr></thead>\n<tbody>\n")
 		for _, op := range s.Operations {
 			b.WriteString("<tr>\n")
-			fmt.Fprintf(&b, "<td>%d</td>\n", op.Index)
-			fmt.Fprintf(&b, "<td><code>%s</code></td>\n", html.EscapeString(op.Type))
+			fmt.Fprintf(b, "<td>%d</td>\n", op.Index)
+			fmt.Fprintf(b, "<td><code>%s</code></td>\n", html.EscapeString(op.Type))
 			if op.Source != "" {
-				fmt.Fprintf(&b, "<td class=\"monospace\">%s</td>\n", html.EscapeString(op.Source))
+				fmt.Fprintf(b, "<td class=\"monospace\">%s</td>\n", html.EscapeString(op.Source))
 			} else {
 				b.WriteString("<td><span class=\"dim\">(envelope)</span></td>\n")
 			}
-			fmt.Fprintf(&b, "<td>%s</td>\n", html.EscapeString(op.Detail))
+			fmt.Fprintf(b, "<td>%s</td>\n", html.EscapeString(op.Detail))
 			if op.Result != nil {
 				resClass := "op-fail"
 				resBadge := "✗"
@@ -218,7 +218,7 @@ func (f *HTMLFormatter) renderSummary(b *strings.Builder, s *lens.Summary) {
 					resClass = "op-pass"
 					resBadge = "✓"
 				}
-				fmt.Fprintf(&b, "<td class=\"%s\">%s <code>%s</code></td>\n",
+				fmt.Fprintf(b, "<td class=\"%s\">%s <code>%s</code></td>\n",
 					resClass, resBadge, html.EscapeString(op.Result.Code))
 			} else {
 				b.WriteString("<td><span class=\"dim\">-</span></td>\n")
@@ -238,17 +238,17 @@ func (f *HTMLFormatter) renderNode(b *strings.Builder, n *lens.Node, depth int) 
 
 	b.WriteString("<div class=\"node-row\">\n")
 	if n.Name != "" {
-		fmt.Fprintf(&b, "<span class=\"node-key\">%s</span>: ", html.EscapeString(n.Name))
+		fmt.Fprintf(b, "<span class=\"node-key\">%s</span>: ", html.EscapeString(n.Name))
 	}
 	if n.TypeName != "" {
-		fmt.Fprintf(&b, "<span class=\"node-type\">&lt;%s&gt;</span> ", html.EscapeString(n.TypeName))
+		fmt.Fprintf(b, "<span class=\"node-type\">&lt;%s&gt;</span> ", html.EscapeString(n.TypeName))
 	}
 
 	if n.Kind == lens.KindScalar {
 		valStr := fmt.Sprintf("%v", n.Value)
-		fmt.Fprintf(&b, "<span class=\"node-val\">%s</span>", html.EscapeString(valStr))
+		fmt.Fprintf(b, "<span class=\"node-val\">%s</span>", html.EscapeString(valStr))
 		if n.Note != "" {
-			fmt.Fprintf(&b, " <span class=\"node-note\">/* %s */</span>", html.EscapeString(n.Note))
+			fmt.Fprintf(b, " <span class=\"node-note\">/* %s */</span>", html.EscapeString(n.Note))
 		}
 		b.WriteString("\n</div>\n")
 		return
