@@ -16,6 +16,7 @@ import (
 func newDiffCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Command {
 	var (
 		typeName         string
+		formatName       string
 		asJSON           bool
 		jsonPatch        bool
 		unified          bool
@@ -97,6 +98,25 @@ These are mutually exclusive with each other and with --json/--stats.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if diffThreshold < 0 {
 				return fmt.Errorf("%w: --diff-threshold must be non-negative", lens.ErrInvalidArgument)
+			}
+			if formatName != "" {
+				switch strings.ToLower(formatName) {
+				case "text":
+					// standard text diff
+				case "json":
+					asJSON = true
+				case "json-patch":
+					jsonPatch = true
+				case "unified":
+					unified = true
+				case "side-by-side":
+					sideBySide = true
+				case "stats":
+					statsOnly = true
+				default:
+					return fmt.Errorf("%w: unknown format %q (allowed: text, json, json-patch, unified, side-by-side, stats)",
+						lens.ErrInvalidArgument, formatName)
+				}
 			}
 			if err := validateDiffModes(asJSON, statsOnly, jsonPatch, unified, sideBySide, footprintMode); err != nil {
 				return err
@@ -221,10 +241,9 @@ These are mutually exclusive with each other and with --json/--stats.`,
 					return err
 				}
 			case asJSON:
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(diffDocument(result)); err != nil {
-					return fmt.Errorf("encoding diff: %w", err)
+				f := format.NewDiffJSONFormatter()
+				if err := f.Format(stdout, result); err != nil {
+					return err
 				}
 			default:
 				palette, err := paletteForOutput(stdout, g.color)
@@ -252,6 +271,7 @@ These are mutually exclusive with each other and with --json/--stats.`,
 
 	cmd.Flags().StringVarP(&typeName, "type", "t", "",
 		"decode both values as this XDR type instead of detecting each")
+	cmd.Flags().StringVar(&formatName, "format", "", "output format: text, json, json-patch, unified, side-by-side, stats")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the diff as JSON")
 	cmd.Flags().BoolVar(&jsonPatch, "json-patch", false, "emit an RFC 6902 JSON Patch of the difference")
 	cmd.Flags().BoolVar(&unified, "unified", false, "emit a standard unified diff")
@@ -377,44 +397,6 @@ func writeKeySet(b *strings.Builder, set lens.FootprintKeySetDiff) {
 // errValuesDiffer now lives in exitcodes.go with the strict exit-code policy:
 // a detected difference is a "diff found" condition, not a generic error, so
 // it exits with ExitDiffFound (2).
-
-// diffChange is the stable JSON shape for one change.
-type diffChange struct {
-	Path   string `json:"path"`
-	Op     string `json:"op"`
-	Before any    `json:"before,omitempty"`
-	After  any    `json:"after,omitempty"`
-}
-
-// diffDoc is the stable JSON shape for a whole diff.
-type diffDoc struct {
-	LeftType  string       `json:"left_type"`
-	RightType string       `json:"right_type"`
-	Equal     bool         `json:"equal"`
-	Summary   string       `json:"summary"`
-	Changes   []diffChange `json:"changes"`
-	Redacted  []string     `json:"redacted,omitempty"`
-}
-
-func diffDocument(d *lens.DiffResult) diffDoc {
-	changes := make([]diffChange, 0, len(d.Changes))
-	for _, c := range d.Changes {
-		changes = append(changes, diffChange{
-			Path:   c.Path,
-			Op:     c.Op.String(),
-			Before: c.Before,
-			After:  c.After,
-		})
-	}
-	return diffDoc{
-		LeftType:  d.LeftType,
-		RightType: d.RightType,
-		Equal:     d.Equal(),
-		Summary:   d.Summary(),
-		Changes:   changes,
-		Redacted:  d.Redacted,
-	}
-}
 
 // readOperand resolves a diff operand, which may be a file path, base64 XDR,
 // or "-" for stdin.

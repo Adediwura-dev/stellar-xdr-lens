@@ -377,3 +377,83 @@ func TestDiffThresholdValidation(t *testing.T) {
 		t.Errorf("error = %v, want mention of non-negative", err)
 	}
 }
+
+func TestDiffFormatJSON(t *testing.T) {
+	t.Parallel()
+
+	t.Run("diff differing values with --format json", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, _, err := run(t, "", "diff", "--format", "json",
+			fixturePath("tx_soroban.res"), fixturePath("tx_failed.res"))
+		if err != nil {
+			t.Fatalf("diff --format json error = %v", err)
+		}
+
+		var doc struct {
+			LeftType  string `json:"left_type"`
+			RightType string `json:"right_type"`
+			Equal     bool   `json:"equal"`
+			Summary   string `json:"summary"`
+			Changes   []struct {
+				Path string `json:"path"`
+				Op   string `json:"op"`
+			} `json:"changes"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+			t.Fatalf("unmarshal json: %v\nOutput:\n%s", err, stdout)
+		}
+
+		if doc.LeftType != "TransactionResult" || doc.RightType != "TransactionResult" {
+			t.Errorf("types = %s/%s, want TransactionResult", doc.LeftType, doc.RightType)
+		}
+		if doc.Equal {
+			t.Error("Equal = true, want false")
+		}
+		if len(doc.Changes) == 0 {
+			t.Error("Changes is empty, want non-empty")
+		}
+	})
+
+	t.Run("diff identical values with --format json", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, _, err := run(t, "", "diff", "--format", "json",
+			fixturePath("tx_failed.res"), fixturePath("tx_failed.res"))
+		if err != nil {
+			t.Fatalf("diff --format json identical error = %v", err)
+		}
+
+		var doc struct {
+			Equal   bool   `json:"equal"`
+			Summary string `json:"summary"`
+			Changes []any  `json:"changes"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+			t.Fatalf("unmarshal json: %v\nOutput:\n%s", err, stdout)
+		}
+
+		if !doc.Equal {
+			t.Error("Equal = false, want true")
+		}
+		if doc.Summary != "no differences" {
+			t.Errorf("Summary = %q, want 'no differences'", doc.Summary)
+		}
+		if len(doc.Changes) != 0 {
+			t.Errorf("Changes len = %d, want 0", len(doc.Changes))
+		}
+	})
+
+	t.Run("unknown format returns error", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := run(t, "", "diff", "--format", "invalid_fmt",
+			fixturePath("tx_failed.res"), fixturePath("tx_failed.res"))
+		if err == nil {
+			t.Fatal("expected error for unknown format, got nil")
+		}
+		if !strings.Contains(err.Error(), "unknown format") {
+			t.Errorf("error = %v, want mention of unknown format", err)
+		}
+	})
+}

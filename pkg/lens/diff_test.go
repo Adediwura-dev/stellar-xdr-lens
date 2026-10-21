@@ -788,3 +788,367 @@ func TestDiffNumericThreshold(t *testing.T) {
 		}
 	})
 }
+
+func ptrHelper[T any](v T) *T { return &v }
+
+func TestDiffOperationReorderingDetection(t *testing.T) {
+	t.Parallel()
+
+	opA := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypeManageData,
+			ManageDataOp: &xdr.ManageDataOp{
+				DataName: "first",
+			},
+		},
+	}
+	opB := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypeManageData,
+			ManageDataOp: &xdr.ManageDataOp{
+				DataName: "second",
+			},
+		},
+	}
+	destAccountID := xdr.MustAddress("GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6")
+	destMuxed := destAccountID.ToMuxedAccount()
+	opC := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypePayment,
+			PaymentOp: &xdr.PaymentOp{
+				Destination: destMuxed,
+				Asset:       xdr.Asset{Type: xdr.AssetTypeAssetTypeNative},
+				Amount:      1000,
+			},
+		},
+	}
+	opCModified := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type: xdr.OperationTypePayment,
+			PaymentOp: &xdr.PaymentOp{
+				Destination: destMuxed,
+				Asset:       xdr.Asset{Type: xdr.AssetTypeAssetTypeNative},
+				Amount:      2000,
+			},
+		},
+	}
+
+	t.Run("operations 0 and 1 swapped", func(t *testing.T) {
+		t.Parallel()
+
+		env1 := xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: destMuxed,
+					Fee:           100,
+					SeqNum:        1,
+					Operations:    []xdr.Operation{opA, opB},
+				},
+			},
+		}
+		env2 := xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: destMuxed,
+					Fee:           100,
+					SeqNum:        1,
+					Operations:    []xdr.Operation{opB, opA},
+				},
+			},
+		}
+
+		got, err := lens.DiffBase64(mustMarshal(t, env1), mustMarshal(t, env2), "TransactionEnvelope")
+		if err != nil {
+			t.Fatalf("DiffBase64() error = %v", err)
+		}
+		if got.Equal() {
+			t.Fatal("expected diff for swapped operations, got equal")
+		}
+		if len(got.Changes) != 2 {
+			t.Fatalf("expected 2 changes, got %d: %+v", len(got.Changes), got.Changes)
+		}
+
+		// Ensure both are reported as reordered and not delete/insert pairs
+		for _, c := range got.Changes {
+			if c.Op != lens.ChangeReordered {
+				t.Errorf("change op = %v (%s), want ChangeReordered", c.Op, c.Op.String())
+			}
+			if !strings.Contains(c.Path, "Operations[") {
+				t.Errorf("path %q does not target an Operation index", c.Path)
+			}
+		}
+
+		if got.Summary() != "2 reordered" {
+			t.Errorf("Summary() = %q, want %q", got.Summary(), "2 reordered")
+		}
+	})
+
+	t.Run("swapped operations with one modified operation", func(t *testing.T) {
+		t.Parallel()
+
+		env1 := xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: destMuxed,
+					Fee:           100,
+					SeqNum:        1,
+					Operations:    []xdr.Operation{opA, opB, opC},
+				},
+			},
+		}
+		env2 := xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					SourceAccount: destMuxed,
+					Fee:           100,
+					SeqNum:        1,
+					Operations:    []xdr.Operation{opB, opA, opCModified},
+				},
+			},
+		}
+
+		got, err := lens.DiffBase64(mustMarshal(t, env1), mustMarshal(t, env2), "TransactionEnvelope")
+		if err != nil {
+			t.Fatalf("DiffBase64() error = %v", err)
+		}
+		if got.Equal() {
+			t.Fatal("expected diff, got equal")
+		}
+
+		var reorderedCount, modifiedCount int
+		for _, c := range got.Changes {
+			switch c.Op {
+			case lens.ChangeReordered:
+				reorderedCount++
+			case lens.ChangeModified:
+				modifiedCount++
+			}
+		}
+		if reorderedCount != 2 {
+			t.Errorf("reorderedCount = %d, want 2", reorderedCount)
+		}
+		if modifiedCount < 1 {
+			t.Errorf("modifiedCount = %d, want at least 1", modifiedCount)
+		}
+	})
+}
+
+func TestDiffContractEventsLogComparison(t *testing.T) {
+	t.Parallel()
+
+	cidA := xdr.ContractId{1, 2, 3, 4}
+	cidB := xdr.ContractId{5, 6, 7, 8}
+
+	symTransfer := xdr.ScVal{
+		Type: xdr.ScValTypeScvSymbol,
+		Sym:  (*xdr.ScSymbol)(ptrHelper("transfer")),
+	}
+	symMint := xdr.ScVal{
+		Type: xdr.ScValTypeScvSymbol,
+		Sym:  (*xdr.ScSymbol)(ptrHelper("mint")),
+	}
+
+	data100 := xdr.ScVal{
+		Type: xdr.ScValTypeScvU32,
+		U32:  (*xdr.Uint32)(ptrHelper(uint32(100))),
+	}
+	data200 := xdr.ScVal{
+		Type: xdr.ScValTypeScvU32,
+		U32:  (*xdr.Uint32)(ptrHelper(uint32(200))),
+	}
+
+	ev1 := xdr.ContractEvent{
+		ContractId: &cidA,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{symTransfer},
+				Data:   data100,
+			},
+		},
+	}
+	ev1DataChanged := xdr.ContractEvent{
+		ContractId: &cidA,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{symTransfer},
+				Data:   data200,
+			},
+		},
+	}
+	ev2 := xdr.ContractEvent{
+		ContractId: &cidB,
+		Type:       xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{symMint},
+				Data:   data100,
+			},
+		},
+	}
+
+	t.Run("altered data values highlighted", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := lens.DiffContractEvents([]xdr.ContractEvent{ev1, ev2}, []xdr.ContractEvent{ev1DataChanged, ev2})
+		if err != nil {
+			t.Fatalf("DiffContractEvents() error = %v", err)
+		}
+		if got.Equal() {
+			t.Fatal("expected diff, got equal")
+		}
+
+		var foundDataChange bool
+		for _, c := range got.Changes {
+			if strings.Contains(c.Path, "Data") {
+				foundDataChange = true
+				if c.Op != lens.ChangeModified {
+					t.Errorf("Data change Op = %v, want ChangeModified", c.Op)
+				}
+			}
+		}
+		if !foundDataChange {
+			t.Errorf("expected altered data value change, got %+v", got.Changes)
+		}
+	})
+
+	t.Run("topic mutations highlighted", func(t *testing.T) {
+		t.Parallel()
+
+		topicAddr1 := xdr.ScVal{
+			Type:    xdr.ScValTypeScvAddress,
+			Address: &xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeAccount, AccountId: ptrHelper(xdr.MustAddress("GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"))},
+		}
+		topicAddr2 := xdr.ScVal{
+			Type:    xdr.ScValTypeScvAddress,
+			Address: &xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeAccount, AccountId: ptrHelper(xdr.MustAddress("GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"))},
+		}
+
+		evMultiTopic1 := xdr.ContractEvent{
+			ContractId: &cidA,
+			Type:       xdr.ContractEventTypeContract,
+			Body: xdr.ContractEventBody{
+				V0: &xdr.ContractEventV0{
+					Topics: []xdr.ScVal{symTransfer, topicAddr1},
+					Data:   data100,
+				},
+			},
+		}
+		evMultiTopic2 := xdr.ContractEvent{
+			ContractId: &cidA,
+			Type:       xdr.ContractEventTypeContract,
+			Body: xdr.ContractEventBody{
+				V0: &xdr.ContractEventV0{
+					Topics: []xdr.ScVal{symTransfer, topicAddr2},
+					Data:   data100,
+				},
+			},
+		}
+
+		got, err := lens.DiffContractEvents([]xdr.ContractEvent{evMultiTopic1}, []xdr.ContractEvent{evMultiTopic2})
+		if err != nil {
+			t.Fatalf("DiffContractEvents() error = %v", err)
+		}
+		if got.Equal() {
+			t.Fatal("expected diff for topic mutation, got equal")
+		}
+
+		var foundTopicMutation bool
+		for _, c := range got.Changes {
+			if strings.Contains(c.Path, "Topics") {
+				foundTopicMutation = true
+			}
+		}
+		if !foundTopicMutation {
+			t.Errorf("expected topic mutation change, got %+v", got.Changes)
+		}
+	})
+}
+
+func TestDiffAccountSignerQuorumDrift(t *testing.T) {
+	t.Parallel()
+
+	accountID := xdr.MustAddress("GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6")
+	signerKey := xdr.SignerKey{
+		Type:    xdr.SignerKeyTypeSignerKeyTypeEd25519,
+		Ed25519: (*xdr.Uint256)(&[32]byte{1, 2, 3, 4}),
+	}
+
+	acctBefore := xdr.AccountEntry{
+		AccountId:  accountID,
+		Thresholds: [4]byte{2, 1, 2, 3}, // master=2, low=1, med=2, high=3
+		Signers: []xdr.Signer{
+			{Key: signerKey, Weight: 2},
+		},
+	}
+	// Rotation: master locked (0), signer weight 1 -> total reachable 1.
+	// Medium=2, High=3. Total reachable (1) falls below both!
+	acctAfter := xdr.AccountEntry{
+		AccountId:  accountID,
+		Thresholds: [4]byte{0, 1, 2, 3},
+		Signers: []xdr.Signer{
+			{Key: signerKey, Weight: 1},
+		},
+	}
+
+	t.Run("AnalyzeAccountSigners computes power delta and warnings", func(t *testing.T) {
+		t.Parallel()
+
+		analysis := lens.AnalyzeAccountSigners(&acctBefore, &acctAfter)
+		analysis2 := lens.DiffAccountSigners(&acctBefore, &acctAfter)
+		if analysis.BeforeWeight != analysis2.BeforeWeight {
+			t.Errorf("DiffAccountSigners BeforeWeight mismatch")
+		}
+		if analysis.BeforeWeight != 4 {
+			t.Errorf("BeforeWeight = %d, want 4", analysis.BeforeWeight)
+		}
+		if analysis.AfterWeight != 1 {
+			t.Errorf("AfterWeight = %d, want 1", analysis.AfterWeight)
+		}
+		if analysis.WeightDelta != -3 {
+			t.Errorf("WeightDelta = %d, want -3", analysis.WeightDelta)
+		}
+		if analysis.MeetsMedium {
+			t.Error("MeetsMedium = true, want false")
+		}
+		if analysis.MeetsHigh {
+			t.Error("MeetsHigh = true, want false")
+		}
+		if len(analysis.Warnings) < 2 {
+			t.Errorf("expected at least 2 warnings, got %d: %v", len(analysis.Warnings), analysis.Warnings)
+		}
+	})
+
+	t.Run("DiffBase64 reports signing power change and warnings", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := lens.DiffBase64(mustMarshal(t, acctBefore), mustMarshal(t, acctAfter), "AccountEntry")
+		if err != nil {
+			t.Fatalf("DiffBase64() error = %v", err)
+		}
+		if got.Equal() {
+			t.Fatal("expected diff, got equal")
+		}
+
+		var foundPowerChange bool
+		for _, c := range got.Changes {
+			if strings.Contains(c.Path, "EffectiveSigningPower") {
+				foundPowerChange = true
+				if c.Before != uint32(4) || c.After != uint32(1) {
+					t.Errorf("Signing power change = %v -> %v, want 4 -> 1", c.Before, c.After)
+				}
+			}
+		}
+		if !foundPowerChange {
+			t.Errorf("expected EffectiveSigningPower change, got %+v", got.Changes)
+		}
+		if len(got.Warnings) == 0 {
+			t.Errorf("expected warnings on quorum drift, got none")
+		}
+	})
+}
