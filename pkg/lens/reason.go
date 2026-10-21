@@ -385,16 +385,20 @@ var reasons = map[string]reasonText{
 	// ---- Claimable balances -----------------------------------------------
 	"CreateClaimableBalanceResultCodeCreateClaimableBalanceSuccess": ok("The claimable balance was created."),
 	"CreateClaimableBalanceResultCodeCreateClaimableBalanceMalformed": bad(
-		"The claimable balance was structurally invalid.", ""),
+		"The claimable balance was structurally invalid.",
+		"Check that the amount is positive, there are 1-10 unique claimant destinations, and every predicate is valid."),
 	"CreateClaimableBalanceResultCodeCreateClaimableBalanceLowReserve": bad(
 		"The account cannot meet the reserve required for the claimable balance.",
-		"The reserve scales with the number of claimants."),
+		"A claimable balance locks two base reserves plus one per claimant. Add XLM or reduce the number of claimants."),
 	"CreateClaimableBalanceResultCodeCreateClaimableBalanceNoTrust": bad(
-		"The account has no trustline for the asset.", ""),
+		"The account has no trustline for the asset.",
+		"Open a trustline for the asset with change-trust before creating the balance. Claimants only need a trustline when they claim."),
 	"CreateClaimableBalanceResultCodeCreateClaimableBalanceNotAuthorized": bad(
-		"The account is not authorised to transact this asset.", ""),
+		"The account is not authorised to transact this asset.",
+		"The issuer must authorise the creator's trustline. Claimants also need an authorised trustline before claiming."),
 	"CreateClaimableBalanceResultCodeCreateClaimableBalanceUnderfunded": bad(
-		"The account does not hold enough of the asset.", ""),
+		"The account does not hold enough of the asset.",
+		"Fund the creating account with the full amount before retrying. Claimants cannot contribute to the balance."),
 
 	"ClaimClaimableBalanceResultCodeClaimClaimableBalanceSuccess": ok("The claimable balance was claimed."),
 	"ClaimClaimableBalanceResultCodeClaimClaimableBalanceDoesNotExist": bad(

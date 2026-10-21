@@ -1916,3 +1916,432 @@ func TestExplainPairPathPaymentAndTrustLineDiagnostics(t *testing.T) {
 		t.Error("Operations[1].TrustLine.RevokingAuth = false, want true")
 	}
 }
+
+// claimableBalanceClaimant builds a v0 claimant for synthetic claimable
+// balance operations.
+func claimableBalanceClaimant(t *testing.T, destination string, predicate xdr.ClaimPredicate) xdr.Claimant {
+	t.Helper()
+	return xdr.Claimant{
+		Type: xdr.ClaimantTypeClaimantTypeV0,
+		V0: &xdr.ClaimantV0{
+			Destination: mustAccountID(t, destination),
+			Predicate:   predicate,
+		},
+	}
+}
+
+func unconditionalClaimant(t *testing.T, destination string) xdr.Claimant {
+	t.Helper()
+	return claimableBalanceClaimant(t, destination, xdr.ClaimPredicate{
+		Type: xdr.ClaimPredicateTypeClaimPredicateUnconditional,
+	})
+}
+
+// createClaimableBalanceEnvelope builds a one-operation envelope carrying a
+// create_claimable_balance operation with the supplied arguments.
+func createClaimableBalanceEnvelope(t *testing.T, asset xdr.Asset, amount xdr.Int64, claimants ...xdr.Claimant) *xdr.TransactionEnvelope {
+	t.Helper()
+	return &xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: mustMuxed(t, testSource),
+				Fee:           xdr.Uint32(100),
+				SeqNum:        xdr.SequenceNumber(12345),
+				Cond:          noCond(),
+				Operations: []xdr.Operation{{
+					Body: xdr.OperationBody{
+						Type: xdr.OperationTypeCreateClaimableBalance,
+						CreateClaimableBalanceOp: &xdr.CreateClaimableBalanceOp{
+							Asset:     asset,
+							Amount:    amount,
+							Claimants: claimants,
+						},
+					},
+				}},
+			},
+		},
+	}
+}
+
+// createClaimableBalanceFailureResult builds a failed transaction result whose
+// single create-claimable-balance operation produced code.
+func createClaimableBalanceFailureResult(code xdr.CreateClaimableBalanceResultCode) *xdr.TransactionResult {
+	results := []xdr.OperationResult{{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type:                         xdr.OperationTypeCreateClaimableBalance,
+			CreateClaimableBalanceResult: &xdr.CreateClaimableBalanceResult{Code: code},
+		},
+	}}
+	return &xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxFailed,
+			Results: &results,
+		},
+	}
+}
+
+// explainSyntheticPair encodes an envelope and result, decodes them through
+// the real path, and explains them together, so the test exercises the same
+// decode and pairing code the CLI does rather than hand-built Values.
+func explainSyntheticPair(t *testing.T, env, res any) *lens.Summary {
+	t.Helper()
+	envVal, err := lens.Decode(mustMarshal(t, env))
+	if err != nil {
+		t.Fatalf("Decode(envelope) error = %v", err)
+	}
+	resVal, err := lens.Decode(mustMarshal(t, res))
+	if err != nil {
+		t.Fatalf("Decode(result) error = %v", err)
+	}
+	got, err := lens.ExplainPair(envVal, resVal)
+	if err != nil {
+		t.Fatalf("ExplainPair() error = %v", err)
+	}
+	return got
+}
+
+// shortAddress mirrors the inline abbreviation lens uses in prose.
+func shortAddress(addr string) string {
+	if len(addr) <= 12 {
+		return addr
+	}
+	return addr[:5] + "…" + addr[len(addr)-4:]
+}
+
+// TestClaimableBalanceReserve pins the protocol's reserve formula: two base
+// reserves for the entry plus one per claimant, at 0.5 XLM each.
+func TestClaimableBalanceReserve(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		claimants int
+		want      int64
+	}{
+		{-1, 10_000_000},
+		{0, 10_000_000},
+		{1, 15_000_000},
+		{2, 20_000_000},
+		{10, 60_000_000},
+	}
+	for _, tc := range tests {
+		if got := lens.ClaimableBalanceReserve(tc.claimants); got != tc.want {
+			t.Errorf("ClaimableBalanceReserve(%d) = %d stroops, want %d", tc.claimants, got, tc.want)
+		}
+	}
+}
+
+// TestExplainCreateClaimableBalanceFailureContext covers the diagnostics that
+// the result code alone cannot carry: which asset, amount and claimants the
+// operation was about, which account needs the trustline, and how much reserve
+// the balance locks.
+func TestExplainCreateClaimableBalanceFailureContext(t *testing.T) {
+	t.Parallel()
+
+	usdc := creditAsset(t, "USDC", testIssuer)
+	native := xdr.Asset{Type: xdr.AssetTypeAssetTypeNative}
+	unconditionalDest := unconditionalClaimant(t, testDest)
+	unconditionalIssuer := unconditionalClaimant(t, testIssuer)
+
+	// A one-child AND predicate is malformed: the protocol requires exactly
+	// two operands.
+	oneChild := []xdr.ClaimPredicate{{Type: xdr.ClaimPredicateTypeClaimPredicateUnconditional}}
+	badPredicate := claimableBalanceClaimant(t, testDest, xdr.ClaimPredicate{
+		Type:          xdr.ClaimPredicateTypeClaimPredicateAnd,
+		AndPredicates: &oneChild,
+	})
+
+	tests := []struct {
+		name        string
+		asset       xdr.Asset
+		amount      xdr.Int64
+		claimants   []xdr.Claimant
+		code        xdr.CreateClaimableBalanceResultCode
+		wantCode    string
+		wantContext []string
+		wantHint    string
+	}{
+		{
+			name:      "low reserve states the claimant count and reserve formula",
+			asset:     usdc,
+			amount:    10_0000000,
+			claimants: []xdr.Claimant{unconditionalDest, unconditionalIssuer},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceLowReserve,
+			wantCode:  "create_claimable_balance_low_reserve",
+			wantContext: []string{
+				"USDC:", "2 claimant", "(2 + 2)", "0.5 XLM", "2 XLM",
+				testSource, "reserve",
+			},
+			wantHint: "two base reserves",
+		},
+		{
+			name:      "no trust names the source account and asset",
+			asset:     usdc,
+			amount:    10_0000000,
+			claimants: []xdr.Claimant{unconditionalDest},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceNoTrust,
+			wantCode:  "create_claimable_balance_no_trust",
+			wantContext: []string{
+				"USDC:", "trustline", "change-trust",
+				testSource, "claim",
+			},
+			wantHint: "trustline",
+		},
+		{
+			name:      "not authorized names the issuer requirement",
+			asset:     usdc,
+			amount:    10_0000000,
+			claimants: []xdr.Claimant{unconditionalDest},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceNotAuthorized,
+			wantCode:  "create_claimable_balance_not_authorized",
+			wantContext: []string{
+				"USDC:", "not authorised", "issuer",
+				testSource,
+			},
+			wantHint: "authorise",
+		},
+		{
+			name:      "underfunded names the amount, asset and claimants",
+			asset:     usdc,
+			amount:    25_0000000,
+			claimants: []xdr.Claimant{unconditionalDest, unconditionalIssuer},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceUnderfunded,
+			wantCode:  "create_claimable_balance_underfunded",
+			wantContext: []string{
+				"25.0000000", "USDC:", testDest,
+				testIssuer, "trustline",
+			},
+			wantHint: "Fund",
+		},
+		{
+			name:      "underfunded native explains available balance",
+			asset:     native,
+			amount:    5_0000000,
+			claimants: []xdr.Claimant{unconditionalDest},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceUnderfunded,
+			wantCode:  "create_claimable_balance_underfunded",
+			wantContext: []string{
+				"XLM", "spendable", "selling liabilities", "minimum reserve",
+			},
+			wantHint: "Fund",
+		},
+		{
+			name:      "malformed names a duplicate destination",
+			asset:     usdc,
+			amount:    10_0000000,
+			claimants: []xdr.Claimant{unconditionalDest, unconditionalDest},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceMalformed,
+			wantCode:  "create_claimable_balance_malformed",
+			wantContext: []string{
+				"malformed", testDest, "more than once",
+			},
+		},
+		{
+			name:      "malformed rejects a non-positive amount",
+			asset:     usdc,
+			amount:    0,
+			claimants: []xdr.Claimant{unconditionalDest},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceMalformed,
+			wantCode:  "create_claimable_balance_malformed",
+			wantContext: []string{
+				"malformed", "amount must be positive",
+			},
+		},
+		{
+			name:      "malformed rejects an empty claimant list",
+			asset:     usdc,
+			amount:    10_0000000,
+			claimants: nil,
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceMalformed,
+			wantCode:  "create_claimable_balance_malformed",
+			wantContext: []string{
+				"malformed", "no claimants", "between 1 and 10",
+			},
+		},
+		{
+			name:      "malformed names the claimant with an invalid predicate",
+			asset:     usdc,
+			amount:    10_0000000,
+			claimants: []xdr.Claimant{badPredicate},
+			code:      xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceMalformed,
+			wantCode:  "create_claimable_balance_malformed",
+			wantContext: []string{
+				testDest, "invalid predicate", "exactly 2 children",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := createClaimableBalanceEnvelope(t, tc.asset, tc.amount, tc.claimants...)
+			got := explainSyntheticPair(t, env, createClaimableBalanceFailureResult(tc.code))
+
+			if len(got.Operations) != 1 {
+				t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+			}
+			op := got.Operations[0]
+			if op.Type != "create_claimable_balance" {
+				t.Fatalf("Operations[0].Type = %q, want create_claimable_balance", op.Type)
+			}
+			if op.Result == nil {
+				t.Fatal("Operations[0].Result is nil")
+			}
+			if op.Result.Code != tc.wantCode {
+				t.Errorf("Result.Code = %q, want %q", op.Result.Code, tc.wantCode)
+			}
+			if op.Result.Context == "" {
+				t.Fatal("Result.Context is empty, want envelope-derived diagnostics")
+			}
+			for _, want := range tc.wantContext {
+				if !strings.Contains(op.Result.Context, want) {
+					t.Errorf("Result.Context = %q, want it to contain %q", op.Result.Context, want)
+				}
+			}
+			if tc.wantHint != "" && !strings.Contains(op.Result.Hint, tc.wantHint) {
+				t.Errorf("Result.Hint = %q, want it to contain %q", op.Result.Hint, tc.wantHint)
+			}
+			if !strings.Contains(got.Headline, "create_claimable_balance") {
+				t.Errorf("Headline = %q, want it to name the failing operation", got.Headline)
+			}
+		})
+	}
+}
+
+// TestExplainCreateClaimableBalanceDetail verifies that the operation
+// description, which feeds the headline, names the asset and claimants even
+// when no result was supplied.
+func TestExplainCreateClaimableBalanceDetail(t *testing.T) {
+	t.Parallel()
+
+	env := createClaimableBalanceEnvelope(t,
+		creditAsset(t, "USDC", testIssuer),
+		10_0000000,
+		unconditionalClaimant(t, testDest),
+		unconditionalClaimant(t, testIssuer),
+	)
+	got := explainSyntheticPair(t, env, createClaimableBalanceFailureResult(
+		xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceNoTrust))
+
+	detail := got.Operations[0].Detail
+	for _, want := range []string{"10.0000000", "USDC:", shortAddress(testDest), shortAddress(testIssuer)} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("Detail = %q, want it to contain %q", detail, want)
+		}
+	}
+	if !strings.Contains(got.Headline, "USDC:") {
+		t.Errorf("Headline = %q, want it to name the asset", got.Headline)
+	}
+}
+
+// TestExplainCreateClaimableBalanceResultOnlyHasNoContext pins the
+// offline-first contract: without an envelope there is no asset or claimant to
+// name, and lens must not invent one.
+func TestExplainCreateClaimableBalanceResultOnlyHasNoContext(t *testing.T) {
+	t.Parallel()
+
+	resVal, err := lens.Decode(mustMarshal(t, createClaimableBalanceFailureResult(
+		xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceLowReserve)))
+	if err != nil {
+		t.Fatalf("Decode(result) error = %v", err)
+	}
+	got, err := lens.Explain(resVal)
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+	if len(got.Operations) != 1 || got.Operations[0].Result == nil {
+		t.Fatalf("Operations = %+v, want one operation with a result", got.Operations)
+	}
+	if got.Operations[0].Result.Context != "" {
+		t.Errorf("Result.Context = %q, want empty without an envelope", got.Operations[0].Result.Context)
+	}
+}
+
+// TestExplainMalformedClaimableBalancePredicates exercises each structural
+// predicate rule separately, since a malformed result names the claimant whose
+// predicate failed rather than only the operation as a whole.
+func TestExplainMalformedClaimableBalancePredicates(t *testing.T) {
+	t.Parallel()
+
+	absNegative := xdr.Int64(-1)
+	relNegative := xdr.Int64(-1)
+	emptyChildren := []xdr.ClaimPredicate{}
+	var nilChild *xdr.ClaimPredicate
+
+	var deep xdr.ClaimPredicate
+	deep = xdr.ClaimPredicate{Type: xdr.ClaimPredicateTypeClaimPredicateUnconditional}
+	for range 5 {
+		inner := deep
+		innerPtr := &inner
+		deep = xdr.ClaimPredicate{
+			Type:         xdr.ClaimPredicateTypeClaimPredicateNot,
+			NotPredicate: &innerPtr,
+		}
+	}
+
+	tests := []struct {
+		name      string
+		predicate xdr.ClaimPredicate
+		want      string
+	}{
+		{
+			name: "negative absolute time",
+			predicate: xdr.ClaimPredicate{
+				Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime,
+				AbsBefore: &absNegative,
+			},
+			want: "absolute-time predicate cannot be negative",
+		},
+		{
+			name: "negative relative time",
+			predicate: xdr.ClaimPredicate{
+				Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeRelativeTime,
+				RelBefore: &relNegative,
+			},
+			want: "relative-time predicate cannot be negative",
+		},
+		{
+			name: "not without a child",
+			predicate: xdr.ClaimPredicate{
+				Type:         xdr.ClaimPredicateTypeClaimPredicateNot,
+				NotPredicate: &nilChild,
+			},
+			want: "not predicate has no child",
+		},
+		{
+			name: "and without children",
+			predicate: xdr.ClaimPredicate{
+				Type:          xdr.ClaimPredicateTypeClaimPredicateAnd,
+				AndPredicates: &emptyChildren,
+			},
+			want: "exactly 2 children, not 0",
+		},
+		{
+			name:      "nesting deeper than the protocol limit",
+			predicate: deep,
+			want:      "at most 4 levels deep",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			claimant := claimableBalanceClaimant(t, testDest, tc.predicate)
+			env := createClaimableBalanceEnvelope(t,
+				creditAsset(t, "USDC", testIssuer), 10_0000000, claimant)
+			got := explainSyntheticPair(t, env, createClaimableBalanceFailureResult(
+				xdr.CreateClaimableBalanceResultCodeCreateClaimableBalanceMalformed))
+
+			context := got.Operations[0].Result.Context
+			for _, want := range []string{testDest, "invalid predicate", tc.want} {
+				if !strings.Contains(context, want) {
+					t.Errorf("Result.Context = %q, want it to contain %q", context, want)
+				}
+			}
+		})
+	}
+}

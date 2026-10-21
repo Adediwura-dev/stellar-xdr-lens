@@ -336,7 +336,9 @@ func deepenOperationFailure(source string, op xdr.Operation, r Reason) Reason {
 			return deepenRestoreFootprintFailure(body, r)
 		}
 	case strings.HasPrefix(r.Constant, "ManageDataResultCode"):
-		return withOperationContext(r, op)
+		return withOperationContext(r, op, source)
+	case strings.HasPrefix(r.Constant, "CreateClaimableBalanceResultCode"):
+		return withOperationContext(r, op, source)
 	}
 	return r
 }
@@ -791,21 +793,54 @@ func innerResultCodeName(res *xdr.TransactionResult) (string, bool) {
 // so this is the well-known default rather than a live value.
 const manageDataReservePerEntry = "0.5 XLM"
 
+// claimableBalanceBaseReserve is the public-network base reserve in stroops,
+// used for claimable-balance reserve arithmetic. Like the manage_data figure
+// above it is a documented constant rather than a network lookup: lens is
+// offline-first and never reads ledger parameters at runtime.
+const claimableBalanceBaseReserve int64 = int64(DefaultBaseReserve)
+
+// ClaimableBalanceReserve returns the native reserve, in stroops, that a
+// claimable balance locks on its creator's account.
+//
+// The protocol charges two base reserves for the entry itself and one more for
+// each claimant, so the requirement is baseReserve * (2 + claimantCount). With
+// the mainnet default of 0.5 XLM per base reserve, a balance with two claimants
+// therefore locks 2 XLM. A negative claimantCount is treated as zero.
+func ClaimableBalanceReserve(claimantCount int) int64 {
+	if claimantCount < 0 {
+		claimantCount = 0
+	}
+	return int64(2+claimantCount) * claimableBalanceBaseReserve
+}
+
 // withOperationContext adds argument-specific detail to a result code when the
 // envelope carries enough information to produce it.
 //
-// A manage_data result code says what went wrong but not which entry it was
-// about. The entry key lives only in the envelope, so it is resolved here and
-// attached to the Reason rather than folded into the static reason table,
-// which has no access to the operation.
-func withOperationContext(r Reason, op xdr.Operation) Reason {
-	if op.Body.Type != xdr.OperationTypeManageData {
+// A result code says what went wrong but not necessarily which entry, asset or
+// claimant it was about: those live only in the envelope. They are resolved
+// here and attached to the Reason rather than folded into the static reason
+// table, which has no access to the operation.
+func withOperationContext(r Reason, op xdr.Operation, txSource string) Reason {
+	switch op.Body.Type {
+	case xdr.OperationTypeManageData:
+		md, ok := op.Body.GetManageDataOp()
+		if !ok {
+			return r
+		}
+		return withManageDataContext(r, md)
+	case xdr.OperationTypeCreateClaimableBalance:
+		cb, ok := op.Body.GetCreateClaimableBalanceOp()
+		if !ok {
+			return r
+		}
+		return withCreateClaimableBalanceContext(r, cb, operationEffectiveSource(txSource, op))
+	default:
 		return r
 	}
-	md, ok := op.Body.GetManageDataOp()
-	if !ok {
-		return r
-	}
+}
+
+// withManageDataContext names the manage_data entry a failure was about.
+func withManageDataContext(r Reason, md xdr.ManageDataOp) Reason {
 	key := string(md.DataName)
 
 	switch r.Constant {
@@ -821,6 +856,214 @@ func withOperationContext(r Reason, op xdr.Operation) Reason {
 			"the data entry name %q is not valid: names must be 1-64 bytes, and an empty name cannot be set or deleted.", key)
 	}
 	return r
+}
+
+// withCreateClaimableBalanceContext correlates a create_claimable_balance
+// failure with the asset, amount, claimants and source account in the
+// envelope, and states the trustline or reserve requirement that was missed.
+//
+// The static reason table deliberately stays free of argument detail so that
+// result-only explanations keep working; everything operation-specific is
+// added here.
+func withCreateClaimableBalanceContext(r Reason, op xdr.CreateClaimableBalanceOp, source string) Reason {
+	asset := assetLabel(op.Asset)
+	amountText := amount.String(op.Amount)
+	claimants := claimableBalanceClaimantList(op.Claimants, false)
+	sourceLabel := "the source account"
+	if source != "" {
+		sourceLabel = source
+	}
+
+	switch r.Constant {
+	case "CreateClaimableBalanceResultCodeCreateClaimableBalanceMalformed":
+		r.Context = malformedClaimableBalanceContext(op, asset, amountText)
+
+	case "CreateClaimableBalanceResultCodeCreateClaimableBalanceLowReserve":
+		reserve := ClaimableBalanceReserve(len(op.Claimants))
+		r.Context = fmt.Sprintf(
+			"the claimable balance of %s %s has %d claimant(s) (%s), so it locks %s of native reserve: two base reserves for the entry plus one per claimant, at 0.5 XLM each ((2 + %d) × 0.5 XLM). %s must hold that on top of its existing reserve; add XLM or shorten the claimant list before retrying.",
+			amountText, asset, len(op.Claimants), claimants, compactXLM(reserve), len(op.Claimants), sourceLabel)
+
+	case "CreateClaimableBalanceResultCodeCreateClaimableBalanceNoTrust":
+		r.Context = fmt.Sprintf(
+			"the claimable balance would lock %s %s, but %s has no trustline for %s. Open a trustline with a change-trust operation (limit above zero) before retrying; claimants only need their own trustline when they claim the balance.",
+			amountText, asset, sourceLabel, asset)
+
+	case "CreateClaimableBalanceResultCodeCreateClaimableBalanceNotAuthorized":
+		r.Context = fmt.Sprintf(
+			"the claimable balance would lock %s %s, but %s is not authorised to hold %s. The asset issuer must authorise that trustline before the balance can be created; claimants also need an authorised trustline when they claim.",
+			amountText, asset, sourceLabel, asset)
+
+	case "CreateClaimableBalanceResultCodeCreateClaimableBalanceUnderfunded":
+		if op.Asset.Type == xdr.AssetTypeAssetTypeNative {
+			r.Context = fmt.Sprintf(
+				"the claimable balance would lock %s XLM for %s, but %s does not hold enough spendable XLM: the amount must fit after selling liabilities and the account's minimum reserve. Claimants cannot contribute; fund the creator or lower the amount.",
+				amountText, claimants, sourceLabel)
+		} else {
+			r.Context = fmt.Sprintf(
+				"the claimable balance would lock %s %s for %s, but %s holds less than that on its %s trustline. Claimants cannot contribute; fund the creator or lower the amount.",
+				amountText, asset, claimants, sourceLabel, asset)
+		}
+	}
+	return r
+}
+
+// compactXLM renders a stroop count without the trailing decimal zeros that
+// reserve arithmetic would otherwise show, e.g. "2 XLM" rather than
+// "2.0000000 XLM".
+func compactXLM(stroops int64) string {
+	text := strings.TrimRight(amount.StringFromInt64(stroops), "0")
+	text = strings.TrimSuffix(text, ".")
+	if text == "" || text == "-" {
+		text += "0"
+	}
+	return text + " XLM"
+}
+
+// malformedClaimableBalanceContext names the first structural problem found in
+// a malformed create-claimable-balance operation. The checks mirror
+// stellar-core's doCheckValid: a positive amount, 1-10 claimants, no duplicate
+// destinations, and valid predicates.
+func malformedClaimableBalanceContext(op xdr.CreateClaimableBalanceOp, asset, amountText string) string {
+	prefix := fmt.Sprintf("the claimable balance of %s %s is malformed: ", amountText, asset)
+
+	switch {
+	case op.Amount <= 0:
+		return prefix + "the amount must be positive; a zero or negative amount cannot be locked."
+	case len(op.Claimants) == 0:
+		return prefix + "it lists no claimants, so nobody could ever claim it; provide between 1 and 10 claimants."
+	case len(op.Claimants) > 10:
+		return fmt.Sprintf("%sit lists %d claimants, but the protocol allows at most 10.", prefix, len(op.Claimants))
+	}
+
+	if duplicates := duplicateClaimantDestinations(op.Claimants); len(duplicates) > 0 {
+		return fmt.Sprintf("%sclaimant %s appears more than once; each destination may appear only once, even with different predicates.",
+			prefix, strings.Join(duplicates, ", "))
+	}
+	for _, claimant := range op.Claimants {
+		v0, ok := claimant.GetV0()
+		if !ok {
+			continue
+		}
+		if problem := claimPredicateProblem(v0.Predicate, 1); problem != "" {
+			return fmt.Sprintf("%sclaimant %s has an invalid predicate: %s.",
+				prefix, v0.Destination.Address(), problem)
+		}
+	}
+	return prefix + "check that the amount is positive, there are 1-10 unique claimants, and every predicate is valid."
+}
+
+// claimableBalanceClaimantList renders claimants for inline prose, capping the
+// list so a ten-claimant operation stays readable. Context uses full strkey
+// addresses because a developer copying one into a change-trust operation
+// needs the unambiguous form; the one-line operation detail abbreviates them.
+func claimableBalanceClaimantList(claimants []xdr.Claimant, abbreviate bool) string {
+	if len(claimants) == 0 {
+		return "no claimants"
+	}
+	const maxListed = 3
+	parts := make([]string, 0, maxListed+1)
+	for i, claimant := range claimants {
+		if i == maxListed {
+			parts = append(parts, fmt.Sprintf("and %d more", len(claimants)-maxListed))
+			break
+		}
+		parts = append(parts, claimableBalanceClaimantLabel(claimant, abbreviate))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// claimableBalanceClaimantLabel names one claimant and its predicate.
+func claimableBalanceClaimantLabel(claimant xdr.Claimant, abbreviate bool) string {
+	v0, ok := claimant.GetV0()
+	if !ok {
+		return "an unsupported claimant type"
+	}
+	addr := v0.Destination.Address()
+	if abbreviate {
+		addr = shortAddr(addr)
+	}
+	return fmt.Sprintf("%s (%s)", addr, DescribeClaimPredicate(v0.Predicate))
+}
+
+// duplicateClaimantDestinations returns the destinations that appear more than
+// once. The protocol rejects duplicate destinations regardless of predicate.
+func duplicateClaimantDestinations(claimants []xdr.Claimant) []string {
+	seen := make(map[string]bool, len(claimants))
+	reported := make(map[string]bool)
+	var duplicates []string
+	for _, claimant := range claimants {
+		v0, ok := claimant.GetV0()
+		if !ok {
+			continue
+		}
+		addr := v0.Destination.Address()
+		if seen[addr] && !reported[addr] {
+			reported[addr] = true
+			duplicates = append(duplicates, addr)
+			continue
+		}
+		seen[addr] = true
+	}
+	return duplicates
+}
+
+// claimPredicateProblem validates one predicate arm against the protocol's
+// structural rules and returns a description of the first violation. depth is
+// the nesting level, starting at 1; stellar-core rejects anything past four.
+func claimPredicateProblem(p xdr.ClaimPredicate, depth int) string {
+	if depth > 4 {
+		return "predicates may nest at most 4 levels deep"
+	}
+	switch p.Type {
+	case xdr.ClaimPredicateTypeClaimPredicateUnconditional:
+		return ""
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime:
+		if p.AbsBefore == nil {
+			return "an absolute-time predicate has no time"
+		}
+		if *p.AbsBefore < 0 {
+			return "an absolute-time predicate cannot be negative"
+		}
+		return ""
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeRelativeTime:
+		if p.RelBefore == nil {
+			return "a relative-time predicate has no duration"
+		}
+		if *p.RelBefore < 0 {
+			return "a relative-time predicate cannot be negative"
+		}
+		return ""
+	case xdr.ClaimPredicateTypeClaimPredicateNot:
+		if p.NotPredicate == nil || *p.NotPredicate == nil {
+			return "a not predicate has no child"
+		}
+		return claimPredicateProblem(**p.NotPredicate, depth+1)
+	case xdr.ClaimPredicateTypeClaimPredicateAnd, xdr.ClaimPredicateTypeClaimPredicateOr:
+		var children []xdr.ClaimPredicate
+		if p.Type == xdr.ClaimPredicateTypeClaimPredicateAnd {
+			if p.AndPredicates == nil {
+				return "an and predicate has no children"
+			}
+			children = *p.AndPredicates
+		} else {
+			if p.OrPredicates == nil {
+				return "an or predicate has no children"
+			}
+			children = *p.OrPredicates
+		}
+		if len(children) != 2 {
+			return fmt.Sprintf("an %s predicate must have exactly 2 children, not %d", strings.ToLower(strings.TrimPrefix(p.Type.String(), "ClaimPredicateTypeClaimPredicate")), len(children))
+		}
+		for _, child := range children {
+			if problem := claimPredicateProblem(child, depth+1); problem != "" {
+				return problem
+			}
+		}
+		return ""
+	default:
+		return "unknown predicate type"
+	}
 }
 
 func envelopeHeadline(s *Summary) string {
@@ -992,6 +1235,14 @@ func describeOperation(op xdr.Operation) string {
 			break
 		}
 		return fmt.Sprintf("bump sequence number to %d", int64(o.BumpTo))
+
+	case xdr.OperationTypeCreateClaimableBalance:
+		o, ok := body.GetCreateClaimableBalanceOp()
+		if !ok {
+			break
+		}
+		return fmt.Sprintf("create claimable balance of %s %s claimable by %s",
+			amount.String(o.Amount), assetLabel(o.Asset), claimableBalanceClaimantList(o.Claimants, true))
 
 	case xdr.OperationTypeManageData:
 		o, ok := body.GetManageDataOp()
