@@ -42,7 +42,12 @@ pre-operation check failures from operation execution failures.
 Use --meta / --meta-file to correlate trapped Soroban host invocations with
 diagnostic events and display contract panic messages.
 Use --resources to add a Soroban resource and fee breakdown, including
-protocol-limit comparison and an explicit EXCEEDED marker.`,
+protocol-limit comparison and an explicit EXCEEDED marker.
+
+Paired results also deepen account_merge failures: the guidance names the
+subentry classes that still block the merge and the operations that close
+them, the ledger-sequence bound behind seqnum_too_far, and the destination's
+lumen buying liabilities behind dest_full.`,
 		Example: `  # Envelope alone: what would this transaction do?
   lens explain "$ENVELOPE"
 

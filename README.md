@@ -122,13 +122,18 @@ Outcome
 ```
 
 All 208 protocol result codes have a written explanation. When an envelope is
-paired with its result, `set_options` and liquidity-pool failures are also
-diagnosed from the operation's own parameters: which threshold weight exceeded
-255, which flag bit is contradictory or unrecognised, whether the signer is
-the source account itself, whether the pool's price bounds left any room for
-slippage, and which deposit or withdrawal bound is malformed. Use
-`--fail-on-error` to exit with 2 when the transaction failed, which makes
-this usable as a CI gate.
+paired with its result, `set_options`, liquidity-pool and `account_merge`
+failures are also diagnosed from the operation's own parameters: which
+threshold weight exceeded 255, which flag bit is contradictory or
+unrecognised, whether the signer is the source account itself, whether the
+pool's price bounds left any room for slippage, and which deposit or
+withdrawal bound is malformed. An `account_merge` failure names the subentry
+classes that still block the merge — active trustlines, open DEX offers, data
+entries and claimable balances — and the operations that close them, plus the
+ledger-sequence bound behind `seqnum_too_far`, the destination's lumen buying
+liabilities behind `dest_full`, and the fact that `auth_immutable` can never
+be cleared. Use `--fail-on-error` to exit with 2 when the transaction failed,
+which makes this usable as a CI gate.
 
 For `manage_data` failures, the per-operation result also carries a context
 line: the entry key pulled from the envelope, and for `manage_data_low_reserve`

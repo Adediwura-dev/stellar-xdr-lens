@@ -849,6 +849,15 @@ whose cause is provable from the operation's own parameters:
   requested amounts map to `underfunded`, `pool_full`, `line_full` and
   `under_minimum`.
 - **`clawback` / `clawback_claimable_balance`**: when the trustline or claimable balance was created without the clawback-enabled bit, when the target account has no trustline, and when the requested amount exceeds the balance held, the explanation points directly at the issuer flag, trustline state, or insufficient balance rather than only naming the generic protocol code.
+- **`account_merge`**: which non-signer subentries block the merge (active
+  trustlines including pool-share trustlines, open DEX offers, data entries
+  and claimable balances) and the operations that close them; the
+  ledger-sequence bound behind `seqnum_too_far` (`ledgerSeq << 32`, which no
+  transaction can lower); the destination's lumen buying liabilities behind
+  `dest_full`, named with the destination address from the operation body;
+  and the permanence of `auth_immutable` behind `immutable_set`. Each mirrors
+  the corresponding check in stellar-core's `MergeOpFrame::doApply`, in the
+  same order core applies them.
 
 It never touches `Code` or `Constant`, never invents ledger state, and a code
 it cannot pin down keeps the generic per-code text — a result explained

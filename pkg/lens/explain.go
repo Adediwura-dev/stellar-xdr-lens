@@ -319,6 +319,8 @@ func deepenOperationFailure(source string, op xdr.Operation, r Reason) Reason {
 		if body, ok := op.Body.GetLiquidityPoolWithdrawOp(); ok {
 			return deepenLiquidityPoolWithdrawFailure(body, r)
 		}
+	case strings.HasPrefix(r.Constant, "AccountMergeResultCode"):
+		return deepenAccountMergeFailure(operationEffectiveSource(source, op), op, r)
 	case strings.HasPrefix(r.Constant, "ClawbackResultCode"):
 		if body, ok := op.Body.GetClawbackOp(); ok {
 			return deepenClawbackFailure(operationEffectiveSource(source, op), body, r)
@@ -1223,10 +1225,17 @@ func describeOperation(op xdr.Operation) string {
 		return fmt.Sprintf("trust %s up to %s", changeTrustAssetLabel(o.Line), amount.String(o.Limit))
 
 	case xdr.OperationTypeAccountMerge:
+		// The SDK's GetDestination dereferences the arm without a nil check,
+		// so guard before calling it on a hand-built body.
+		if body.Destination == nil {
+			break
+		}
 		dest, ok := body.GetDestination()
 		if !ok {
 			break
 		}
+		// Failure guidance for this operation lives in
+		// deepenAccountMergeFailure, which fires when a result is paired.
 		return "merge this account into " + shortAddr(addressOf(dest))
 
 	case xdr.OperationTypeBumpSequence:
@@ -1911,4 +1920,69 @@ func DiagnoseSetTrustLineFlagsOperation(op xdr.Operation, opIndex int, opRes xdr
 	}
 	reason := explainOperationResult(opRes)
 	return DiagnoseSetTrustLineFlags(sOp, opIndex, reason.Code)
+}
+
+// deepenAccountMergeFailure rewrites the summary and hint for the
+// AccountMerge failures whose remedy can be stated precisely without any
+// ledger access. Code and Constant are never touched.
+//
+// The guidance mirrors what stellar-core actually enforces in
+// MergeOpFrame::doApply, in the order core checks it:
+//
+//   - account_merge_has_sub_entries: core rejects the merge whenever the
+//     source account's subentry count differs from its signer count, so any
+//     non-signer subentry blocks the merge. Signers themselves do not — core
+//     removes them as part of a successful merge.
+//   - account_merge_seqnum_too_far: core refuses to merge an account whose
+//     sequence number has reached the closing ledger's starting sequence
+//     (ledgerSeq << 32), because recreating the account later would let its
+//     sequence number jump backwards.
+//   - account_merge_dest_full: core adds the source's whole XLM balance to
+//     the destination in one step, which fails when the destination's lumen
+//     buying liabilities leave no room for it.
+//   - account_merge_immutable_set: core refuses to merge an account with
+//     AUTH_IMMUTABLE set, and that flag can never be cleared afterwards.
+//
+// The destination address is the only fact read from the operation body;
+// everything else is protocol semantics. No network calls, deterministic
+// output.
+func deepenAccountMergeFailure(source string, op xdr.Operation, r Reason) Reason {
+	if r.Success {
+		return r
+	}
+
+	merger := "the source account"
+	if source != "" {
+		merger = shortAddr(source)
+	}
+	dest := "the destination"
+	if op.Body.Destination != nil {
+		if addr := addressOf(*op.Body.Destination); addr != "" {
+			dest = shortAddr(addr)
+		}
+	}
+
+	switch r.Code {
+	case "account_merge_has_sub_entries":
+		r.Summary = fmt.Sprintf(
+			"The merging account %s still owns non-signer subentries, and the network deletes an account only when its subentry count matches its signer count.",
+			merger)
+		r.Hint = "Every active trustline (including liquidity-pool share trustlines), open DEX offer, data entry, and claimable balance the account created must be removed first. Close them in this order: cancel each open offer with ManageSellOffer or ManageBuyOffer at amount 0; send away or sell each asset balance, withdraw any liquidity pool positions, then remove the trustline by setting its ChangeTrust limit to 0; delete each data entry with a ManageData operation that carries no value. Signers do not block a merge — the network removes them automatically. Resubmit the merge once the account's remaining subentries are only signers."
+	case "account_merge_seqnum_too_far":
+		r.Summary = fmt.Sprintf(
+			"The merging account %s holds a sequence number at or above the starting sequence of the closing ledger (ledger sequence << 32), so merging it now would let a recreated account jump backwards.",
+			merger)
+		r.Hint = "An account's sequence number can never be lowered. If a BumpSequence pushed it past the current ledger sequence times 2^32, the account can no longer be merged: move its funds out with payments instead. Otherwise, confirm the ledger you compared against belongs to the same network this transaction targets."
+	case "account_merge_dest_full":
+		r.Summary = fmt.Sprintf(
+			"Destination %s cannot receive the merging account's full XLM balance: the transfer would push it past the maximum balance its lumen buying liabilities allow.",
+			dest)
+		r.Hint = "The merge moves the entire balance and cannot send a lesser amount. Cancel or shrink the destination's open offers that buy XLM until its lumen buying liabilities leave room for the incoming balance, then resubmit the merge — or merge into a different destination."
+	case "account_merge_immutable_set":
+		r.Summary = fmt.Sprintf(
+			"The merging account %s has the AUTH_IMMUTABLE flag set, and the network refuses to merge an immutable account.",
+			merger)
+		r.Hint = "AUTH_IMMUTABLE is permanent: once set it can never be cleared, so this account can never be merged, and its flags, signers and thresholds can never change again. Move its funds out with ordinary payments instead."
+	}
+	return r
 }

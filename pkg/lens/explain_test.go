@@ -344,6 +344,8 @@ func TestExplainCodeNeverRestatesTheConstant(t *testing.T) {
 		"PaymentResultCodePaymentUnderfunded",
 		"ChangeTrustResultCodeChangeTrustLowReserve",
 		"AccountMergeResultCodeAccountMergeHasSubEntries",
+		"AccountMergeResultCodeAccountMergeSeqnumTooFar",
+		"AccountMergeResultCodeAccountMergeDestFull",
 	}
 
 	for _, c := range samples {
@@ -2344,4 +2346,296 @@ func TestExplainMalformedClaimableBalancePredicates(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// AccountMerge guidance (issue #121)
+// ---------------------------------------------------------------------------
+
+// TestExplainAccountMergeEnvelopeOnly pins the envelope-only behaviour of an
+// AccountMerge operation: the detail line names the destination, and no
+// failure guidance is invented before a result exists.
+func TestExplainAccountMergeEnvelopeOnly(t *testing.T) {
+	t.Parallel()
+
+	const dest = "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+	got, err := lens.Explain(accountMergeEnvelope(t, dest))
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+	if len(got.Operations) != 1 {
+		t.Fatalf("len(Operations) = %d, want 1", len(got.Operations))
+	}
+	if got.Operations[0].Type != "account_merge" {
+		t.Errorf("Operations[0].Type = %q, want %q", got.Operations[0].Type, "account_merge")
+	}
+	wantDetail := "merge this account into " + dest[:5] + "…" + dest[len(dest)-4:]
+	if got.Operations[0].Detail != wantDetail {
+		t.Errorf("Operations[0].Detail = %q, want %q", got.Operations[0].Detail, wantDetail)
+	}
+	if got.Outcome != nil {
+		t.Error("Outcome is set for an envelope-only explanation, want nil")
+	}
+}
+
+// TestExplainAccountMergeContextualFailure drives the public ExplainPair path
+// end to end: a synthetic AccountMerge envelope paired with a synthetic
+// result must replace the generic per-code text with guidance that names the
+// subentry classes blocking a merge, the subentry-closing operations, and the
+// exact bound behind seqnum_too_far and dest_full — while leaving Code and
+// Constant untouched.
+func TestExplainAccountMergeContextualFailure(t *testing.T) {
+	t.Parallel()
+
+	const (
+		source = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
+		dest   = "GA2JRQOF6EA3HQWDCEDBPPMLYPJCFLDDGYZLEQGMS5SOBQIB3BAFHVAW"
+	)
+	sourceShort := source[:5] + "…" + source[len(source)-4:]
+	destShort := dest[:5] + "…" + dest[len(dest)-4:]
+
+	tests := []struct {
+		name          string
+		code          xdr.AccountMergeResultCode
+		constant      string
+		wantSummary   []string
+		wantHint      []string
+		wantUntouched bool
+	}{
+		{
+			name:     "has sub entries",
+			code:     xdr.AccountMergeResultCodeAccountMergeHasSubEntries,
+			constant: "AccountMergeResultCodeAccountMergeHasSubEntries",
+			wantSummary: []string{
+				"non-signer subentries",
+				"subentry count matches its signer count",
+				sourceShort,
+			},
+			wantHint: []string{
+				"trustline",
+				"liquidity-pool share trustlines",
+				"DEX offer",
+				"data entry",
+				"claimable balance",
+				"ManageSellOffer or ManageBuyOffer at amount 0",
+				"ChangeTrust limit to 0",
+				"ManageData operation that carries no value",
+				"Signers do not block a merge",
+			},
+		},
+		{
+			name:     "seqnum too far",
+			code:     xdr.AccountMergeResultCodeAccountMergeSeqnumTooFar,
+			constant: "AccountMergeResultCodeAccountMergeSeqnumTooFar",
+			wantSummary: []string{
+				"sequence number",
+				"ledger sequence << 32",
+				sourceShort,
+			},
+			wantHint: []string{
+				"can never be lowered",
+				"BumpSequence",
+				"times 2^32",
+				"payments instead",
+			},
+		},
+		{
+			name:     "destination full",
+			code:     xdr.AccountMergeResultCodeAccountMergeDestFull,
+			constant: "AccountMergeResultCodeAccountMergeDestFull",
+			wantSummary: []string{
+				destShort,
+				"lumen buying liabilities",
+			},
+			wantHint: []string{
+				"entire balance",
+				"Cancel or shrink the destination's open offers that buy XLM",
+				"different destination",
+			},
+		},
+		{
+			name:     "immutable flag set",
+			code:     xdr.AccountMergeResultCodeAccountMergeImmutableSet,
+			constant: "AccountMergeResultCodeAccountMergeImmutableSet",
+			wantSummary: []string{
+				"AUTH_IMMUTABLE",
+				sourceShort,
+			},
+			wantHint: []string{
+				"permanent",
+				"can never be merged",
+				"ordinary payments instead",
+			},
+		},
+		{
+			// Codes without operation-provable causes keep the generic text.
+			name:          "malformed keeps the generic explanation",
+			code:          xdr.AccountMergeResultCodeAccountMergeMalformed,
+			constant:      "AccountMergeResultCodeAccountMergeMalformed",
+			wantUntouched: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := lens.ExplainPair(accountMergeEnvelope(t, dest), accountMergeResult(t, tc.code))
+			if err != nil {
+				t.Fatalf("ExplainPair() error = %v", err)
+			}
+			if len(got.Operations) != 1 || got.Operations[0].Result == nil {
+				t.Fatalf("want one operation with a result, got %d operations", len(got.Operations))
+			}
+			reason := *got.Operations[0].Result
+
+			if reason.Code == "" {
+				t.Error("Code is empty")
+			}
+			if reason.Constant != tc.constant {
+				t.Errorf("Constant = %q, want %q", reason.Constant, tc.constant)
+			}
+			if reason.Success {
+				t.Error("Success = true, want false")
+			}
+
+			generic := lens.ExplainCode(tc.constant)
+			if tc.wantUntouched {
+				if reason.Summary != generic.Summary || reason.Hint != generic.Hint {
+					t.Errorf("reason = %+v, want the untouched generic text %+v", reason, generic)
+				}
+				return
+			}
+
+			for _, want := range tc.wantSummary {
+				if !strings.Contains(reason.Summary, want) {
+					t.Errorf("Summary = %q, want it to contain %q", reason.Summary, want)
+				}
+			}
+			for _, want := range tc.wantHint {
+				if !strings.Contains(reason.Hint, want) {
+					t.Errorf("Hint = %q, want it to contain %q", reason.Hint, want)
+				}
+			}
+			if strings.EqualFold(strings.ReplaceAll(reason.Summary, " ", ""), reason.Code) {
+				t.Errorf("Summary %q merely restates the code", reason.Summary)
+			}
+		})
+	}
+}
+
+// TestExplainAccountMergeResultOnlyStaysGeneric proves the deepening fires
+// only when the envelope is paired: a result on its own has no operation
+// body, so the generic per-code text must survive unchanged.
+func TestExplainAccountMergeResultOnlyStaysGeneric(t *testing.T) {
+	t.Parallel()
+
+	got, err := lens.Explain(accountMergeResult(t, xdr.AccountMergeResultCodeAccountMergeHasSubEntries))
+	if err != nil {
+		t.Fatalf("Explain() error = %v", err)
+	}
+	if len(got.Operations) != 1 || got.Operations[0].Result == nil {
+		t.Fatalf("want one operation with a result, got %d operations", len(got.Operations))
+	}
+	generic := lens.ExplainCode("AccountMergeResultCodeAccountMergeHasSubEntries")
+	if got.Operations[0].Result.Summary != generic.Summary {
+		t.Errorf("Summary = %q, want the generic %q", got.Operations[0].Result.Summary, generic.Summary)
+	}
+	if got.Operations[0].Result.Hint != generic.Hint {
+		t.Errorf("Hint = %q, want the generic %q", got.Operations[0].Result.Hint, generic.Hint)
+	}
+}
+
+// TestExplainAccountMergeMissingDestination proves the deepening survives a
+// structurally broken merge operation: with no destination in the body the
+// guidance must still fire, falling back to a generic destination label
+// rather than panicking or dropping the diagnosis.
+func TestExplainAccountMergeMissingDestination(t *testing.T) {
+	t.Parallel()
+
+	const source = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
+	sourceID := mustAccountID(t, source)
+	env := &xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: sourceID.ToMuxedAccount(),
+				Fee:           xdr.Uint32(100),
+				SeqNum:        xdr.SequenceNumber(5),
+				Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+				Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+				Operations: []xdr.Operation{{Body: xdr.OperationBody{
+					Type: xdr.OperationTypeAccountMerge,
+				}}},
+			},
+		},
+	}
+
+	got, err := lens.ExplainPair(
+		&lens.Value{Type: "TransactionEnvelope", Raw: env},
+		accountMergeResult(t, xdr.AccountMergeResultCodeAccountMergeDestFull),
+	)
+	if err != nil {
+		t.Fatalf("ExplainPair() error = %v", err)
+	}
+	if len(got.Operations) != 1 || got.Operations[0].Result == nil {
+		t.Fatalf("want one operation with a result, got %d operations", len(got.Operations))
+	}
+	reason := *got.Operations[0].Result
+	if !strings.Contains(reason.Summary, "Destination the destination") {
+		t.Errorf("Summary = %q, want the generic destination label", reason.Summary)
+	}
+	if !strings.Contains(reason.Hint, "lumen buying liabilities") {
+		t.Errorf("Hint = %q, want the dest_full guidance", reason.Hint)
+	}
+}
+
+// accountMergeEnvelope builds a minimal v1 envelope carrying one AccountMerge
+// operation toward dest.
+func accountMergeEnvelope(t *testing.T, dest string) *lens.Value {
+	t.Helper()
+	const source = "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6"
+	destID := mustAccountID(t, dest)
+	destination := destID.ToMuxedAccount()
+	sourceID := mustAccountID(t, source)
+	env := &xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: sourceID.ToMuxedAccount(),
+				Fee:           xdr.Uint32(100),
+				SeqNum:        xdr.SequenceNumber(5),
+				Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
+				Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},
+				Operations: []xdr.Operation{{Body: xdr.OperationBody{
+					Type:        xdr.OperationTypeAccountMerge,
+					Destination: &destination,
+				}}},
+			},
+		},
+	}
+	return &lens.Value{Type: "TransactionEnvelope", Raw: env}
+}
+
+// accountMergeResult builds a transaction result whose single operation
+// failed with the given AccountMerge result code.
+func accountMergeResult(t *testing.T, code xdr.AccountMergeResultCode) *lens.Value {
+	t.Helper()
+	opResults := []xdr.OperationResult{{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypeAccountMerge,
+			AccountMergeResult: &xdr.AccountMergeResult{
+				Code: code,
+			},
+		},
+	}}
+	res := &xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxFailed,
+			Results: &opResults,
+		},
+	}
+	return &lens.Value{Type: "TransactionResult", Raw: res}
 }
