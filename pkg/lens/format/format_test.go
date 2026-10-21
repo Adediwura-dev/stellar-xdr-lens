@@ -483,14 +483,24 @@ func TestMermaidFormatter(t *testing.T) {
 		t.Errorf("Mermaid fallback does not render node structure:\n%s", assetBuf.String())
 	}
 
-	// Test fallback for non-envelope type with children
+	// Test transaction result with operations
 	resVal := loadValue(t, "tx_failed.res")
 	var resBuf bytes.Buffer
 	if err := f.Format(&resBuf, resVal); err != nil {
 		t.Fatalf("MermaidFormatter.Format(res) error = %v", err)
 	}
-	if !strings.Contains(resBuf.String(), "TransactionResult") {
-		t.Errorf("Mermaid fallback does not render TransactionResult:\n%s", resBuf.String())
+	if !strings.Contains(resBuf.String(), "op_0") {
+		t.Errorf("Mermaid output missing op_0:\n%s", resBuf.String())
+	}
+
+	// Test fallback for non-transaction struct with children
+	hdrVal := loadValue(t, "ledger_header")
+	var hdrBuf bytes.Buffer
+	if err := f.Format(&hdrBuf, hdrVal); err != nil {
+		t.Fatalf("MermaidFormatter.Format(ledger_header) error = %v", err)
+	}
+	if !strings.Contains(hdrBuf.String(), "LedgerHeader") || !strings.Contains(hdrBuf.String(), "root --> child_") {
+		t.Errorf("Mermaid fallback does not render node children:\n%s", hdrBuf.String())
 	}
 
 	// Test nil value handling
