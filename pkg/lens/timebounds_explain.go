@@ -154,6 +154,110 @@ func formatTimeStr(unixTime int64) string {
 	return time.Unix(unixTime, 0).UTC().Format(time.RFC3339)
 }
 
+// PreconditionExpiryResult reports the verification status of transaction preconditions
+// (TimeBounds and LedgerBounds) evaluated against a reference time.
+type PreconditionExpiryResult struct {
+	// Valid is true when both TimeBounds and LedgerBounds are currently satisfied.
+	Valid bool `json:"valid"`
+	// Expired is true if the maximum time or ledger bound has already passed.
+	Expired bool `json:"expired"`
+	// NotYetValid is true if the minimum time or ledger bound is in the future.
+	NotYetValid bool `json:"notYetValid"`
+	// ReferenceTime is the UTC timestamp used for the check.
+	ReferenceTime time.Time `json:"referenceTime"`
+	// Warning carries a prominent warning message when the window is expired or not yet valid.
+	Warning string `json:"warning,omitempty"`
+	// Details contains human-readable bullet points explaining the bounds evaluation.
+	Details []string `json:"details,omitempty"`
+}
+
+// VerifyPreconditionExpiry checks whether transaction preconditions have expired or are not yet valid
+// relative to refTime. If refTime is zero, the current UTC time is used.
+func VerifyPreconditionExpiry(env *xdr.TransactionEnvelope, refTime time.Time) *PreconditionExpiryResult {
+	if env == nil {
+		return nil
+	}
+	if refTime.IsZero() {
+		refTime = time.Now().UTC()
+	} else {
+		refTime = refTime.UTC()
+	}
+
+	result := &PreconditionExpiryResult{
+		Valid:         true,
+		ReferenceTime: refTime,
+		Details:       make([]string, 0),
+	}
+
+	// 1. Evaluate TimeBounds
+	tb := env.TimeBounds()
+	if tb != nil {
+		minTime := int64(tb.MinTime)
+		maxTime := int64(tb.MaxTime)
+		refUnix := refTime.Unix()
+
+		if maxTime > 0 && refUnix > maxTime {
+			result.Expired = true
+			result.Valid = false
+			diff := time.Duration(refUnix-maxTime) * time.Second
+			result.Details = append(result.Details, fmt.Sprintf("TimeBounds expired: maxTime %s passed %s ago", formatTimeStr(maxTime), diff))
+		}
+		if minTime > 0 && refUnix < minTime {
+			result.NotYetValid = true
+			result.Valid = false
+			diff := time.Duration(minTime-refUnix) * time.Second
+			result.Details = append(result.Details, fmt.Sprintf("TimeBounds not yet valid: minTime %s is in future (starts in %s)", formatTimeStr(minTime), diff))
+		}
+		if (maxTime == 0 || refUnix <= maxTime) && (minTime == 0 || refUnix >= minTime) && (minTime > 0 || maxTime > 0) {
+			result.Details = append(result.Details, fmt.Sprintf("TimeBounds satisfied: valid window [%s .. %s]", formatTimeStr(minTime), formatTimeStr(maxTime)))
+		}
+	}
+
+	// 2. Evaluate LedgerBounds
+	lb := env.LedgerBounds()
+	if lb != nil && (lb.MinLedger != 0 || lb.MaxLedger != 0) {
+		// Estimate current ledger seq relative to anchor
+		estLedger := int64(ttlReferenceLedgerSeq) + int64(refTime.Sub(ttlReferenceCloseTime)/LedgerCloseInterval)
+		if estLedger < 1 {
+			estLedger = 1
+		}
+
+		if lb.MaxLedger > 0 && estLedger > int64(lb.MaxLedger) {
+			result.Expired = true
+			result.Valid = false
+			result.Details = append(result.Details, fmt.Sprintf("LedgerBounds expired: maxLedger %d passed (estimated ledger: %d)", lb.MaxLedger, estLedger))
+		}
+		if lb.MinLedger > 0 && estLedger < int64(lb.MinLedger) {
+			result.NotYetValid = true
+			result.Valid = false
+			result.Details = append(result.Details, fmt.Sprintf("LedgerBounds not yet valid: minLedger %d is in future (estimated ledger: %d)", lb.MinLedger, estLedger))
+		}
+		if (lb.MaxLedger == 0 || estLedger <= int64(lb.MaxLedger)) && (lb.MinLedger == 0 || estLedger >= int64(lb.MinLedger)) {
+			result.Details = append(result.Details, fmt.Sprintf("LedgerBounds satisfied: valid window [%d .. %d] (estimated ledger: %d)", lb.MinLedger, lb.MaxLedger, estLedger))
+		}
+	}
+
+	if result.Expired {
+		result.Warning = "Transaction window has EXPIRED and will be rejected by validators (tx_too_late)"
+	} else if result.NotYetValid {
+		result.Warning = "Transaction window is NOT YET VALID and will be rejected by validators (tx_too_early)"
+	}
+
+	return result
+}
+
+// CheckPreconditionExpiry checks preconditions of a Value (must be TransactionEnvelope).
+func CheckPreconditionExpiry(v *Value, refTime time.Time) (*PreconditionExpiryResult, error) {
+	if v == nil {
+		return nil, fmt.Errorf("%w: nil value", ErrInvalidArgument)
+	}
+	env, ok := v.Raw.(*xdr.TransactionEnvelope)
+	if !ok {
+		return nil, fmt.Errorf("%w: value is %s, want TransactionEnvelope", ErrInvalidArgument, v.Type)
+	}
+	return VerifyPreconditionExpiry(env, refTime), nil
+}
+
 // init registers the diagnosis function with the lens framework.
 func init() {
 	_ = TimeboundFailure{}

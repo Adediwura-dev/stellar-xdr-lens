@@ -278,6 +278,15 @@ func TestExplainCommand(t *testing.T) {
 				"invoke_host_function_trapped",
 			},
 		},
+		{
+			name: "check-expiry flag evaluates preconditions",
+			args: []string{
+				"explain", fixture(t, "tx_success.env"),
+				"--check-expiry",
+				"--reference-time", "2026-10-21T12:00:00Z",
+			},
+			wantContain: []string{"Preconditions"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -945,6 +954,26 @@ func TestDecodeNewFormatsAndCommands(t *testing.T) {
 		}
 		if !strings.Contains(stdout, "TransactionEnvelope") {
 			t.Errorf("unexpected csv output: %s", stdout)
+		}
+	})
+
+	t.Run("decode --format html", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "html", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format html: %v", err)
+		}
+		if !strings.Contains(stdout, "<!DOCTYPE html>") {
+			t.Errorf("unexpected html output: %s", stdout)
+		}
+	})
+
+	t.Run("decode --format mermaid", func(t *testing.T) {
+		stdout, _, err := run(t, "", "decode", "--format", "mermaid", fixturePayload)
+		if err != nil {
+			t.Fatalf("decode --format mermaid: %v", err)
+		}
+		if !strings.Contains(stdout, "graph TD") {
+			t.Errorf("unexpected mermaid output: %s", stdout)
 		}
 	})
 

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -24,7 +26,9 @@ func newExplainCmd(g *globalFlags, stdout io.Writer, stdin io.Reader) *cobra.Com
 		verbose    bool
 		failOnErr  bool
 		isolate    bool
-		resources  bool
+		resources   bool
+		checkExpiry bool
+		refTimeStr  string
 	)
 
 	cmd := &cobra.Command{
@@ -110,6 +114,35 @@ lumen buying liabilities behind dest_full.`,
 				}
 			}
 
+			if checkExpiry {
+				var refTime time.Time
+				if refTimeStr != "" {
+					if t, err := time.Parse(time.RFC3339, refTimeStr); err == nil {
+						refTime = t
+					} else if t, err := time.Parse("2006-01-02T15:04:05", refTimeStr); err == nil {
+						refTime = t
+					} else if t, err := time.Parse("2006-01-02", refTimeStr); err == nil {
+						refTime = t
+					} else if sec, err := strconv.ParseInt(refTimeStr, 10, 64); err == nil {
+						refTime = time.Unix(sec, 0)
+					} else {
+						return fmt.Errorf("parsing --reference-time: invalid timestamp %q", refTimeStr)
+					}
+				} else {
+					refTime = time.Now().UTC()
+				}
+
+				var envVal *lens.Value
+				if primary.Type == "TransactionEnvelope" {
+					envVal = primary
+				}
+				if envVal != nil {
+					if expiry, err := lens.CheckPreconditionExpiry(envVal, refTime); err == nil && expiry != nil {
+						summary.Expiry = expiry
+					}
+				}
+			}
+
 			if asMarkdown {
 				if err := format.NewMarkdownFormatter().FormatSummary(stdout, summary); err != nil {
 					return err
@@ -117,6 +150,17 @@ lumen buying liabilities behind dest_full.`,
 				if breakdown != nil {
 					if _, err := fmt.Fprintf(stdout, "\n## Soroban Resources\n\n```\n%s```\n", breakdown.String()); err != nil {
 						return fmt.Errorf("writing resource breakdown: %w", err)
+					}
+				}
+				if checkExpiry && summary.Expiry != nil {
+					fmt.Fprintf(stdout, "\n## Preconditions Expiry\n\n")
+					if summary.Expiry.Warning != "" {
+						fmt.Fprintf(stdout, "> **WARNING:** %s\n\n", summary.Expiry.Warning)
+					} else {
+						fmt.Fprintf(stdout, "> **Preconditions Valid** as of %s\n\n", summary.Expiry.ReferenceTime.Format(time.RFC3339))
+					}
+					for _, d := range summary.Expiry.Details {
+						fmt.Fprintf(stdout, "- %s\n", d)
 					}
 				}
 				return nil
@@ -151,6 +195,21 @@ lumen buying liabilities behind dest_full.`,
 				if breakdown != nil {
 					if _, err := fmt.Fprintf(stdout, "\n%s", breakdown.String()); err != nil {
 						return fmt.Errorf("writing resource breakdown: %w", err)
+					}
+				}
+
+				if checkExpiry && summary.Expiry != nil {
+					fmt.Fprintln(stdout)
+					if summary.Expiry.Warning != "" {
+						fmt.Fprintf(stdout, "WARNING: %s\n", summary.Expiry.Warning)
+						for _, d := range summary.Expiry.Details {
+							fmt.Fprintf(stdout, "  • %s\n", d)
+						}
+					} else {
+						fmt.Fprintf(stdout, "Preconditions verified: valid as of %s\n", summary.Expiry.ReferenceTime.Format(time.RFC3339))
+						for _, d := range summary.Expiry.Details {
+							fmt.Fprintf(stdout, "  • %s\n", d)
+						}
 					}
 				}
 
@@ -223,6 +282,10 @@ lumen buying liabilities behind dest_full.`,
 		"exit with a non-zero status when the transaction failed")
 	cmd.Flags().BoolVar(&resources, "resources", false,
 		"add a Soroban resource and fee breakdown compared with protocol limits")
+	cmd.Flags().BoolVar(&checkExpiry, "check-expiry", false,
+		"verify transaction precondition expiration (TimeBounds and LedgerBounds)")
+	cmd.Flags().StringVar(&refTimeStr, "reference-time", "",
+		"optional reference timestamp (RFC 3339 or Unix seconds) for --check-expiry")
 
 	return cmd
 }

@@ -58,9 +58,10 @@ var NoColor = Palette{}
 // ShouldColor reports whether colourised output is appropriate for w.
 //
 // Colour is suppressed when the writer is not a terminal (so pipes and CI
-// logs stay clean) and when NO_COLOR is set, per https://no-color.org.
+// logs stay clean), when NO_COLOR is non-empty (per https://no-color.org),
+// or when TERM is "dumb".
 func ShouldColor(w io.Writer) bool {
-	if _, set := os.LookupEnv("NO_COLOR"); set {
+	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
 	if os.Getenv("TERM") == "dumb" {

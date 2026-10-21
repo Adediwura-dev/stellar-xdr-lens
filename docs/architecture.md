@@ -125,6 +125,8 @@ pkg/lens/              the library; this is the reusable surface
     txrep.go           SEP-0011 human-readable TxRep format
     csv.go             flat CSV export for batch ledger envelopes
     markdown.go        GitHub-flavored Markdown transaction reports
+    html.go            self-contained offline HTML reports
+    mermaid.go         Mermaid flowchart (graph TD) transaction visualization
     linediff.go        shared line alignment for unified and side-by-side diffs
     unified.go         standard unified diff for CI review comments
     json_patch.go      RFC 6902 JSON Patch output
@@ -761,7 +763,8 @@ are `KEY`, `TYPE`, `STR`, `NUM`, `NOTE`, `DIM`, `ADD`, `REMOVE`, and `CHANGE`;
 set a role variable to an empty value to disable that colour. Values contain
 only semicolon-separated SGR integers from 0 to 255, without escape prefixes.
 The palette helper honours `--color`, the
-[`NO_COLOR`](https://no-color.org) convention, and whether the writer is a
+[`NO_COLOR`](https://no-color.org) convention (suppressing color whenever `NO_COLOR != ""`),
+disables ANSI styling when `TERM=dumb`, and checks whether the writer is a
 terminal. Invalid theme configuration is reported as an error. Never write
 escape sequences directly.
 
@@ -1263,6 +1266,28 @@ makes no network calls and does not use the environment or clock.
 
 The CLI exposes paired transaction reports as `lens explain --markdown`; see
 the [README](../README.md#lens-explain--why-did-this-fail) for usage.
+
+## HTML standalone reports (`pkg/lens/format/html.go`)
+
+`HTMLFormatter` generates a self-contained, CSS-styled HTML page displaying the decoded Node tree and explain outcomes.
+- Embeds all styles inline with zero external network assets or CDN dependencies, adhering to offline-first principles.
+- Formats both transaction summaries (headline, outcome badge, operations table, preconditions) and complete hierarchical node trees.
+- Reachable from the CLI as `lens decode --format html`.
+
+## Mermaid flowchart formatter (`pkg/lens/format/mermaid.go`)
+
+`MermaidFormatter` converts transaction operations and participant accounts into Mermaid graph definitions (`graph TD`).
+- Renders source accounts, fee-bump wrappers, and directed arrows indicating operation details, asset transfers, or Soroban contract calls.
+- Provides fallback rendering of node hierarchies for general XDR types.
+- Reachable from the CLI as `lens decode --format mermaid`.
+
+## Precondition Expiry Verification (`pkg/lens/timebounds_explain.go`)
+
+`VerifyPreconditionExpiry` and `CheckPreconditionExpiry` verify transaction preconditions (`TimeBounds` and `LedgerBounds`) against a reference timestamp.
+- Evaluates whether the transaction window is currently valid, not yet valid (`tx_too_early`), or expired (`tx_too_late`).
+- Supports an optional reference time (RFC 3339 or Unix timestamp) defaulting to UTC now.
+- Prominently warns when bounds have elapsed or remain inactive.
+- Reachable from the CLI as `lens explain --check-expiry [--reference-time <timestamp>]`.
 
 ## Interactive Terminal Tree Explorer (`internal/cli/tui_tree.go`)
 

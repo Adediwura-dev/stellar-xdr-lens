@@ -37,6 +37,8 @@ type Summary struct {
 	Memo        string   `json:"memo,omitempty"`
 	Preconds    []string `json:"preconditions,omitempty"`
 	SignatureCt int      `json:"signatureCount,omitempty"`
+	// Expiry carries precondition expiry analysis when requested.
+	Expiry *PreconditionExpiryResult `json:"expiry,omitempty"`
 	// Operations describes each operation, with its outcome when a result
 	// was supplied.
 	Operations []OpSummary `json:"operations,omitempty"`
