@@ -84,7 +84,7 @@ Beyond that, ordinary idiomatic Go: small interfaces, errors wrapped with `%w`,
 
 Reflection is confined to `pkg/lens/node.go` by design. If you find yourself
 needing `reflect` elsewhere, that is a strong signal the change belongs in the
-node walker or an enricher instead.
+node walker or an enricher instead. 
 
 ### Tests
 
