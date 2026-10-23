@@ -13,6 +13,7 @@ import (
 // DiffFormatter renders a lens.DiffResult.
 type DiffFormatter struct {
 	palette Palette
+	summary bool
 }
 
 // DiffOption configures a DiffFormatter.
@@ -21,6 +22,11 @@ type DiffOption func(*DiffFormatter)
 // WithDiffPalette sets the colour palette.
 func WithDiffPalette(p Palette) DiffOption {
 	return func(d *DiffFormatter) { d.palette = p }
+}
+
+// WithSummary enables ASCII summary table output.
+func WithSummary(enabled bool) DiffOption {
+	return func(d *DiffFormatter) { d.summary = enabled }
 }
 
 // NewDiffFormatter returns a DiffFormatter.
