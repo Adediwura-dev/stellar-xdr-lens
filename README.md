@@ -14,7 +14,7 @@ around `opINNER` wrapped around `InvokeHostFunctionResultCodeInvokeHostFunctionT
 Working out *which operation* failed, *what it was trying to do*, and *what to
 do about it* means decoding two separate blobs and correlating them by hand.
 
-`lens` does that correlation for you:
+`lens` does that correlation for you: 
 
 ```console
 $ lens explain "$ENVELOPE" --result "$RESULT"
