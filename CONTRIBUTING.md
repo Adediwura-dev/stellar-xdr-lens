@@ -63,7 +63,7 @@ recognise it, the way `AccountId` already renders as a strkey address.
 
 `pkg/lens/reason.go` maps all 208 protocol result codes to plain English. If an
 explanation is vague, wrong, or missing the advice you needed when you hit it,
-improving it is a genuinely valuable change.
+improving it is a genuinely valuable change. 
 
 Two rules, both enforced by tests:
 
